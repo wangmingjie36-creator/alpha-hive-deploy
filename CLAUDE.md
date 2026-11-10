@@ -167,6 +167,8 @@ v0.45.727 起，投研人设、三级任务模式（闪电 / 标准 / 深度）�
 ### 候选机会综合分（Opportunity Score）
 `Opportunity Score = Σ wᵢ × 维度分`，五个维度：signal / catalyst / sentiment / odds / risk_adj。**`config.EVALUATION_WEIGHTS` 是权重的「配置意图」唯一真相**；判断「生产实际用了哪套权重」看 `swarm.dimension_weights`，不看 config。v0.45.172 起权重已改——用户看过完整证据强度后的主动决定，**不要读成「已验证有效」**；v0.45.176 断开 `adapted_weights` 旁路后 config 才真是唯一真相；蜂后 ML 反馈 v0.45.537 已停用，**勿接回，也勿把 `ML_FEEDBACK_CONFIG` 的 enable_* 改成 False**（共振加成检验重放旧记录靠它们）。沿革、扫描期观测点、世代边界 → `.claude/rules/scoring-weights.md`
 
+**⚠️ 评分冻结期（2026-11-09 起，到 IC 重跑出结果）**：`final_score` 上游、作废不为 0 条的设计改动**不进 main**，记进 `experiments/scoring_freeze_queue.md`；真 bug 须用户点头后登 `ic_rerun_readiness._FREEZE_EXCEPTIONS`。守卫 `TestScoringFreeze`
+
 说明：
 - Signal: 披露与基本面共振强度
 - Catalyst: 未来 1~8 周可触发事件清晰度

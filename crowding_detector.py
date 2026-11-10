@@ -4,7 +4,6 @@
 """
 
 import logging as _logging
-import math as _math
 from typing import Dict, Tuple, List
 
 _log = _logging.getLogger("alpha_hive.crowding_detector")
@@ -487,57 +486,6 @@ class CrowdingDetector:
     # v0.45.550：原 save_to_json（写 cwd 下 crowding_<T>.json）全仓零调用者、文件零读者，已删。
 
 
-def get_crowding_metrics(ticker: str, board=None) -> Dict:
-    """
-    获取指定标的的真实拥挤度指标
-
-    Args:
-        ticker: 股票代码
-        board: PheromoneBoard 实例（可选）
-
-    Returns:
-        真实拥挤度指标字典
-    """
-    from real_data_sources import get_real_crowding_metrics
-
-    # 获取 yfinance 基础数据
-    try:
-        import yfinance as yf
-        import yf_daily
-        from data_pipeline import _drop_forming_bar as _dfb
-        t = yf.Ticker(ticker)
-        # v0.45.652：经唯一入口取（先去公司行动空行，再过 v0.29.4 盘中护栏）；末行空行 = 今天那根缺了 ⇒ 走下面的取不到分支
-        hist, _last_blank = yf_daily.history(t, source="crowding_cli", period="1mo")
-        if _last_blank:
-            raise ValueError("末行是公司行动空行（今天那根 K 线缺了）")
-        hist = _dfb(hist)
-        stock_data = {
-            "price": float(hist["Close"].iloc[-1]) if not hist.empty else 0.0,  # v0.40.1: 0 哨兵替代假价 100（下游 crowding 不用 price）
-            "momentum_5d": (float(hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100) if len(hist) >= 5 else 0.0,
-            "avg_volume": int(hist["Volume"].mean()) if not hist.empty else 0,
-            "volume_ratio": float(hist["Volume"].iloc[-1] / hist["Volume"].mean()) if not hist.empty and hist["Volume"].mean() > 0 else 1.0,
-            "volatility_20d": 0.0,
-        }
-        # 安全计算 volatility（NaN/Inf 守卫，方案16）
-        if len(hist) >= 20:
-            _returns = hist["Close"].pct_change().dropna()
-            if len(_returns) >= 2:
-                _vol = float(_returns.std() * (252 ** 0.5) * 100)
-                if not (_math.isnan(_vol) or _math.isinf(_vol)):
-                    stock_data["volatility_20d"] = _vol
-    except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as exc:
-        # v0.40.1: 契约测试抓到的第 6 处假价占位——改 0.0 哨兵（下游 crowding 不用 price）
-        _log.debug("yfinance data fetch failed for %s: %s", ticker, exc)
-        stock_data = {"price": 0.0, "momentum_5d": 0.0, "avg_volume": 0, "volume_ratio": 1.0, "volatility_20d": 0.0}
-
-    return get_real_crowding_metrics(ticker, stock_data, board)
-
-
-# 使用示例
-if __name__ == "__main__":
-    metrics = get_crowding_metrics("NVDA")
-    detector = CrowdingDetector("NVDA")
-    score, components = detector.calculate_crowding_score(metrics)
-    dq = metrics.get("data_quality", {})
-    print(f"NVDA 拥挤度: {score:.1f}/100")
-    print(f"数据质量: {dq}")
+# v0.45.756：原 `get_crowding_metrics`（自取 yfinance 日线 → `get_real_crowding_metrics` 的示例入口）与本文件 `__main__` 示例已退役——
+# 生产零调用（Scout / Guard 直接调 `real_data_sources.get_real_crowding_metrics`，喂的是蜂群取好的 stock），且取数失败时
+# 把 momentum_5d / volatility_20d 填 0.0、volume_ratio 填 1.0、avg_volume 填 0（「取不到」冒充「持平 / 正常量 / 零波动」）。

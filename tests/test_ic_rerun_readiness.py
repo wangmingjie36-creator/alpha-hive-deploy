@@ -15,6 +15,7 @@ v0.44.1~0.44.3 修了 ML 预期收益的看多偏斜并把 RivalBee 三个硬编
 `test_distribution_invariants.py::TestGuardsHaveTeeth` 同一思路。
 """
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -1557,3 +1558,130 @@ class TestCorrectionEntriesKeepTheBoundaryCheckable:
         assert self._correction_problems(h, {"vB": "vA"}) == []         # 正确登记
         assert self._correction_problems(h, {"vA": "vB"}) != []         # 方向反了
         assert self._correction_problems(h, {"vB": "vZ"}) != []         # 指向不存在的版本
+
+
+class TestScoringFreeze:
+    """v0.45.757：评分冻结期——冻结期内 `_COHORT_HISTORY` 不许未经登记开新日期。
+
+    为什么要测而不只写规则：9 月以来没有一个世代活过 3 周、闸门要约 25 周；「下次开新世代前先问」
+    只写进文档，到下一个 session 就没人记得。这里是「谁会红？」的答案。
+    """
+
+    SINCE = "2026-11-09"
+
+    def _freeze(self, **kw):
+        f = {"since": self.SINCE, "since_version": "vF", "lifted": ""}
+        f.update(kw)
+        return f
+
+    def _hist(self, *extra):
+        return [("2026-10-19", "vA", "r"), (self.SINCE, "vF", "r"), *extra]
+
+    # ── 真表 ──
+    def test_live_history_respects_freeze(self):
+        bad = rr.scoring_freeze_violations()
+        assert not bad, (
+            "冻结期内开了新世代日期：\n  " + "\n  ".join(bad) + "\n"
+            "设计类改动进 experiments/scoring_freeze_queue.md 等解冻；能证明作废 0 条就并进冻结起点当日；"
+            "真 bug 须用户点头后在 rr._FREEZE_EXCEPTIONS 登记（approved / kind / why / cost）。")
+
+    def test_freeze_anchor_is_a_real_boundary(self):
+        f = rr._SCORING_FREEZE
+        dates = {v: d for d, v, _ in rr._COHORT_HISTORY}
+        assert f["since_version"] in dates, "冻结锚点版本不在 _COHORT_HISTORY 里"
+        assert dates[f["since_version"]] == f["since"], "冻结起点与锚点条目日期不一致"
+        assert isinstance(f["lifted"], str)
+        if f["lifted"]:
+            assert re.match(r"^\d{4}-\d{2}-\d{2} \S", f["lifted"]), \
+                "解冻必须写成「YYYY-MM-DD 用户原话」"
+
+    def test_exceptions_are_complete_and_not_stale(self):
+        bad = rr.freeze_exception_problems()
+        assert not bad, "_FREEZE_EXCEPTIONS 登记有问题：\n  " + "\n  ".join(bad)
+
+    def test_queue_file_exists_while_frozen(self):
+        q = Path(rr.__file__).resolve().parent / "experiments" / "scoring_freeze_queue.md"
+        if not rr._SCORING_FREEZE["lifted"]:
+            assert q.is_file(), "冻结期内必须有队列文件承载被推迟的设计改动"
+
+    # ── 正对照：守卫有牙 ──
+    def test_new_date_without_exception_is_flagged(self):
+        h = self._hist(("2026-11-20", "vNew", "r"))
+        bad = rr.scoring_freeze_violations(h, self._freeze(), {}, {})
+        assert len(bad) == 1 and "vNew" in bad[0]
+
+    def test_registered_exception_passes(self):
+        h = self._hist(("2026-11-20", "vNew", "r"))
+        assert rr.scoring_freeze_violations(h, self._freeze(), {"vNew": {}}, {}) == []
+
+    def test_same_day_merge_passes(self):
+        h = self._hist((self.SINCE, "vMerged", "作废 0 条"))
+        assert rr.scoring_freeze_violations(h, self._freeze(), {}, {}) == []
+
+    def test_correction_of_anchor_passes_but_not_of_older_entry(self):
+        h = self._hist(("2026-11-10", "vFix", "更正 vF"))
+        assert rr.scoring_freeze_violations(h, self._freeze(), {}, {"vFix": "vF"}) == []
+        assert len(rr.scoring_freeze_violations(h, self._freeze(), {}, {"vFix": "vA"})) == 1
+
+    def test_lifted_freeze_allows_new_dates(self):
+        h = self._hist(("2026-11-20", "vNew", "r"))
+        f = self._freeze(lifted="2027-05-10 用户：解冻")
+        assert rr.scoring_freeze_violations(h, f, {}, {}) == []
+
+    # ── v0.45.758：起点会因例外 / 更正挪后——挪后起点上的同日并入与更正不许误报 ──
+    def test_merge_onto_corrected_anchor_passes(self):
+        h = self._hist(("2026-11-10", "vFix", "更正 vF"), ("2026-11-10", "vZero", "作废 0 条"))
+        assert rr.scoring_freeze_violations(h, self._freeze(), {}, {"vFix": "vF"}) == []
+
+    def test_merge_onto_exception_date_passes(self):
+        h = self._hist(("2026-12-01", "vBug", "r"), ("2026-12-01", "vZero", "作废 0 条"))
+        assert rr.scoring_freeze_violations(h, self._freeze(), {"vBug": {}}, {}) == []
+
+    def test_correction_of_exception_passes(self):
+        h = self._hist(("2026-12-01", "vBug", "r"), ("2026-12-02", "vBugFix", "更正 vBug"))
+        assert rr.scoring_freeze_violations(h, self._freeze(), {"vBug": {}}, {"vBugFix": "vBug"}) == []
+
+    def test_moved_start_does_not_open_the_gate_for_later_dates(self):
+        """对照：例外开出 12-01 之后，12-05 的新日期照样红（集合只收例外 / 更正的日期，不是「12-01 之后全放」）。"""
+        h = self._hist(("2026-12-01", "vBug", "r"), ("2026-12-05", "vNew", "r"))
+        bad = rr.scoring_freeze_violations(h, self._freeze(), {"vBug": {}}, {})
+        assert len(bad) == 1 and "vNew" in bad[0]
+
+    def test_out_of_order_entry_is_flagged_even_when_lifted(self):
+        """判据前提「表按日期升序」此前没人守：末条早于前一条 ⇒ cohort_start() 往回退。解冻不豁免这一条。"""
+        h = self._hist(("2026-11-01", "vLate", "r"))
+        for f in (self._freeze(), self._freeze(lifted="2027-05-10 用户：解冻")):
+            bad = rr.scoring_freeze_violations(h, f, {}, {})
+            assert len(bad) == 1 and "vLate" in bad[0] and "升序" in bad[0]
+
+    def test_correction_must_target_the_previous_start(self):
+        """更正只为「上一个起点」上的条目挪日期放行；更正更早世代的条目来开新日期仍是开新世代。"""
+        h = self._hist((self.SINCE, "vMerged", "作废 0 条"), ("2026-11-12", "vFix", "更正"))
+        assert rr.scoring_freeze_violations(h, self._freeze(), {}, {"vFix": "vMerged"}) == []
+        assert len(rr.scoring_freeze_violations(h, self._freeze(), {}, {"vFix": "vA"})) == 1
+
+    # ── 例外登记校验的正对照（真表为空时这把尺子一次都没量过东西） ──
+    _GOOD = {"approved": "2026-12-01 用户：可以重置", "kind": "data_bug",
+             "why": "当前写进归档的值是错的", "cost": "3/25 → 0/25，到期日 2027-05-05 → 2027-05-26"}
+
+    def _exc_hist(self):
+        return self._hist(("2026-12-01", "vBug", "r"))
+
+    def test_complete_exception_is_clean(self):
+        assert rr.freeze_exception_problems({"vBug": dict(self._GOOD)}, self._exc_hist(), self._freeze()) == []
+
+    @pytest.mark.parametrize("field", ["approved", "kind", "why", "cost"])
+    def test_missing_field_is_flagged(self, field):
+        rec = dict(self._GOOD); rec[field] = "  "
+        bad = rr.freeze_exception_problems({"vBug": rec}, self._exc_hist(), self._freeze())
+        assert len(bad) == 1 and field in bad[0]
+
+    @pytest.mark.parametrize("field,value", [
+        ("kind", "design"), ("approved", "用户说可以"), ("cost", "重置")])
+    def test_malformed_field_is_flagged(self, field, value):
+        rec = dict(self._GOOD); rec[field] = value
+        assert len(rr.freeze_exception_problems({"vBug": rec}, self._exc_hist(), self._freeze())) == 1
+
+    def test_stale_or_unneeded_exception_is_flagged(self):
+        assert rr.freeze_exception_problems({"vGone": dict(self._GOOD)}, self._exc_hist(), self._freeze())
+        assert rr.freeze_exception_problems({"vF": dict(self._GOOD)}, self._exc_hist(), self._freeze())

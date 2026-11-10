@@ -721,7 +721,6 @@ POLICY = {
     ("alpha_hive_mcp.py", "alphahive_get_price_history._fetch"): "ignore",          # 蜡烛自带日期
     ("swarm_agents/cache.py", "check_ticker_validity"): "ignore",                    # 只问有没有成交 / 价格是否极低
     ("vix_term_structure.py", "_get_spot_vix"): "refuse",
-    ("crowding_detector.py", "get_crowding_metrics"): "refuse",
     ("alphabot/beta_long.py", "_fetch_closes"): "ignore",                          # 按日期对齐、只用 as_of 以前的收益；缺最近一根只是样本少一天
     ("alphabot/wheel_prices.py", "_fetch"): "ignore",                              # 只展示的统计；缺最近一根只是少一天，按已有收盘算
     ("sell_put_wheel.py", "_default_rv"): "refuse",                                # 30 日 RV：最近一场缺 ⇒ closes_lag、不算（v0.45.744；不把窗口悄悄往前挪）
