@@ -1234,8 +1234,9 @@ _COHORT_HISTORY = [
 # 冻结期内（`since` 起、`lifted` 为空时）**`_COHORT_HISTORY` 不许出现晚于 `since` 的新日期**，除非在
 # `_FREEZE_EXCEPTIONS` 登记——守卫 `tests/test_ic_rerun_readiness.py::TestScoringFreeze`。照常可做：
 #   · 不在 final_score 上游的改动（账本、Alpha Bot、展示、期权页）——根本不追加条目；
-#   · 能证明作废 0 条的上游改动——并进 `since` 当日（沿用 10-19 那批的等价判据做法），日期不变；
-#   · 同一改动的「更正」条目（推送晚于扫描、日期顺延）——`_CORRECTS` 指向的被更正条目若日期 == `since`，放行。
+#   · 能证明作废 0 条的上游改动——并进**当前世代起点**当日（沿用 10-19 那批的等价判据做法），日期不变；
+#   · 同一改动的「更正」条目（推送晚于扫描、日期顺延）——`_CORRECTS` 指向的被更正条目在上一个起点日，放行。
+#   判据直接对着重置机制：条目日期比前一条大 = 开新世代，冻结期内须有上述理由；同日 = 并入，放行（见 `scoring_freeze_violations`）。
 # 设计类改动（删通道、改权重、退役某蜂）进队列 `experiments/scoring_freeze_queue.md`，解冻后一次合入、只开一个世代。
 # 真 bug（当前数据是错的）可以例外，但**必须用户点头**并写明代价：在 `_FREEZE_EXCEPTIONS` 登一条。
 #
@@ -1261,29 +1262,64 @@ _FREEZE_EXCEPTION_KINDS = frozenset({"data_bug", "user_override"})
 
 def scoring_freeze_violations(history=None, freeze=None, exceptions=None,
                               corrects=None) -> List[str]:
-    """冻结期内未经登记就开了新日期的世代条目（空列表 = 合规）。
+    """冻结期内未经登记就开了新世代的条目（空列表 = 合规）。
 
+    直接对着闸门的重置机制判：`cohort_start()` 取末条日期 ⇒ **一条条目的日期比前一条大 = 开新世代、计数归零**；
+    与前一条同日 = 并入，不重置。冻结期内（日期晚于 `since`）每一次「日期变大」都要有理由：
+      · 已登记 `_FREEZE_EXCEPTIONS`；或
+      · 是 `_CORRECTS` 里对**上一个起点**（前一条的日期）上某条目的更正——同一改动挪日期。
+    不枚举「起点怎样挪过来」（v0.45.758 二次重写：先前的集合写法要逐种列举挪动方式，新出一种就误报）。
+    表必须按日期升序——判据的前提；乱序条目直接报（此前没有任何检查守着这一点）。
     参数全可注入，供测试喂合成历史做正对照；缺省读本模块的真表。
     """
     history = _COHORT_HISTORY if history is None else history
     freeze = _SCORING_FREEZE if freeze is None else freeze
     exceptions = _FREEZE_EXCEPTIONS if exceptions is None else exceptions
     corrects = _CORRECTS if corrects is None else corrects
-    if freeze.get("lifted"):
-        return []
-    since = freeze["since"]
-    date_of = {v: d for d, v, _ in history}
     out = []
+    date_of = {v: d for d, v, _ in history}
+    prev = None
     for d, v, _ in history:
-        if d <= since:
+        if prev is not None and d < prev:
+            out.append(f"{v}（{d}）：早于前一条 {prev}——_COHORT_HISTORY 必须按日期升序，"
+                       f"否则 cohort_start() 取末条会让边界往回退")
             continue
-        if v in exceptions:
+        opens = prev is not None and d > prev
+        if opens and d > freeze["since"] and not freeze.get("lifted"):
+            justified = v in exceptions or date_of.get(corrects.get(v)) == prev
+            if not justified:
+                out.append(f"{v}（{d}）：冻结期（{freeze['since']} 起）内开了新世代（前一起点 {prev}）——"
+                           f"既未登记 _FREEZE_EXCEPTIONS，也不是对 {prev} 条目的更正")
+        prev = d
+    return out
+
+
+def freeze_exception_problems(exceptions=None, history=None, freeze=None) -> List[str]:
+    """`_FREEZE_EXCEPTIONS` 登记不全 / 陈旧的问题（空列表 = 合规）。参数可注入，测试喂合成例外做正对照。"""
+    exceptions = _FREEZE_EXCEPTIONS if exceptions is None else exceptions
+    history = _COHORT_HISTORY if history is None else history
+    freeze = _SCORING_FREEZE if freeze is None else freeze
+    dates = {v: d for d, v, _ in history}
+    since = freeze["since"]
+    dated = re.compile(r"^\d{4}-\d{2}-\d{2} \S")
+    out = []
+    for v, rec in exceptions.items():
+        if v not in dates:
+            out.append(f"{v}：不在 _COHORT_HISTORY 里（陈旧登记）")
             continue
-        target = corrects.get(v)
-        if target is not None and date_of.get(target) == since:
-            continue   # 更正 since 当日那条：同一改动挪日期，不是新改动
-        out.append(f"{v}（{d}）：冻结期（{since} 起）内开了新世代日期，"
-                   f"既未登记 _FREEZE_EXCEPTIONS，也不是对 {since} 条目的更正")
+        if dates[v] <= since:
+            out.append(f"{v}：日期 {dates[v]} 不晚于冻结起点 {since}，用不着例外")
+        rec = rec if isinstance(rec, dict) else {}
+        missing = [k for k in ("approved", "kind", "why", "cost") if not str(rec.get(k, "")).strip()]
+        if missing:
+            out.append(f"{v}：缺 {missing}")
+            continue
+        if rec["kind"] not in _FREEZE_EXCEPTION_KINDS:
+            out.append(f"{v}：kind {rec['kind']!r} 不在 {sorted(_FREEZE_EXCEPTION_KINDS)}")
+        if not dated.match(rec["approved"]):
+            out.append(f"{v}：approved 必须是「YYYY-MM-DD 用户原话」")
+        if "→" not in rec["cost"]:
+            out.append(f"{v}：cost 要写成「X/25 → 0/25，到期日 A → B」")
     return out
 
 

@@ -1596,17 +1596,8 @@ class TestScoringFreeze:
                 "解冻必须写成「YYYY-MM-DD 用户原话」"
 
     def test_exceptions_are_complete_and_not_stale(self):
-        dates = {v: d for d, v, _ in rr._COHORT_HISTORY}
-        since = rr._SCORING_FREEZE["since"]
-        for v, rec in rr._FREEZE_EXCEPTIONS.items():
-            assert v in dates, f"例外 {v} 不在 _COHORT_HISTORY 里（陈旧登记）"
-            assert dates[v] > since, f"例外 {v} 日期不晚于冻结起点，用不着例外"
-            for k in ("approved", "kind", "why", "cost"):
-                assert str(rec.get(k, "")).strip(), f"例外 {v} 缺 {k}"
-            assert rec["kind"] in rr._FREEZE_EXCEPTION_KINDS
-            assert re.match(r"^\d{4}-\d{2}-\d{2} \S", rec["approved"]), \
-                f"例外 {v} 的 approved 必须是「YYYY-MM-DD 用户原话」"
-            assert "→" in rec["cost"], f"例外 {v} 的 cost 要写成「X/25 → 0/25，到期日 A → B」"
+        bad = rr.freeze_exception_problems()
+        assert not bad, "_FREEZE_EXCEPTIONS 登记有问题：\n  " + "\n  ".join(bad)
 
     def test_queue_file_exists_while_frozen(self):
         q = Path(rr.__file__).resolve().parent / "experiments" / "scoring_freeze_queue.md"
@@ -1636,3 +1627,61 @@ class TestScoringFreeze:
         h = self._hist(("2026-11-20", "vNew", "r"))
         f = self._freeze(lifted="2027-05-10 用户：解冻")
         assert rr.scoring_freeze_violations(h, f, {}, {}) == []
+
+    # ── v0.45.758：起点会因例外 / 更正挪后——挪后起点上的同日并入与更正不许误报 ──
+    def test_merge_onto_corrected_anchor_passes(self):
+        h = self._hist(("2026-11-10", "vFix", "更正 vF"), ("2026-11-10", "vZero", "作废 0 条"))
+        assert rr.scoring_freeze_violations(h, self._freeze(), {}, {"vFix": "vF"}) == []
+
+    def test_merge_onto_exception_date_passes(self):
+        h = self._hist(("2026-12-01", "vBug", "r"), ("2026-12-01", "vZero", "作废 0 条"))
+        assert rr.scoring_freeze_violations(h, self._freeze(), {"vBug": {}}, {}) == []
+
+    def test_correction_of_exception_passes(self):
+        h = self._hist(("2026-12-01", "vBug", "r"), ("2026-12-02", "vBugFix", "更正 vBug"))
+        assert rr.scoring_freeze_violations(h, self._freeze(), {"vBug": {}}, {"vBugFix": "vBug"}) == []
+
+    def test_moved_start_does_not_open_the_gate_for_later_dates(self):
+        """对照：例外开出 12-01 之后，12-05 的新日期照样红（集合只收例外 / 更正的日期，不是「12-01 之后全放」）。"""
+        h = self._hist(("2026-12-01", "vBug", "r"), ("2026-12-05", "vNew", "r"))
+        bad = rr.scoring_freeze_violations(h, self._freeze(), {"vBug": {}}, {})
+        assert len(bad) == 1 and "vNew" in bad[0]
+
+    def test_out_of_order_entry_is_flagged_even_when_lifted(self):
+        """判据前提「表按日期升序」此前没人守：末条早于前一条 ⇒ cohort_start() 往回退。解冻不豁免这一条。"""
+        h = self._hist(("2026-11-01", "vLate", "r"))
+        for f in (self._freeze(), self._freeze(lifted="2027-05-10 用户：解冻")):
+            bad = rr.scoring_freeze_violations(h, f, {}, {})
+            assert len(bad) == 1 and "vLate" in bad[0] and "升序" in bad[0]
+
+    def test_correction_must_target_the_previous_start(self):
+        """更正只为「上一个起点」上的条目挪日期放行；更正更早世代的条目来开新日期仍是开新世代。"""
+        h = self._hist((self.SINCE, "vMerged", "作废 0 条"), ("2026-11-12", "vFix", "更正"))
+        assert rr.scoring_freeze_violations(h, self._freeze(), {}, {"vFix": "vMerged"}) == []
+        assert len(rr.scoring_freeze_violations(h, self._freeze(), {}, {"vFix": "vA"})) == 1
+
+    # ── 例外登记校验的正对照（真表为空时这把尺子一次都没量过东西） ──
+    _GOOD = {"approved": "2026-12-01 用户：可以重置", "kind": "data_bug",
+             "why": "当前写进归档的值是错的", "cost": "3/25 → 0/25，到期日 2027-05-05 → 2027-05-26"}
+
+    def _exc_hist(self):
+        return self._hist(("2026-12-01", "vBug", "r"))
+
+    def test_complete_exception_is_clean(self):
+        assert rr.freeze_exception_problems({"vBug": dict(self._GOOD)}, self._exc_hist(), self._freeze()) == []
+
+    @pytest.mark.parametrize("field", ["approved", "kind", "why", "cost"])
+    def test_missing_field_is_flagged(self, field):
+        rec = dict(self._GOOD); rec[field] = "  "
+        bad = rr.freeze_exception_problems({"vBug": rec}, self._exc_hist(), self._freeze())
+        assert len(bad) == 1 and field in bad[0]
+
+    @pytest.mark.parametrize("field,value", [
+        ("kind", "design"), ("approved", "用户说可以"), ("cost", "重置")])
+    def test_malformed_field_is_flagged(self, field, value):
+        rec = dict(self._GOOD); rec[field] = value
+        assert len(rr.freeze_exception_problems({"vBug": rec}, self._exc_hist(), self._freeze())) == 1
+
+    def test_stale_or_unneeded_exception_is_flagged(self):
+        assert rr.freeze_exception_problems({"vGone": dict(self._GOOD)}, self._exc_hist(), self._freeze())
+        assert rr.freeze_exception_problems({"vF": dict(self._GOOD)}, self._exc_hist(), self._freeze())
