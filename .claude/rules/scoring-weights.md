@@ -51,3 +51,7 @@ paths:
 - `>= 7.5`：高优先级，进入主简报
 - `6.0 ~ 7.4`：观察名单，需补证据
 - `< 6.0`：不行动，仅归档
+
+## 评分冻结期（v0.45.757，用户 2026-11-10 定）
+
+冻结起点 2026-11-09（v0.45.750），到 IC 重跑出结果、用户解冻为止。冻结期内 `_COHORT_HISTORY` 不许出现晚于起点的新日期，除非在 `ic_rerun_readiness._FREEZE_EXCEPTIONS` 登记（用户原话 / 类型 / 理由 / 代价「X/25 → 0/25，到期日 A → B」）。照常可做：不在 `final_score` 上游的改动；能证明作废 0 条、并进 11-09 当日的改动；对 11-09 条目的日期更正。改权重、断通道、退役或新增某蜂一律进 `experiments/scoring_freeze_queue.md`，解冻后一次合入、只开一个世代。**不要为了让测试变绿去填 `lifted` 或例外**。守卫 `tests/test_ic_rerun_readiness.py::TestScoringFreeze`（含正对照）。

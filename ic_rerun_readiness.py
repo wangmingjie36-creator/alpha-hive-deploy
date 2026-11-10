@@ -1226,6 +1226,67 @@ _COHORT_HISTORY = [
      "推送若晚于 11-09 的扫描，追加更正条目把日期顺延。"),
 ]
 
+# ── 评分冻结期（v0.45.757，用户 2026-11-10 定） ────────────────────────────
+# 为什么：9 月以来没有一个世代活过 3 周（最长 10-19 → 11-09 共 21 天），闸门要攒约 25 个不重叠周
+# ⇒ 不冻结，IC 重跑实际上永远到不了。9 月那批重置多是「旧数据本身是错的」真 bug，不该冻；
+# 10 月起的重置多是可推迟的设计选择（断 GEX、关 ML 反馈、退役执行蜂），冻结挡的就是这类。
+#
+# 冻结期内（`since` 起、`lifted` 为空时）**`_COHORT_HISTORY` 不许出现晚于 `since` 的新日期**，除非在
+# `_FREEZE_EXCEPTIONS` 登记——守卫 `tests/test_ic_rerun_readiness.py::TestScoringFreeze`。照常可做：
+#   · 不在 final_score 上游的改动（账本、Alpha Bot、展示、期权页）——根本不追加条目；
+#   · 能证明作废 0 条的上游改动——并进 `since` 当日（沿用 10-19 那批的等价判据做法），日期不变；
+#   · 同一改动的「更正」条目（推送晚于扫描、日期顺延）——`_CORRECTS` 指向的被更正条目若日期 == `since`，放行。
+# 设计类改动（删通道、改权重、退役某蜂）进队列 `experiments/scoring_freeze_queue.md`，解冻后一次合入、只开一个世代。
+# 真 bug（当前数据是错的）可以例外，但**必须用户点头**并写明代价：在 `_FREEZE_EXCEPTIONS` 登一条。
+#
+# 解冻：IC 重跑出结果后，由用户决定；把 `lifted` 填成「日期 + 用户原话」——守卫随之放行（不 skip，测试仍跑、
+# 仍核 `lifted` 非空）。⚠️ 不要为了让测试变绿去填 `lifted` 或例外：那等于把冻结改成注释。
+_SCORING_FREEZE = {
+    "since": "2026-11-09",          # 冻结起点 = 当前世代起点（v0.45.750）
+    "since_version": "v0.45.750",
+    "until": "IC 重跑出结果（ic_rerun_readiness 判就绪并跑完，闸门当时估 ≈2027-05-05，缺扫描周顺延）",
+    "decided": "2026-11-10 用户：「Add the guard」（评估见 CHANGELOG 0.45.757）",
+    "lifted": "",                   # 解冻时填「YYYY-MM-DD 用户原话」
+}
+
+# 冻结期内获准开新日期的例外：version → 记录。每条必须有四个非空字段：
+#   approved  —— 「YYYY-MM-DD 用户原话」（Claude 不能替用户批）
+#   kind      —— "data_bug"（当前数据是错的）或 "user_override"（用户明知是设计改动也要现在做）
+#   why       —— 为什么不能等到解冻
+#   cost      —— 重置代价，形如「X/25 周 → 0/25，到期日 A → B」
+_FREEZE_EXCEPTIONS: Dict[str, Dict[str, str]] = {}
+
+_FREEZE_EXCEPTION_KINDS = frozenset({"data_bug", "user_override"})
+
+
+def scoring_freeze_violations(history=None, freeze=None, exceptions=None,
+                              corrects=None) -> List[str]:
+    """冻结期内未经登记就开了新日期的世代条目（空列表 = 合规）。
+
+    参数全可注入，供测试喂合成历史做正对照；缺省读本模块的真表。
+    """
+    history = _COHORT_HISTORY if history is None else history
+    freeze = _SCORING_FREEZE if freeze is None else freeze
+    exceptions = _FREEZE_EXCEPTIONS if exceptions is None else exceptions
+    corrects = _CORRECTS if corrects is None else corrects
+    if freeze.get("lifted"):
+        return []
+    since = freeze["since"]
+    date_of = {v: d for d, v, _ in history}
+    out = []
+    for d, v, _ in history:
+        if d <= since:
+            continue
+        if v in exceptions:
+            continue
+        target = corrects.get(v)
+        if target is not None and date_of.get(target) == since:
+            continue   # 更正 since 当日那条：同一改动挪日期，不是新改动
+        out.append(f"{v}（{d}）：冻结期（{since} 起）内开了新世代日期，"
+                   f"既未登记 _FREEZE_EXCEPTIONS，也不是对 {since} 条目的更正")
+    return out
+
+
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
 # key = 真实 |IC|，value = 所需不重叠周数
 _WEEKS_REQUIRED = {
