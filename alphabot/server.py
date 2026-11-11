@@ -169,6 +169,10 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         return svc.wheel()
 
     @api
+    def deep(request):
+        return svc.deep(request.path_params["ticker"], _q(request, "date"))
+
+    @api
     def compare(request):
         return svc.compare(_q(request, "date"))
 
@@ -270,6 +274,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/straddle", straddle),
         Route("/api/hedge", hedge),
         Route("/api/wheel", wheel),
+        Route("/api/deep/{ticker}", deep),
         Route("/api/compare", compare),
         Route("/api/compare/{ticker}", compare_ticker),
         Route("/api/wheel/screen", wheel_screen),

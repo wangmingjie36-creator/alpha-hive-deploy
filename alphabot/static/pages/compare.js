@@ -97,6 +97,7 @@ function drawTicker(root, d, pick) {
     h("div", {},
       h("h1", {}, `对比 · ${d.ticker}`, h("span", { class: "sub" }, d.date ? `扫描 ${d.date}` : "")),
       h("p", { class: "lede" }, h("a", { href: "#/compare" }, "← 全部标的"), " · ",
+        h("a", { href: `#/deep/${encodeURIComponent(d.ticker)}` }, "深度报告"), " · ",
         h("a", { href: `#/t/${encodeURIComponent(d.ticker)}/levels` }, "去标的页现拉"), " · ", helpLink("compare"))),
     h("div", { class: "controls" }, dateSelect(d.dates || [], d.date, pick)));
   if (!d.available) {

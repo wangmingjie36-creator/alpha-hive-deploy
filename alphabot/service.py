@@ -30,6 +30,7 @@ import sell_strike_report as R
 import tail_budget as TB
 from alphabot import beta_long as _BL
 from alphabot import chat as CH
+from alphabot import deep_report as DR
 from alphabot import hedge as HG
 from alphabot import howto as HW
 from alphabot import intraday_activity as IA
@@ -295,6 +296,8 @@ class AlphaBotService:
         # `{日期: ((mtime_ns, size), {标的: 读数})}`——文件没变就不重读（一份近 2 MB，缓存的读数只有几十 KB）
         self.compare_root = compare_root
         self._compare_cache: Dict[str, tuple] = {}
+        # 「深度」页（v0.45.760）要原始结果（读数缓存里没有各蜂的明细）：只留最近读的两天 `{日期: ((mtime_ns, size), 原始结果)}`
+        self._deep_raw: Dict[str, tuple] = {}
         # Yahoo 限流时各票「最早什么时候值得再试」（self.clock() 的时刻）：`live()` 把它折成 `retry_after_sec` 给页面
         self._yf_retry_until: Dict[str, float] = {}
         self._am_excluded: Dict[str, int] = {}      # 指数票最近一次现算丢掉的上午结算合约数（`_live_fetch` 写）
@@ -454,6 +457,7 @@ class AlphaBotService:
             "howto": HW.public_rules(),
             "wheel": {**WH.public_rules(), "screen": WS.public_rules()},
             "compare": OC.public_rules(),
+            "deep": DR.public_rules(),
             # 帮助页「程序类」里给人抄的命令：进本代码目录、用运行本服务的解释器（从 .app 打开时就是 .app 记下的那个），
             # 不写死缺省、不假设人站在代码目录里（v0.45.611）
             "app": {"launcher": MA.here_command("-m alphabot.launcher"),
@@ -625,6 +629,49 @@ class AlphaBotService:
             return self._compare_unavailable("file_unreadable", reason_zh=bad[target], date=target, ticker=t,
                                              dates=dates[-90:], unreadable=bad)
         return clean_json(OC.build_ticker(t, days, target) | {"dates": dates[-90:], "unreadable": bad})
+
+    # ── 单票深度报告（v0.45.760，只读）：同一批 `.swarm_results_<日期>.json`，排成八个章节；不联网、不调 LLM
+    def _scan_raw_day(self, date: str):
+        """某天的原始扫描结果 → `(结果, 原因)`。只缓存最近读的两天（一份近 2 MB）；文件变了就重读。"""
+        path = self._compare_home() / f".swarm_results_{date}.json"
+        try:
+            st = path.stat()
+            key = (st.st_mtime_ns, st.st_size)
+            ent = self._deep_raw.get(date)
+            if ent and ent[0] == key:
+                return ent[1], None
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("顶层不是对象")
+        except Exception as exc:  # noqa: BLE001 - 原因原样给页面
+            _log.warning("扫描结果读不了（%s）：%s: %s", date, type(exc).__name__, exc)
+            return None, f"file_unreadable:{type(exc).__name__}"
+        raw = {str(t).upper(): r for t, r in raw.items()}
+        cache = {k: v for k, v in self._deep_raw.items() if k != date}
+        while len(cache) >= 2:
+            cache.pop(next(iter(cache)))
+        cache[date] = (key, raw)
+        self._deep_raw = cache
+        return raw, None
+
+    def deep(self, ticker, date: Optional[str] = None) -> dict:
+        t = self._local_name(norm_ticker(ticker)).upper()
+        off = {"available": False, "ticker": t, "date": None, "dates": [], "tickers": [], "rules": DR.public_rules()}
+
+        def unavailable(reason, **extra):
+            return off | {"reason": reason, "reason_zh": DR.reason_zh(reason)} | extra
+        if self.demo:
+            return unavailable("demo")
+        dates = self.compare_dates()
+        if not dates:
+            return unavailable("no_scan_files")
+        target = norm_date(date) if date else dates[-1]
+        if target not in dates:
+            return unavailable("no_such_date", date=target, dates=dates[-90:])
+        raw, err = self._scan_raw_day(target)
+        if err:
+            return unavailable(err, date=target, dates=dates[-90:])
+        return clean_json(DR.build(t, target, raw.get(t), DR.rank_of(raw, t)) | {"dates": dates[-90:], "tickers": sorted(raw)})
 
     # ── 接货 · 筛选（v0.45.722，只读）：我们手工做过的那张表——30 只标的里「卖 put 好不好做」的客观事实
     WHEEL_CLOSES_TTL = 6 * 3600.0
