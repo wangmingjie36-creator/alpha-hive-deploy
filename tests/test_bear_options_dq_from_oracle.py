@@ -57,12 +57,20 @@ class TestOraclePublishesItsLabel:
 
     @pytest.mark.parametrize("case", sorted(_SCENARIOS))
     def test_board_carries_the_same_label_as_data_quality(self, monkeypatch, case):
-        """变红的变异：上板那行挪回 `if result:` 里（抛异常那种情形板上就没有）；板上与 data_quality 各算一份。"""
+        """变红的变异：上板那行挪回 `if result:` 里；板上与 data_quality 各算一份。
+
+        v0.45.765 起只有取到链的那一种上板：两种降级情形 Oracle 弃权（error 形状、不上板），标签留在它自己的
+        data_quality 里（说明 odds 维为什么缺席）。变红的变异：弃权分支照样 `_publish`。"""
         stub, expect = _SCENARIOS[case]
         out, board = _run_oracle(monkeypatch, stub())
         assert out["data_quality"]["options"] == expect, out["data_quality"]
-        entry = _oracle_board_entry(board)
-        assert (entry.details or {}).get(OPTIONS_DQ_BOARD_KEY) == expect
+        if expect == "real":
+            assert "error" not in out
+            entry = _oracle_board_entry(board)
+            assert (entry.details or {}).get(OPTIONS_DQ_BOARD_KEY) == expect
+        else:
+            assert out.get("error"), "期权链不可用 ⇒ 弃权（v0.45.765）"
+            assert BearBeeContrarian(board)._read_peer(TICKER, "OracleBeeEcho") is None, "弃权不该上板"
 
 
 class TestBearCopiesOracleEndToEnd:
@@ -70,10 +78,19 @@ class TestBearCopiesOracleEndToEnd:
     @pytest.mark.parametrize("case", sorted(_SCENARIOS))
     def test_bear_label_equals_oracle_label(self, monkeypatch, case):
         """真实 Oracle 写板 → 真实 Bear 读板：两只蜂对同一份期权数据的标签一致。
-        变红的变异：Bear 改回「读到条目就记 real」（后两种情形红）。"""
+        变红的变异：Bear 改回「读到条目就记 real」。
+
+        v0.45.765 起两种降级情形 Oracle 弃权、不上板 ⇒ Bear 走自己的回落分支（同一个 OptionsAgent 桩）——
+        不变式收成「Oracle 没取到链，Bear 绝不报 real」：样本链早退两边都是 unavailable；OptionsAgent 抛异常时
+        Oracle 记 fallback、Bear 的回落分支照它既有的写法记 unavailable（同为降级，Queen 两个都不算 real 源）。"""
         stub, expect = _SCENARIOS[case]
         out, board = _run_oracle(monkeypatch, stub())
-        assert _bear_options_label(board, monkeypatch) == out["data_quality"]["options"] == expect
+        bear = _bear_options_label(board, monkeypatch)
+        assert out["data_quality"]["options"] == expect
+        if expect == "real":
+            assert bear == "real"
+        else:
+            assert bear == "unavailable", bear
 
     def test_bear_confidence_counts_real_only_when_oracle_had_the_chain(self, monkeypatch):
         """Bear confidence 的「real 源数」项随之如实：Oracle 降级那天少数一个 real。"""
@@ -81,6 +98,26 @@ class TestBearCopiesOracleEndToEnd:
         _, bad_board = _run_oracle(monkeypatch, _SCENARIOS["sample_chain_early_exit"][0]())
         ok, bad = _bear_options_label(ok_board, monkeypatch), _bear_options_label(bad_board, monkeypatch)
         assert (ok == "real") and (bad != "real")
+
+
+class TestBearSurvivesWhatOracleSurvives:
+    """v0.45.767（765 二次检查）：OptionsAgent 抛的异常，Oracle 吞下就弃权、不上板 ⇒ Bear 没有条目可读、自己再取一次，多半撞上同一个异常。
+    所以 **Oracle 吞得下的，Bear 的回落分支也得吞得下**。765 时 Bear 的元组缺 OSError：URLError / SSLError / socket 超时都不是
+    ConnectionError ⇒ 从 `_assess_options_puts` 漏出、`Bear.analyze` 与扫描逐蜂的 except 都不接 ⇒ 整只票这一轮丢掉（审查用旧 / 新
+    oracle_bee 对拍复现：旧代码 Bear 读 Oracle 条目、不走回落；新代码 Bear 抛 URLError）。
+    变红的变异：Bear 回落的 except 元组去掉 OSError。"""
+
+    @pytest.mark.parametrize("exc", [
+        ConnectionError("桩"), ImportError("桩"), ValueError("桩"), KeyError("桩"), TypeError("桩"), AttributeError("桩"),
+        OSError("桩"), TimeoutError("桩"),
+        __import__("urllib.error", fromlist=["URLError"]).URLError("桩：cboe down"),
+        __import__("ssl").SSLError("EOF occurred in violation of protocol"),      # 09-24 全网直连失败那天的真实报错
+    ], ids=lambda e: type(e).__name__)
+    def test_oracle_abstains_and_bear_still_answers(self, monkeypatch, exc):
+        out, board = _run_oracle(monkeypatch, _options_stub(None, raise_exc=exc))
+        assert out.get("error") and out["data_quality"]["options"] == "fallback", "前提：Oracle 吞下了它并弃权"
+        assert BearBeeContrarian(board)._read_peer(TICKER, "OracleBeeEcho") is None, "前提：Bear 读不到条目、必走回落"
+        assert _bear_options_label(board, monkeypatch) == "unavailable"
 
 
 class TestBearWhenBoardCannotTell:

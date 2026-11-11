@@ -8,6 +8,8 @@ import { renderLedger } from "./pages/ledger.js";
 import { renderStraddle } from "./pages/straddle.js";
 import { renderHedge } from "./pages/hedge.js";
 import { renderWheel } from "./pages/wheel.js";
+import { renderCompare } from "./pages/compare.js";
+import { renderDeep } from "./pages/deep.js";
 import { renderWheelScreen } from "./pages/wheel_screen.js";
 import { renderResults } from "./pages/results.js";
 import { renderMethod } from "./pages/method.js";
@@ -143,6 +145,13 @@ async function route() {
     else if (page === "straddle") await renderStraddle(app, alive);
     else if (page === "hedge") await renderHedge(app, alive);
     else if (page === "wheel") await (a === "screen" ? renderWheelScreen(app, alive) : renderWheel(app, alive));
+    else if (page === "deep") {
+      // 扫描侧的代码写法（BRK-B），不走 canonTicker（那是 CBOE / 指数的写法）；缺代码 ⇒ 上次看的那只
+      const dt = String(a || pref("lastTicker", "NVDA")).toUpperCase().replace(".", "-");
+      if (a !== dt) { redirect(`#/deep/${encodeURIComponent(dt)}`); return; }
+      await renderDeep(app, dt, alive);
+    }
+    else if (page === "compare") await renderCompare(app, a ? a.toUpperCase() : null, alive);
     else if (page === "results") await renderResults(app, a, alive);
     else if (page === "method") await renderMethod(app, alive);
     else if (page === "help") await renderHelp(app, a, alive);

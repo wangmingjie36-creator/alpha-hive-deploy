@@ -2,7 +2,10 @@
 
 起因：2026-10-05 重跑时 28/30 只的异常流整路丢失（Oracle bullish 18→9），而 `unusual_options` 把「每个到期日都取失败」
 返回成「无异常期权流信号 / neutral / 5.0 / data_source=yfinance_chain」（还缓存 300 秒），日志里只有 2 条 warning。
-本版**只加可见性**：取数状态进输出、全败不缓存且打 WARNING、降级比例进 Step 12 覆盖率闸。评分逐位不变（有专门一条钉住）。
+本版**只加可见性**：取数状态进输出、全败不缓存且打 WARNING、降级比例进 Step 12 覆盖率闸。评分逐位不变（当时有专门一条钉住）。
+
+v0.45.765 改了评分：取不到的异常流（`data_source == "fallback"`）不再以兜底 5.0 混进融合分——与检测器抛异常（flow 为空）
+那条路同分、都只用期权分。原「失败与旧的『无异常』逐位同分」一条随之改成「两条失败路径同分、且等于只用期权分」。
 """
 from __future__ import annotations
 
@@ -127,7 +130,7 @@ class TestFetchStatusIsSeparateFromNoUnusual:
         assert (r["unusual_score"], r["unusual_direction"], r["signals"]) == (5.0, "neutral", [])
 
 
-class TestOracleRecordsTheStatusWithoutChangingTheScore:
+class TestOracleRecordsTheFlowStatus:
     @staticmethod
     def _stub_options(monkeypatch):
         """OptionsAgent 会真去取 CBOE / Yahoo 链（测试默认离线）——桩成固定结果，本文件只关心异常流这一路。"""
@@ -150,11 +153,35 @@ class TestOracleRecordsTheStatusWithoutChangingTheScore:
                   "data_source": "fallback", "fetch_status": "failed", "failure_reason": "全部 4 个到期日取数失败：x",
                   "chains_total": 4, "chains_failed": 4}
 
-    def test_score_and_direction_identical_to_the_legacy_quiet_result(self, all_agents, monkeypatch):
-        a = self._run(all_agents["oracle"], monkeypatch, self.LEGACY_QUIET)
-        b = self._run(all_agents["oracle"], monkeypatch, self.NEW_FAILED)
-        assert "error" not in a and "error" not in b
-        assert (a["score"], a["direction"]) == (b["score"], b["direction"]), "只加可见性：评分必须逐位不变"
+    def test_failed_flow_scores_like_the_detector_never_ran(self, all_agents, monkeypatch):
+        """v0.45.765：两条「没取到异常流」的路径同分，且都等于只用期权分（桩里 options_score 6.0，无深度调整）。
+        此前兜底 dict 的 5.0 按 0.10 / 0.65 混入 ⇒ 6.0 被拉到 ≈5.85，而检测器抛异常那条是 6.0。
+        变红的变异：融合基数改回 `if unusual_flow`（兜底 5.0 照样混入）；或调整项 / 基数只改了一处。"""
+        def boom(ticker, stock_price=0.0):
+            raise ConnectionError("down")
+        failed = self._run(all_agents["oracle"], monkeypatch, self.NEW_FAILED)
+        self._stub_options(monkeypatch)
+        monkeypatch.setattr(UO, "detect_unusual_flow", boom)
+        never_ran = all_agents["oracle"].analyze("NVDA")
+        assert "error" not in failed and "error" not in never_ran
+        assert (failed["score"], failed["direction"]) == (never_ran["score"], never_ran["direction"])
+        assert failed["score"] == pytest.approx(6.0)
+
+    @pytest.mark.parametrize("status", ["failed", "oi_stale"])
+    def test_every_fallback_shape_stays_out_of_the_score(self, all_agents, monkeypatch, status):
+        """`detect_unusual_flow` 的每种兜底（全部到期日失败 / OI 陈旧）都是 data_source=fallback ⇒ 都不进分。"""
+        flow = dict(self.NEW_FAILED, fetch_status=status)
+        assert self._run(all_agents["oracle"], monkeypatch, flow)["score"] == pytest.approx(6.0)
+
+    def test_observed_quiet_flow_still_blends(self, all_agents, monkeypatch):
+        """反向：真取到的异常流（哪怕「无异常」、5.0）照旧按权重混入——本版只拿掉兜底，不拿掉观测。
+        变红的变异：把异常流整个从融合分里删掉（`_unusual_observed` 恒假）。"""
+        from config import AGENT_SCORING as _AS
+        ow, uw = _AS["oracle_options_weight"], _AS["oracle_unusual_weight"]
+        assert uw > 0, "前提：异常流有权重（否则本条测不出混入）"
+        quiet = self._run(all_agents["oracle"], monkeypatch, self.LEGACY_QUIET)
+        assert quiet["score"] == pytest.approx((6.0 * ow + 5.0 * uw) / (ow + uw), abs=0.01)
+        assert quiet["score"] != pytest.approx(6.0, abs=0.01)
 
     def test_details_record_failure_as_none_and_success_as_true(self, all_agents, monkeypatch):
         ok = dict(self.LEGACY_QUIET, fetch_status="ok", chains_total=4, chains_failed=0, failure_reason="")

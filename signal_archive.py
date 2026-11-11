@@ -147,10 +147,19 @@ def _sentiment_num(tr: Dict) -> Optional[float]:
     return m.get(_dig(tr, "agent_details.ScoutBeeNova.details.insider.sentiment"))
 
 
+def _agent_ok(tr: Dict, agent: str) -> bool:
+    """这只蜂当天的记录是不是真结果（v0.45.768）。出错的蜂带着 `make_error_result` 的占位 5.0 / 中性，
+    判据唯一实现 `models.agent_record_failed`（error 键或 discovery 的 Error / ❌ 前缀——老记录只有前缀）。"""
+    from models import agent_record_failed
+    return not agent_record_failed(_dig(tr, f"agent_details.{agent}"))
+
+
 def _direction_num(agent: str) -> Callable:
     m = {"bullish": 1.0, "long": 1.0, "neutral": 0.0, "bearish": -1.0, "short": -1.0}
 
     def f(tr: Dict) -> Optional[float]:
+        if not _agent_ok(tr, agent):
+            return None          # v0.45.768：出错占位的「中性」不是这只蜂的判断
         d = _dig(tr, f"agent_details.{agent}.direction")
         return m.get(str(d).lower()) if d else None
     return f
@@ -290,14 +299,22 @@ def _gex_state_sig(kind: str) -> Callable:
 
 
 def _agent_score(agent: str) -> Callable:
-    return lambda tr: _num(_dig(tr, f"agent_details.{agent}.score"))
+    # v0.45.768：出错的蜂不入档（此前存下 `make_error_result` 的占位 5.0——蜂后从没把它当 odds / catalyst 分用过）。
+    # 库里已有的历史占位行 `backfill` 删不掉（INSERT OR REPLACE），清理见 experiments/purge_failed_agent_placeholder_rows.py
+    return lambda tr: _num(_dig(tr, f"agent_details.{agent}.score")) if _agent_ok(tr, agent) else None
 
 
 def _swarm_agreement(tr: Dict) -> Optional[float]:
     """蜂群方向一致度 = 多数派占比。2026-07-30 实测 IC=+0.003（零预测力），
-    却经 GuardBee 基础分 + queen 共振加成被三重计入综合分。"""
+    却经 GuardBee 基础分 + queen 共振加成被三重计入综合分。
+
+    v0.45.768：跳过出错的蜂（它的「中性」是占位）。历史上有出错蜂的 469 行（多为已退役的 CodeExecutorAgent）
+    值会变；`backfill(only=["composite.swarm_agreement"])` 用 REPLACE 改得到。本信号世代起点 11-09，起点后 0 行出错。"""
+    from models import agent_record_failed
     dirs = []
     for _ag, d in (tr.get("agent_details") or {}).items():
+        if agent_record_failed(d):
+            continue
         v = (d or {}).get("direction")
         if v:
             dirs.append(str(v).lower())
@@ -2461,6 +2478,11 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     "v0.45.674": ("agent.GuardBeeSentinel.*",),
     # 11-09：CodeExecutorAgent 退役 —— 下游（Guard 普查 / 拥挤度看多数、swarm_agreement、final_score）由依赖边推出
     "v0.45.750": ("agent.CodeExecutorAgent.*",),
+    # 11-09（v0.45.765，并进 11-09 起点、作废 0 条，等价论证见 ic_rerun_readiness 同版条目）：Oracle 取不到数据时不拿兜底常量进分——
+    # 异常流兜底不再以 5.0 混入融合分（Oracle 分与按分数带定的方向变）；期权链整条取不到 ⇒ Oracle 弃权（分 / 方向成为 error 占位）。
+    # ⇒ `agent.OracleBeeEcho.*` 点名；BearBee 的 options_bear 读 Oracle 方向与板上条目（弃权那天读不到 ⇒ 走自己的回落）⇒ `bear.options_bear`
+    # 点名（同 v0.45.383 / 423）。下游（Guard 普查、swarm_agreement 等）由 _scope_closure 带出。
+    "v0.45.765": ("agent.OracleBeeEcho.*", "bear.options_bear"),
 }
 
 

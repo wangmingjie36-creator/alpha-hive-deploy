@@ -30,12 +30,15 @@ import sell_strike_report as R
 import tail_budget as TB
 from alphabot import beta_long as _BL
 from alphabot import chat as CH
+from alphabot import deep_report as DR
 from alphabot import hedge as HG
 from alphabot import howto as HW
 from alphabot import intraday_activity as IA
 from alphabot import intraday_heat as IH
 from alphabot import macos_app as MA
+from alphabot import options_compare as OC
 from alphabot import premium as PM
+from alphabot import price_intraday as PI
 from alphabot import straddle as SD
 from alphabot import strangle_compare as SC
 from alphabot import tail_hedge as TH
@@ -48,6 +51,16 @@ _log = get_logger("alphabot")
 
 ET = ZoneInfo("America/New_York")
 LIVE_TTL_SEC = 60.0
+#: 盘中分钟线（v0.45.763）同一只票多久内不重取：盘中略短于页面的刷新间隔（开两个窗口也只发一次）；不在盘中时没有新线可取
+MINUTE_TTL_LIVE_SEC = 55.0
+MINUTE_TTL_IDLE_SEC = 1800.0
+#: 「盯盘」（v0.45.764）：开着盘中图的那一只票每隔这么久拍一张快照（其余关注票仍按 `interval_min`）。
+#: CBOE 延迟行情约每分钟更新一次（2026-11-11 从 NVDA / TSLA 各 21 张快照的落后幅度推断），更密拿到的多是同一份
+WATCH_INTERVAL_SEC = 60.0
+#: 页面每次续期后盯盘再维持多久。页面约每 60 秒续一次；窗口关了 / 切走了没人续，过了这段时间自己停——不靠页面「记得说再见」
+WATCH_LEASE_SEC = 150.0
+#: 盯盘生效时轮询线程多久醒一次（平时 30 秒一醒，60 秒的节拍会被拉成 60 / 90 秒交替）
+WATCH_POLL_SEC = 5.0
 #: 失败结果也短暂缓存：CBOE 不可达时别让每次切页都再排 15 秒 × 3 次重试
 FAIL_TTL_SEC = 15.0
 MAX_FOCUS = 5
@@ -240,7 +253,7 @@ def default_watchlist() -> List[str]:
 
 
 def _default_bars(ticker: str) -> dict:
-    """日线收盘（价格页用）。只走 Twelve Data 共享入口（每日一次、有进程内缓存）；没配 key 就如实说不可得，
+    """日线收盘 + 成交量（价格页用；`volume` 是 v0.45.762 的纯新增，共享入口的行本来就带 `vol`；开高低另由 `AlphaBotService._with_ohlc` 拼）。只走 Twelve Data 共享入口（每日一次、有进程内缓存）；没配 key 就如实说不可得，
     **不**换别的源——别的源（本地价格索引）首次读取会写迁移标记，只读页面不该造成写入。"""
     try:
         import twelve_data
@@ -250,7 +263,7 @@ def _default_bars(ticker: str) -> dict:
         if not rows:
             return {"available": False, "reason": "twelve_data_returned_nothing", "bars": []}
         return {"available": True, "source": "twelve_data",
-                "bars": [{"date": str(r.get("date"))[:10], "close": r.get("close")} for r in rows]}
+                "bars": [{"date": str(r.get("date"))[:10], "close": r.get("close"), "volume": r.get("vol")} for r in rows]}
     except Exception as exc:  # noqa: BLE001
         # 自己的码（不叫 exception：溢价页把那个前缀读成「计算出错」，会把取数失败指错层）
         return {"available": False, "reason": f"bars_fetch_exception:{type(exc).__name__}: {exc}", "bars": []}
@@ -264,9 +277,25 @@ class AlphaBotService:
                  ledger_dir=None, live_ttl: float = LIVE_TTL_SEC, state_dir=None,
                  straddle_root=None, straddle_quote_fn=None, now_fn: Optional[Callable[[], datetime]] = None,
                  premium_root=None, beta_long_fn=None, wheel_prices_fn=None,
-                 completed_session_fn: Optional[Callable[[], Optional[str]]] = None):
+                 completed_session_fn: Optional[Callable[[], Optional[str]]] = None, compare_root=None,
+                 ohlc_fn=None, minute_fn=None):
         self.fetch_fn = fetch_fn
         self.bars_fn = bars_fn or _default_bars
+        # 价格页 K 线的开高低（v0.45.762）：`ohlc_fn(标的) -> ({日期: {open, high, low, close}}, {n, reason, …})`。
+        # None 且日线也是缺省源 ⇒ `alphabot.price_ohlc.fetch_ohlc`（yfinance）；注入了 `bars_fn`（测试 / 演示）而没给它 ⇒ 不取，
+        # 免得测试里悄悄出网。成功的按 (标的, 美东日) 缓存；失败不入缓存，下次打开再试
+        self.ohlc_fn = ohlc_fn
+        self._ohlc_default = ohlc_fn is None and bars_fn is None and not demo
+        self._ohlc_cache: Dict[tuple, dict] = {}
+        # 价格页盘中 1 分钟 K 线（v0.45.763）：`minute_fn(标的, 日期, 美东此刻) -> (分钟线, {n, reason, …})`。缺省接线规则同 `ohlc_fn`
+        # （注入了日线而没给它 ⇒ 不取，免得测试出网；演示 ⇒ 合成）。`{(标的, 日期): (取到的时刻, 分钟线, 是否已定, 取的时候在不在盘中)}`
+        self.minute_fn = minute_fn
+        self._minute_default = minute_fn is None and bars_fn is None and not demo
+        self._minute_cache: Dict[tuple, tuple] = {}
+        # 盯盘（v0.45.764）：`{"ticker", "until"（self.clock() 时刻）}`；同一时刻只盯一只、后来的为准。只在内存里，重启即无。
+        # `_watch_consumer`：有没有轮询线程在消费它（演示 / `--no-poll` 没有 ⇒ 续期照收，但如实回「不会拍」）
+        self._watch: Optional[dict] = None
+        self._watch_consumer = False
         self.clock = clock
         self.demo = demo
         self.ledger_dir = ledger_dir          # None ⇒ 账本自己解析（生产数据根）；只读
@@ -290,6 +319,12 @@ class AlphaBotService:
         self.wheel_prices_fn = wheel_prices_fn
         self.completed_session_fn = completed_session_fn
         self._wheel_closes: Dict[str, tuple] = {}
+        # 「对比」页（v0.45.759）：每日扫描结果 `.swarm_results_<日期>.json` 所在目录；None ⇒ 调用时的 PATHS.home。
+        # `{日期: ((mtime_ns, size), {标的: 读数})}`——文件没变就不重读（一份近 2 MB，缓存的读数只有几十 KB）
+        self.compare_root = compare_root
+        self._compare_cache: Dict[str, tuple] = {}
+        # 「深度」页（v0.45.760）要原始结果（读数缓存里没有各蜂的明细）：只留最近读的两天 `{日期: ((mtime_ns, size), 原始结果)}`
+        self._deep_raw: Dict[str, tuple] = {}
         # Yahoo 限流时各票「最早什么时候值得再试」（self.clock() 的时刻）：`live()` 把它折成 `retry_after_sec` 给页面
         self._yf_retry_until: Dict[str, float] = {}
         self._am_excluded: Dict[str, int] = {}      # 指数票最近一次现算丢掉的上午结算合约数（`_live_fetch` 写）
@@ -305,7 +340,8 @@ class AlphaBotService:
                       "premium_computed": 0, "premium_cache_hits": 0, "premium_failures": 0,
                       "howto_failures": 0, "yf_fallback_used": 0, "yf_fallback_failed": 0,
                       "beta_sens_computed": 0, "beta_sens_failures": 0, "yf_rate_limited": 0,
-                      "activity_failures": 0}
+                      "activity_failures": 0, "ohlc_failures": 0,
+                      "minute_fetches": 0, "minute_cache_hits": 0, "minute_failures": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -448,6 +484,8 @@ class AlphaBotService:
             "premium": self.premium_rules(),
             "howto": HW.public_rules(),
             "wheel": {**WH.public_rules(), "screen": WS.public_rules()},
+            "compare": OC.public_rules(),
+            "deep": DR.public_rules(),
             # 帮助页「程序类」里给人抄的命令：进本代码目录、用运行本服务的解释器（从 .app 打开时就是 .app 记下的那个），
             # 不写死缺省、不假设人站在代码目录里（v0.45.611）
             "app": {"launcher": MA.here_command("-m alphabot.launcher"),
@@ -543,6 +581,125 @@ class AlphaBotService:
             _log.warning("接货型卖 put 账本不可得：%s: %s", type(exc).__name__, exc)
             state = {"available": False, "state_reason": f"{type(exc).__name__}: {exc}"}
         return clean_json(WH.build_overview(state, rules=rules))
+
+    # ── 期权结构跨日对比（v0.45.759，只读）：每日扫描落盘的 `.swarm_results_<日期>.json`，不联网、不写任何东西
+    _SWARM_RE = re.compile(r"^\.swarm_results_(\d{4}-\d{2}-\d{2})\.json$")
+
+    def _compare_home(self) -> Path:
+        return Path(self.compare_root) if self.compare_root is not None else PATHS.home
+
+    def compare_dates(self) -> List[str]:
+        """有扫描结果文件的日期，升序。目录读不了 ⇒ 抛（由接口层报错），不当成「没有扫描」。"""
+        home = self._compare_home()
+        if not home.is_dir():
+            return []
+        return sorted(m.group(1) for m in (self._SWARM_RE.match(n) for n in os.listdir(home)) if m)
+
+    def _compare_day(self, date: str):
+        """某天全部标的的读数（`OC.views_of`）→ `(结果, 原因)`。读不了 / 不是对象 ⇒ `(None, "file_unreadable:…")`，不当成空的一天。"""
+        path = self._compare_home() / f".swarm_results_{date}.json"
+        try:
+            st = path.stat()
+            key = (st.st_mtime_ns, st.st_size)
+            ent = self._compare_cache.get(date)
+            if ent and ent[0] == key:
+                return ent[1], None
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("顶层不是对象")
+        except Exception as exc:  # noqa: BLE001 - 原因原样给页面
+            _log.warning("扫描结果读不了（%s）：%s: %s", date, type(exc).__name__, exc)
+            return None, f"file_unreadable:{type(exc).__name__}"
+        day = OC.views_of(raw)
+        self._compare_cache[date] = (key, day)
+        return day, None
+
+    def _compare_days(self, date: Optional[str]):
+        """→ `(升序的 [(日期, 结果)], 目标日期, 全部日期, 读不了的 {日期: 原因})`。只取目标日及其前 `history_days` 个扫描日；
+        读不了的日子**不放进序列**（「上一次」会越过它），但记在 `unreadable` 里给页面看。"""
+        dates = self.compare_dates()
+        if not dates:
+            return [], None, dates, {}
+        target = norm_date(date) if date else dates[-1]
+        window = [d for d in dates if d <= target][-(int(OC.RULES["history_days"]) + 1):]
+        days, bad = [], {}
+        for d in window:
+            day, err = self._compare_day(d)
+            if err:
+                bad[d] = OC.reason_zh(err)
+            else:
+                days.append((d, day))
+        return days, target, dates, bad
+
+    def _compare_unavailable(self, reason: str, **extra) -> dict:
+        return {"available": False, "reason": reason, "reason_zh": OC.reason_zh(reason), "rows": [],
+                "rules": OC.public_rules(), "dates": [], "unreadable": {}} | extra
+
+    def compare(self, date: Optional[str] = None) -> dict:
+        if self.demo:
+            return self._compare_unavailable("demo")
+        days, target, dates, bad = self._compare_days(date)
+        if not dates:
+            return self._compare_unavailable("no_scan_files")
+        if target in bad:
+            return self._compare_unavailable("file_unreadable", reason_zh=bad[target], date=target,
+                                             dates=dates[-90:], unreadable=bad)
+        return clean_json(OC.build_overview(days, target) | {"dates": dates[-90:], "unreadable": bad})
+
+    def compare_ticker(self, ticker, date: Optional[str] = None) -> dict:
+        t = self._local_name(norm_ticker(ticker)).upper()
+        if self.demo:
+            return self._compare_unavailable("demo", ticker=t)
+        days, target, dates, bad = self._compare_days(date)
+        if not dates:
+            return self._compare_unavailable("no_scan_files", ticker=t)
+        if target in bad:
+            return self._compare_unavailable("file_unreadable", reason_zh=bad[target], date=target, ticker=t,
+                                             dates=dates[-90:], unreadable=bad)
+        return clean_json(OC.build_ticker(t, days, target) | {"dates": dates[-90:], "unreadable": bad})
+
+    # ── 单票深度报告（v0.45.760，只读）：同一批 `.swarm_results_<日期>.json`，排成八个章节；不联网、不调 LLM
+    def _scan_raw_day(self, date: str):
+        """某天的原始扫描结果 → `(结果, 原因)`。只缓存最近读的两天（一份近 2 MB）；文件变了就重读。"""
+        path = self._compare_home() / f".swarm_results_{date}.json"
+        try:
+            st = path.stat()
+            key = (st.st_mtime_ns, st.st_size)
+            ent = self._deep_raw.get(date)
+            if ent and ent[0] == key:
+                return ent[1], None
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("顶层不是对象")
+        except Exception as exc:  # noqa: BLE001 - 原因原样给页面
+            _log.warning("扫描结果读不了（%s）：%s: %s", date, type(exc).__name__, exc)
+            return None, f"file_unreadable:{type(exc).__name__}"
+        raw = {str(t).upper(): r for t, r in raw.items()}
+        cache = {k: v for k, v in self._deep_raw.items() if k != date}
+        while len(cache) >= 2:
+            cache.pop(next(iter(cache)))
+        cache[date] = (key, raw)
+        self._deep_raw = cache
+        return raw, None
+
+    def deep(self, ticker, date: Optional[str] = None) -> dict:
+        t = self._local_name(norm_ticker(ticker)).upper()
+        off = {"available": False, "ticker": t, "date": None, "dates": [], "tickers": [], "rules": DR.public_rules()}
+
+        def unavailable(reason, **extra):
+            return off | {"reason": reason, "reason_zh": DR.reason_zh(reason)} | extra
+        if self.demo:
+            return unavailable("demo")
+        dates = self.compare_dates()
+        if not dates:
+            return unavailable("no_scan_files")
+        target = norm_date(date) if date else dates[-1]
+        if target not in dates:
+            return unavailable("no_such_date", date=target, dates=dates[-90:])
+        raw, err = self._scan_raw_day(target)
+        if err:
+            return unavailable(err, date=target, dates=dates[-90:])
+        return clean_json(DR.build(t, target, raw.get(t), DR.rank_of(raw, t)) | {"dates": dates[-90:], "tickers": sorted(raw)})
 
     # ── 接货 · 筛选（v0.45.722，只读）：我们手工做过的那张表——30 只标的里「卖 put 好不好做」的客观事实
     WHEEL_CLOSES_TTL = 6 * 3600.0
@@ -1136,7 +1293,119 @@ class AlphaBotService:
                 if not res.get("available"):
                     return clean_json({**res, "ticker": t})     # 失败不入缓存，下次再试
                 self._bars_cache[key] = res
-            return clean_json({**self._bars_cache[key], "ticker": t})
+            return clean_json({**self._with_ohlc(t, key, self._bars_cache[key]), "ticker": t})
+
+    def _with_ohlc(self, t: str, key: tuple, res: dict) -> dict:
+        """给日线拼上开 / 高 / 低（纯新增字段 + `ohlc` 说明块）。取不到不影响日线本身：`ohlc.available=False` + 原因，
+        页面退回「前收 → 收盘」的涨跌柱并照实写；失败计 `stats.ohlc_failures`。"""
+        bars = res.get("bars") or []
+        if any(isinstance(r, dict) and r.get("open") is not None for r in bars):
+            return {**res, "ohlc": {"available": True, "source": res.get("source"), "matched": len(bars)}}   # 日线源自带（演示）
+        fn = self.ohlc_fn
+        if fn is None:
+            if not self._ohlc_default:
+                return {**res, "ohlc": {"available": False, "reason": "not_wired"}}
+            from alphabot import price_ohlc
+            fn = price_ohlc.fetch_ohlc
+        from alphabot import price_ohlc as PO
+        if key not in self._ohlc_cache:
+            try:
+                rows, info = fn(t)
+            except Exception as exc:  # noqa: BLE001 - 注入的函数抛了也不能拖垮日线
+                rows, info = {}, {"n": 0, "reason": f"exception:{type(exc).__name__}"}
+            if not rows:
+                self.stats["ohlc_failures"] += 1
+                return {**res, "ohlc": {"available": False, "source": PO.SOURCE, **info}}
+            self._ohlc_cache[key] = rows
+        merged, n = PO.merge(bars, self._ohlc_cache[key])
+        ok = n["matched"] > 0
+        if not ok:
+            self.stats["ohlc_failures"] += 1
+        return {**res, "bars": merged,
+                "ohlc": {"available": ok, "source": PO.SOURCE, "close_tol": PO.CLOSE_TOL, **n,
+                         **({} if ok else {"reason": "no_bar_matched"})}}
+
+    def minute_bars(self, ticker, date_et: Optional[str] = None) -> dict:
+        """某票某个美东日的 1 分钟 K 线 + 同一天盘中快照里的水平路径（**只给单日**，理由同 `intraday`）。
+
+        取数失败不入缓存；手里有上一次取到的 ⇒ 照旧给出并写明 `refresh_failed`（图不清空），没有 ⇒ `available=False` + 原因。
+        过去的日子取到一次就定了；今天的按 `MINUTE_TTL_*` 限频——页面刷得再勤，发出去的请求也不会比这更密。"""
+        t = norm_ticker(ticker)
+        now = self.now_fn()
+        today = now.date().isoformat()
+        d = norm_date(date_et) if date_et else today
+        live_now = d == today and market_session(now)["live"]
+        out = {"ticker": t, "date": d, "is_today": d == today, "source": PI.SOURCE, "interval": PI.INTERVAL,
+               "session_live": live_now, "refresh_sec": PI.REFRESH_SEC if live_now else None,
+               "level_path": PI.level_path(self.intraday(t, d).get("snapshots") or [], d),
+               "reason_labels": PI.REASONS, "max_age_days": PI.MAX_AGE_DAYS}
+        fn = self.minute_fn
+        if fn is None:
+            if self.demo:
+                from alphabot import synthetic as syn
+
+                def fn(tk, day, when):
+                    rows, dropped = PI.drop_forming(syn.demo_minutes(tk, day), day, when)
+                    return rows, {"n": len(rows), "reason": None if rows else "unavailable", "dropped_forming": dropped}
+                out["source"] = "demo"
+            elif self._minute_default:
+                def fn(tk, day, when):
+                    return PI.fetch_minutes(tk, day, now=when)
+            else:
+                return clean_json({**out, "available": False, "reason": "not_wired", "bars": []})
+        key = (t, d)
+        with self._lock_for("minute:" + t):
+            hit = self._minute_cache.get(key)
+            ttl = MINUTE_TTL_LIVE_SEC if live_now else MINUTE_TTL_IDLE_SEC
+            # 盘中取的那份到收盘后就不完整了（缺收盘前最后几根）：时段一结束必须重取一次，不能套「不在盘中 30 分钟内不重取」
+            went_idle = bool(hit) and hit[3] and not live_now
+            if hit and (hit[2] or (not went_idle and self.clock() - hit[0] < ttl)):
+                self.stats["minute_cache_hits"] += 1
+                return clean_json({**out, "available": True, "reason": None, "bars": hit[1]})
+            self.stats["minute_fetches"] += 1
+            try:
+                rows, info = fn(t, d, now)
+            except Exception as exc:  # noqa: BLE001 - 注入的函数抛了也要带原因返回
+                rows, info = [], {"n": 0, "reason": "exception", "detail": type(exc).__name__}
+            if rows:
+                self._minute_cache[key] = (self.clock(), rows, d < today, live_now)
+                return clean_json({**out, "available": True, "reason": None, "bars": rows,
+                                   "dropped_forming": info.get("dropped_forming", 0)})    # 成交量异常的根数页面自己数（缓存命中时也要有）
+            self.stats["minute_failures"] += 1
+            fail = {k: info[k] for k in ("reason", "retry_after_sec", "detail") if info.get(k) is not None}
+            if hit:      # 刷新失败：上一次取到的照旧画，页面写明它停在哪
+                return clean_json({**out, "available": True, "reason": None, "bars": hit[1], "refresh_failed": fail})
+            return clean_json({**out, "available": False, "bars": [], **fail})
+
+    # ── 盯盘（v0.45.764）
+    def watch_ticker(self) -> Optional[str]:
+        """此刻被盯的那只票（租约过期 ⇒ None）。"""
+        w = self._watch
+        return w["ticker"] if w and self.clock() < w["until"] else None
+
+    def watch(self, ticker) -> dict:
+        """续期盯盘：这只票在租约内每 `WATCH_INTERVAL_SEC` 拍一张快照。返回它**会不会真的被拍**与原因——
+        续上了但没人拍（演示 / 没开轮询 / 盘中快照被关 / 不在交易时段）不能回成「盯上了」。"""
+        t = norm_ticker(ticker)
+        base = {"ticker": t, "interval_sec": WATCH_INTERVAL_SEC, "lease_sec": WATCH_LEASE_SEC}
+        if self.demo:
+            return {**base, "active": False, "reason": "demo"}
+        if t.startswith("_"):
+            return {**base, "active": False, "reason": "index_not_supported"}     # 指数一张链几十 MB，不逐分钟拉
+        if t in YF_FALLBACK_TICKERS:
+            # 这些票 CBOE 盘中是陈旧的，现算会改走 Yahoo 的期权链（一次十来个请求）：每分钟一拍很容易把 Yahoo 打到限流，
+            # 一限流 Alpha Bot 里所有走 Yahoo 的功能一起停 180 秒。它们留在原来的间隔上
+            return {**base, "active": False, "reason": "yf_fallback_ticker"}
+        prev = self.watch_ticker()
+        self._watch = {"ticker": t, "until": self.clock() + WATCH_LEASE_SEC}
+        out = {**base, "replaced": prev if prev and prev != t else None}
+        if not self._watch_consumer:
+            return {**out, "active": False, "reason": "no_poller"}
+        if not self.settings().get("poll_enabled"):
+            return {**out, "active": False, "reason": "poll_disabled"}
+        if not market_session(self.now_fn())["live"]:
+            return {**out, "active": False, "reason": "session_closed"}
+        return {**out, "active": True, "reason": None}
 
     # ── 设置（自选 / 盘中关注列表）
     def _settings_path(self) -> Path:
@@ -1409,7 +1678,10 @@ class IntradayPoller:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_round: Optional[float] = None
-        self.status = {"running": False, "last_round_et": None, "last_results": [], "rounds": 0, "errors": 0}
+        self._last_watch: Optional[tuple] = None      # (标的, 上次给它拍的单调时刻)：盯盘的节拍
+        service._watch_consumer = True
+        self.status = {"running": False, "last_round_et": None, "last_results": [], "rounds": 0, "errors": 0,
+                       "watch": {"ticker": None, "shots": 0, "last_result": None}}
 
     def start(self) -> None:
         if self._thread is None:
@@ -1424,8 +1696,27 @@ class IntradayPoller:
     def due(self, now_mono: float, interval_min: int) -> bool:
         return self._last_round is None or (now_mono - self._last_round) >= interval_min * 60.0
 
+    def _watch_tick(self, now_mono: float) -> Optional[dict]:
+        """盯盘：租约内的那只票到点就拍一张（常规一轮刚拍过它也算数，不重复拍）。返回这次的结果或 None（没人盯 / 没到点）。"""
+        t = self.service.watch_ticker()
+        self.status["watch"]["ticker"] = t
+        if t is None:
+            self._last_watch = None
+            return None
+        if self._last_watch and self._last_watch[0] == t and now_mono - self._last_watch[1] < WATCH_INTERVAL_SEC:
+            return None
+        self._last_watch = (t, now_mono)
+        try:
+            res = self.service.take_snapshot(t)
+        except Exception as exc:  # noqa: BLE001 - 盯盘失败不挡常规轮；计数 + 日志
+            self.status["errors"] += 1
+            _log.warning("[%s] 盯盘快照失败：%s: %s", t, type(exc).__name__, exc)
+            res = {"ticker": t, "recorded": False, "reason": f"exception:{type(exc).__name__}"}
+        self.status["watch"].update({"shots": self.status["watch"]["shots"] + 1, "last_result": res})
+        return res
+
     def tick(self, *, now_mono: Optional[float] = None) -> Optional[list]:
-        """跑一轮（到点且在盘中才拍）；返回本轮结果或 None（没到点 / 不在盘中 / 关闭）。"""
+        """跑一轮（到点且在盘中才拍）；返回本轮结果或 None（没到点 / 不在盘中 / 关闭）。盯盘的那一张不算进返回值，见 `status["watch"]`。"""
         st = self.service.settings()
         if not st.get("poll_enabled"):
             return None
@@ -1434,10 +1725,14 @@ class IntradayPoller:
             return None
         now_mono = time.monotonic() if now_mono is None else now_mono
         if not self.due(now_mono, int(st.get("interval_min") or DEFAULT_INTERVAL_MIN)):
+            self._watch_tick(now_mono)
             return None
         self._last_round = now_mono
         results = []
+        watched = self.service.watch_ticker()
         for t in (st.get("focus") or [])[:MAX_FOCUS]:
+            if t == watched:
+                self._last_watch = (t, now_mono)      # 常规轮这就拍它：盯盘的节拍从这里重新数
             try:
                 results.append(self.service.take_snapshot(t))
             except Exception as exc:  # noqa: BLE001 - 一只失败不挡其余；计数 + 日志
@@ -1450,6 +1745,7 @@ class IntradayPoller:
                          [(r["ticker"], r.get("reason")) for r in failed])
         self.status.update({"last_round_et": sess.get("now_et"), "last_results": results,
                             "rounds": self.status["rounds"] + 1})
+        self._watch_tick(now_mono)     # 被盯的票不在关注列表里时，这一轮没拍到它
         return results
 
     def _run(self) -> None:
@@ -1459,4 +1755,5 @@ class IntradayPoller:
             except Exception as exc:  # noqa: BLE001 - 后台线程不能死；死了页面上就只剩旧状态
                 self.status["errors"] += 1
                 _log.warning("盘中快照线程异常：%s: %s", type(exc).__name__, exc, exc_info=True)
-            self._stop.wait(self.sleep_sec)
+            # 有人盯盘时醒得勤一点，60 秒的节拍才不会被 30 秒的睡眠拉成 60 / 90 秒交替
+            self._stop.wait(min(self.sleep_sec, WATCH_POLL_SEC) if self.service.watch_ticker() else self.sleep_sec)

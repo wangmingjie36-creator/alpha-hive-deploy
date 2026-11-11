@@ -1224,6 +1224,24 @@ _COHORT_HISTORY = [
      "维度 IC 协议 H1（buzz_v1 观测层重算）结构上碰不到；H2 描述项见 CHANGELOG 0.45.750 的实测。"
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日新开一代（final_score 是 ML 特征）。"
      "推送若晚于 11-09 的扫描，追加更正条目把日期顺延。"),
+    ("2026-11-09", "v0.45.765",
+     "OracleBee 取不到数据时不再拿兜底常量进分（用户 2026-11-11：「我不想要假评分会污染综合评分」，选「两条都改」）。"
+     "① 异常流取不到（`unusual_options` 的兜底 dict：`data_source: \"fallback\"`、`unusual_score` 恒 5.0）不再按 0.10/0.65 混进融合分"
+     "——此前把 Oracle 分往 5 拉 10/65 ≈ 15.4% 的距离，而检测器抛异常（flow 为空）那条路只用期权分，同为「没取到」两条路不同分；"
+     "现在两条都只用期权分（`oracle_bee._unusual_observed`）。② 期权链整条取不到（`_options_data_usable` 为假：样本链早退 / "
+     "OptionsAgent 抛异常）⇒ Oracle 弃权（error 形状）：蜂后把 odds 维当缺席、其余四维重新归一，不投方向票，不上信息素板"
+     "（Bear 读不到 Oracle 条目 ⇒ 走自己的 OptionsAgent 回落，同 Oracle 抛异常那天的既有路径）。"
+     "10-07 ~ 11-10 生产 25 个扫描日 750 行（只读实测）：① 94 行（10-14 / 10-26 两天各 30 行占大头），融合分 |Δ| 中位 0.24、最大 0.51，"
+     "按分数带算方向翻 6 行（未计 skew / LLM）；② 2 行（10-14、10-26）；Oracle 出错 0 行。"
+     "**并进 11-09、作废 0 条**：11-09 起 60 行（11-09 / 11-10）① ② 都是 0 行 ⇒ 旧代码在这两天的输出与新代码逐项相同。"
+     "等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.765\"]`（Oracle 出错 / 不在本行，或 options 是 real 且异常流不是兜底）；"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.765\"]`：Oracle `details.fallback_not_scored` 字面量 True（成功 / 弃权 / 异常兜底 / 无效 ticker / "
+     "日报合成回退都写），实时行。推送到新代码首跑之间若出现不等价的行 ⇒ 判别器报 boundary_too_early，须用户点头登"
+     " `_FREEZE_EXCEPTIONS` 或把日期挪到首跑日（冻结期内会开新世代），**不许**改判据让它变绿。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.765\"]` = `agent.OracleBeeEcho.*` + `bear.options_bear`（同 v0.45.383 / 423："
+     "Oracle 分与方向变；Bear 的 options_bear 读 Oracle 方向与板上条目）⇒ 这几个探索信号的分信号世代起点 09-28 → 11-09（下游由依赖边带出）。"
+     "维度 IC 协议 H1（buzz_v1 观测层重算）结构上碰不到；H2 是描述项。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 11-09 一代扩标签。"
+     "未改：出错蜂的 5.0 占位分仍会进 `signal_archive` 的 `agent.*.score`（`_agent_score` 不看 error，存量行为，另议）。"),
 ]
 
 # ── 评分冻结期（v0.45.757，用户 2026-11-10 定） ────────────────────────────
@@ -2221,6 +2239,39 @@ def _marker_code_executor_retired(d: dict) -> bool:
     return isinstance(ad, dict) and "ScoutBeeNova" in ad and "CodeExecutorAgent" not in ad
 
 
+def _oracle_row_has_no_fallback_marker(d: dict) -> bool:
+    """这行是 v0.45.765 之后的代码写的吗：OracleBee `details.fallback_not_scored` 为字面量 `True`
+    （成功 / 期权链不可用的弃权 / 异常兜底 / 无效 ticker / 日报合成回退都写）。只认 `is True`：此前的记录没有这个键。
+    **不看**实时 / 补跑——那是日期证据的问题，见 `_marker_oracle_fallback_not_scored`。"""
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("OracleBeeEcho")
+    det = o.get("details") if isinstance(o, dict) else None
+    return isinstance(det, dict) and det.get("fallback_not_scored") is True
+
+
+def _marker_oracle_fallback_not_scored(d: dict) -> bool:
+    """v0.45.765 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.369 / 383）。"""
+    return _oracle_row_has_no_fallback_marker(d) and not _is_backfill_row(d)
+
+
+def _equiv_oracle_no_fallback_score(d: dict) -> bool:
+    """v0.45.765 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？逐行判，不需要冻结证据。
+
+    本版只在两种输入上改输出：① 异常流取不到（`unusual_flow_status.data_source == "fallback"`）⇒ 不再以 5.0 混进融合分；
+    ② 期权链取不到（Oracle `data_quality.options` 不是 real）⇒ Oracle 弃权（odds 维缺席、不投票、不上板 ⇒ Bear 走自己的回落）。
+      · Oracle 不在本行 / 带 `error` ⇒ 两版同一条异常路径 ⇒ True（认 `error`，不认「没有 details」——v0.45.567 的教训）；
+      · 蒸馏结果 `data_quality.OracleBeeEcho.options == "real"` 且 `details.unusual_flow_status` 是 dict、`data_source` 不是
+        "fallback"（取到了，或检测器抛异常 ⇒ flow 为空 ⇒ data_source 为 None：旧代码那条本来就只用期权分）⇒ 两处都是空操作 ⇒ True；
+      · 其余（期权链降级 / 异常流兜底 / 缺取数状态记录、证不出）⇒ False（举证责任在放宽一侧）。"""
+    sr = d.get("swarm_results") or {}
+    o = (sr.get("agent_details") or {}).get("OracleBeeEcho")
+    if not isinstance(o, dict) or o.get("error"):
+        return True
+    if ((sr.get("data_quality") or {}).get("OracleBeeEcho") or {}).get("options") != "real":
+        return False
+    st = (o.get("details") or {}).get("unusual_flow_status")
+    return isinstance(st, dict) and st.get("data_source") != "fallback"
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -2276,6 +2327,8 @@ _BOUNDARY_MARKERS = {
                   _marker_guard_scan_snapshot),
     "v0.45.750": ("agent_details 有 ScoutBeeNova、没有 CodeExecutorAgent",
                   _marker_code_executor_retired),
+    "v0.45.765": ("agent_details.OracleBeeEcho.details.fallback_not_scored is True（实时行）",
+                  _marker_oracle_fallback_not_scored),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -2327,6 +2380,9 @@ _BOUNDARY_EQUIVALENCE = {
                   _equiv_macro_single_path, _guard_row_has_single_path_marker),
     "v0.45.674": ("Guard 出错 / 不在本行，或当天全部 Guard 行的宏观记录（快照出的那几个键）读得出且是同一份 ⇒ 本版改动是空操作",
                   _equiv_macro_scan_snapshot, _guard_row_has_scan_snapshot_marker),
+    "v0.45.765": ("Oracle 出错 / 不在本行，或 data_quality.options 是 real 且异常流不是兜底（unusual_flow_status.data_source != "
+                  "\"fallback\"）⇒ 本版改动是空操作",
+                  _equiv_oracle_no_fallback_score, _oracle_row_has_no_fallback_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。

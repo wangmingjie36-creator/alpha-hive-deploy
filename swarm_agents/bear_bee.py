@@ -195,7 +195,11 @@ class BearBeeContrarian(BeeAgent):
                     if iv_rank > 80:
                         options_bear = max(options_bear, 7.0)
                         bearish_signals.append(f"IV Rank {iv_rank:.0f}（恐慌高位）")
-            except (ImportError, ConnectionError, ValueError, KeyError, TypeError, AttributeError) as e:
+            # v0.45.767：补 OSError，与 Oracle 取同一个 OptionsAgent 时的 except 元组一致（URLError / SSLError / socket 超时都是它的子类，
+            # 不是 ConnectionError）。v0.45.765 起 Oracle 吞下这类异常后弃权、不上板 ⇒ Bear 必走到这里、多半再撞同一个异常；
+            # 此前它从这里漏出去 ⇒ `Bear.analyze`（AGENT_ERRORS）与扫描的逐蜂 except 都不接 ⇒ 整只票这一轮丢掉、按重试重跑全部蜂。
+            # 守卫 tests/test_bear_options_dq_from_oracle.py::TestBearSurvivesWhatOracleSurvives
+            except (ImportError, ConnectionError, ValueError, KeyError, TypeError, OSError, AttributeError) as e:
                 _log.warning("BearBeeContrarian options fallback failed for %s: %s", ticker, e)
                 data_sources["options"] = "unavailable"
 

@@ -93,6 +93,25 @@ AGENT_RESULT_SCHEMA = {
 }
 
 
+def agent_record_failed(rec: Any) -> bool:
+    """一条**已记录**的蜂结果（扫描存档里的 `agent_details[蜂]`，或蜂直接返回的 dict）是不是出错占位（v0.45.768）。
+
+    出错的蜂照样带着 `score=5.0` / `direction="neutral"`（`swarm_agents.utils.make_error_result` 的占位），蜂后按 `error`
+    键把它排除出评分与计票——但存档的读者看到的是一个与「真打了 5.0、真判中性」逐字节同形的值。判据两条取或：
+      · `error` 为真（v0.45.182 起 `agent_details` 才透出这个键）；
+      · discovery 以 `Error` / `❌` 开头（`make_error_result` 的 `Error: …`；更早的记录只有这一条线索）。
+    全部 2721 份归档（03 ~ 11-10）实测：`error` 为真的 244 条全部同时带前缀，只有前缀、没有这个键的 385 条全在老记录里
+    ⇒ 两条取或在历史上等于只看前缀，新写的 error 形状结果（如 v0.45.765 Oracle 弃权）缺前缀时也认得出。
+    Alpha Bot 深度页的 `deep_report._failed` 只看前缀（纯函数、只 import options_compare），在全部历史上与本函数逐条相同。
+    """
+    if not isinstance(rec, dict):
+        return False
+    if rec.get("error"):
+        return True
+    disc = str(rec.get("discovery") or "").lstrip()
+    return disc.startswith("Error") or disc.startswith("❌")
+
+
 @dataclass
 class AgentResult:
     """单个 Agent 的分析结果（标准化输出格式）

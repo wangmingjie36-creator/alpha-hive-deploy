@@ -2286,6 +2286,8 @@ class AlphaHiveDailyReporter:
             _oracle_details["hv_gap_checked"] = True
             # v0.45.423 世代印记，理由同上（twelve_data 当日那根按收盘判；缺键会被读成旧代码）
             _oracle_details["td_session_aware"] = True
+            # v0.45.765 世代印记，理由同上（本回退不经 OracleBee 的融合分；缺键会被读成旧代码）
+            _oracle_details["fallback_not_scored"] = True
             # ── BuzzBee discovery（含 F&G）──
             _buzz_disc = ""
             if _fg_value is not None:

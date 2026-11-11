@@ -135,6 +135,10 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         return svc.bars(request.path_params["ticker"])
 
     @api
+    def minute_bars(request):
+        return svc.minute_bars(request.path_params["ticker"], _q(request, "date"))
+
+    @api
     def premium(request):
         return svc.premium(request.path_params["ticker"], dict(request.query_params))
 
@@ -167,6 +171,18 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
     @api
     def wheel(request):
         return svc.wheel()
+
+    @api
+    def deep(request):
+        return svc.deep(request.path_params["ticker"], _q(request, "date"))
+
+    @api
+    def compare(request):
+        return svc.compare(_q(request, "date"))
+
+    @api
+    def compare_ticker(request):
+        return svc.compare_ticker(request.path_params["ticker"], _q(request, "date"))
 
     @api
     def wheel_screen(request):
@@ -238,6 +254,12 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         except BadRequest as exc:
             return _json({"error": str(exc)}, 400)
 
+    def watch(request: Request):
+        try:
+            return _json(svc.watch(request.path_params["ticker"]))
+        except BadRequest as exc:
+            return _json({"error": str(exc)}, 400)
+
     def index(request: Request):
         return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
@@ -253,15 +275,20 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/assess", assess),
         Route("/api/history/{ticker}", history),
         Route("/api/bars/{ticker}", bars),
+        Route("/api/minute-bars/{ticker}", minute_bars),
         Route("/api/premium/{ticker}", premium),
         Route("/api/method", method),
         Route("/api/intraday/{ticker}", intraday),
         Route("/api/intraday-heat/{ticker}", intraday_heat),
         Route("/api/intraday-dates/{ticker}", intraday_dates),
         Route("/api/intraday/{ticker}/snap", snap_now, methods=["POST"]),
+        Route("/api/watch/{ticker}", watch, methods=["POST"]),
         Route("/api/straddle", straddle),
         Route("/api/hedge", hedge),
         Route("/api/wheel", wheel),
+        Route("/api/deep/{ticker}", deep),
+        Route("/api/compare", compare),
+        Route("/api/compare/{ticker}", compare_ticker),
         Route("/api/wheel/screen", wheel_screen),
         Route("/api/wheel/screen/prices", wheel_screen_prices),
         Route("/api/wheel/screen/chain/{ticker}", wheel_screen_chain),

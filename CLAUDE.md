@@ -19,7 +19,7 @@
 
 - **报告生成模式：Cowork 本地推理，永远不用 Claude API / Opus**
   - 用户使用 Cowork 本地 LLM 推理，不是 Anthropic API
-  - 深度报告生成器 `generate_deep_v2.py` 已于 v0.45.724 退役（最后产物 2026-07-29）；要恢复先问用户，且仍只许 opt-in 调 LLM
+  - 深度报告生成器 `generate_deep_v2.py` 已于 v0.45.724 退役（最后产物 2026-07-29）；要恢复先问用户，且仍只许 opt-in 调 LLM；现由 Alpha Bot「深度」页接替（v0.45.760，读扫描结果，用户定不恢复旧生成器）
   - 任何脚本默认必须是 `--no-llm`，只有用户在终端显式确认才允许 `--use-llm`
   - 禁止在代码里用 `api_key 存在就自动开 LLM` 的逻辑
   - 不要添加"未找到 API Key"警告或提示创建 key 文件

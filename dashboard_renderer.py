@@ -17,6 +17,7 @@ _log = logging.getLogger("alpha_hive.dashboard_renderer")
 from pathlib import Path as _Path_mod
 from jinja2 import Environment
 import gex_state as _gex_state
+from models import agent_record_failed
 
 
 # ── 报告文件名 → 日期：iCloud 重名副本闸（v0.45.192） ──
@@ -2201,6 +2202,60 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
 
 # 注：_ml_combined_score 已删除（v0.33.0）—— caa432d (2026-03-30) 决定 ML combined_probability
 # 不用于 dashboard 排名（无区分度），该函数自此从渲染路径移除、成为死代码，今删除。
+_DIVERGENCE_BEES = [
+    "ScoutBeeNova", "RivalBeeVanguard", "OracleBeeEcho",
+    "ChronosBeeHorizon", "BuzzBeeWhisper", "GuardBeeSentinel",
+    "BearBeeContrarian",
+]
+_DIVERGENCE_BEE_SHORT = {
+    "ScoutBeeNova": "Scout", "RivalBeeVanguard": "Rival",
+    "OracleBeeEcho": "Oracle", "ChronosBeeHorizon": "Chronos",
+    "BuzzBeeWhisper": "Buzz", "GuardBeeSentinel": "Guard",
+    "BearBeeContrarian": "Bear",
+}
+
+
+def _swarm_divergence_entry(sd: dict) -> Optional[dict]:
+    """网站「蜂群分歧度」单只票的一格（v0.45.768 从 `render_dashboard_html` 原样抽出）。没有可用的蜂 ⇒ None。
+
+    v0.45.768：出错的蜂带着占位 5.0 / 中性（`swarm_agents.utils.make_error_result`），不是它的判断——不进标准差 / 极差 /
+    共识度，也不列在蜂名单里（判据唯一实现 `models.agent_record_failed`）。守卫 tests/test_failed_agent_placeholders.py
+    """
+    ad = sd.get("agent_details", {})
+    scores = []
+    votes = {"bullish": 0, "bearish": 0, "neutral": 0}
+    bees = []  # [{name, score, direction}]
+    for bn in _DIVERGENCE_BEES:
+        ba = ad.get(bn, {})
+        if agent_record_failed(ba):
+            continue
+        bs = ba.get("score")
+        bd = str(ba.get("direction", "neutral")).lower()
+        if bs is not None:
+            scores.append(float(bs))
+            votes[bd] = votes.get(bd, 0) + 1
+            bees.append({
+                "name": _DIVERGENCE_BEE_SHORT.get(bn, bn),
+                "score": round(float(bs), 1),
+                "dir": "bull" if bd == "bullish" else ("bear" if bd == "bearish" else "neut"),
+            })
+    if not scores:
+        return None
+    mean = sum(scores) / len(scores)
+    std = (sum((x - mean)**2 for x in scores) / len(scores)) ** 0.5
+    total = sum(votes.values())
+    majority = max(votes.values()) / total if total else 0
+    return {
+        "std": round(std, 2),
+        "spread": round(max(scores) - min(scores), 1),
+        "consensus": round(majority * 100, 0),
+        # 加入共振标志（与蜂群核心决策一致）
+        "resonance": sd.get("resonance", {}).get("resonance_detected", False),
+        "votes": votes,
+        "bees": bees,
+    }
+
+
 def render_dashboard_html(report: Dict, date_str: str,
                          report_dir, opportunities: List,
                          dashboard_css: str = None) -> str:
@@ -3070,55 +3125,13 @@ def render_dashboard_html(report: Dict, date_str: str,
     except Exception as _hm_err:
         _log.debug("板块热力图生成失败: %s", _hm_err)
 
-    # ── Feature: 蜂群分歧度（Swarm Divergence）──
+    # ── Feature: 蜂群分歧度（Swarm Divergence）──（v0.45.768 抽成 `_swarm_divergence_entry`，逻辑不变 + 跳过出错的蜂）
     _swarm_divergence: dict = {}
-    _BEE_NAMES = [
-        "ScoutBeeNova", "RivalBeeVanguard", "OracleBeeEcho",
-        "ChronosBeeHorizon", "BuzzBeeWhisper", "GuardBeeSentinel",
-        "BearBeeContrarian",
-    ]
-    _BEE_SHORT = {
-        "ScoutBeeNova": "Scout", "RivalBeeVanguard": "Rival",
-        "OracleBeeEcho": "Oracle", "ChronosBeeHorizon": "Chronos",
-        "BuzzBeeWhisper": "Buzz", "GuardBeeSentinel": "Guard",
-        "BearBeeContrarian": "Bear",
-    }
     for _dv_tk in all_tickers_sorted:
         try:
-            _dv_sd = swarm_detail.get(_dv_tk, {})
-            _dv_ad = _dv_sd.get("agent_details", {})
-            _dv_scores = []
-            _dv_votes = {"bullish": 0, "bearish": 0, "neutral": 0}
-            _dv_bees = []  # [{name, score, direction}]
-            for _bn in _BEE_NAMES:
-                _ba = _dv_ad.get(_bn, {})
-                _bs = _ba.get("score")
-                _bd = str(_ba.get("direction", "neutral")).lower()
-                if _bs is not None:
-                    _dv_scores.append(float(_bs))
-                    _dv_votes[_bd] = _dv_votes.get(_bd, 0) + 1
-                    _dv_bees.append({
-                        "name": _BEE_SHORT.get(_bn, _bn),
-                        "score": round(float(_bs), 1),
-                        "dir": "bull" if _bd == "bullish" else ("bear" if _bd == "bearish" else "neut"),
-                    })
-            if _dv_scores:
-                _dv_mean = sum(_dv_scores) / len(_dv_scores)
-                _dv_std = (sum((x - _dv_mean)**2 for x in _dv_scores) / len(_dv_scores)) ** 0.5
-                _dv_max = max(_dv_scores)
-                _dv_min = min(_dv_scores)
-                _dv_total = sum(_dv_votes.values())
-                _dv_majority = max(_dv_votes.values()) / _dv_total if _dv_total else 0
-                # 加入共振标志（与蜂群核心决策一致）
-                _dv_resonance = _dv_sd.get("resonance", {}).get("resonance_detected", False)
-                _swarm_divergence[_dv_tk] = {
-                    "std": round(_dv_std, 2),
-                    "spread": round(_dv_max - _dv_min, 1),
-                    "consensus": round(_dv_majority * 100, 0),
-                    "resonance": _dv_resonance,
-                    "votes": _dv_votes,
-                    "bees": _dv_bees,
-                }
+            _dv_entry = _swarm_divergence_entry(swarm_detail.get(_dv_tk, {}))
+            if _dv_entry is not None:
+                _swarm_divergence[_dv_tk] = _dv_entry
         except Exception:
             pass
 

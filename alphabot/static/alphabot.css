@@ -1,33 +1,36 @@
-/* Alpha Bot —— 暖色纸面（Claude 设计语言）。颜色只在 :root 定义一次，下面一律用变量。
-   数据色：正 gamma = 蓝、负 gamma = 橙（发散配色，已过色盲校验）；中性 = 暖灰。
-   陶土橙 --clay 只用于品牌标记与焦点环，不用于数据。 */
+/* Alpha Bot —— 深色交易终端（v0.45.762 起；此前是暖色纸面）。颜色只在 :root 定义一次，下面一律用变量。
+   数据色：正 / 涨 / 赚 = 绿、负 / 跌 / 亏 = 红（绿涨红跌，美股习惯，用户 2026-11-11 定）；中性 = 冷灰。
+   ⚠️ 红绿对红绿色弱不友好——凡用颜色表正负的地方都同时带正负号、文字或位置（零线两侧），别只靠颜色。
+   琥珀 --clay 只用于品牌标记、焦点环与财报标记，不用于数据。
+   变量名沿用纸面时代的（--paper = 页面底、--ink = 正文），改名要动全部页面，不值得。 */
 :root {
-  --paper: #faf9f5;
-  --surface: #ffffff;
-  --sunk: #f3f1ea;
-  --line: #e8e6dc;
-  --line-strong: #d6d3c6;
-  --ink: #141413;
-  --ink-2: #4d4c48;
-  --ink-3: #6f6e69;
-  --clay: #d97757;
-  --clay-ink: #b3532f;
-  --pos: #3f7fc4;
-  --pos-soft: #dbe7f4;
-  --neg: #d0673f;
-  --neg-soft: #f6e0d6;
-  --neutral: #b0aea5;
-  --ok: #5f7a3f;
-  --warn: #7d560c;
-  --warn-soft: #f5ecd4;
-  --pos-ink: #25548a;
-  --neg-ink: #8f3e1e;
-  --tint: #f7f3ea;
-  --tint-strong: #efe9dc;
-  --serif: "Lora", "Songti SC", "Noto Serif SC", Georgia, serif;
+  color-scheme: dark;
+  --paper: #0b0e13;
+  --surface: #12161d;
+  --sunk: #1a2029;
+  --line: #222a35;
+  --line-strong: #344052;
+  --ink: #e8ebf0;
+  --ink-2: #b4bcc8;
+  --ink-3: #8691a1;
+  --clay: #e3b341;
+  --clay-ink: #efc763;
+  --pos: #1fbf7a;
+  --pos-soft: #113a2a;
+  --neg: #f0465a;
+  --neg-soft: #47161f;
+  --neutral: #5d6877;
+  --ok: #1fbf7a;
+  --warn: #e7b955;
+  --warn-soft: #3a2e12;
+  --pos-ink: #4fdc9d;
+  --neg-ink: #ff7d8b;
+  --tint: #171d26;
+  --tint-strong: #212a37;
+  --serif: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
   --sans: "Poppins", -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
   --data: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
-  --radius: 10px;
+  --radius: 8px;
   --gutter: 28px;
 }
 
@@ -95,6 +98,7 @@ h3 { font: 600 13px/1.3 var(--sans); margin: 0 0 8px; color: var(--ink-2); lette
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; min-width: 0; }
 .panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
 .panel .note { font-size: 12.5px; color: var(--ink-3); margin-top: 10px; }
+.head-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .chart { width: 100%; height: 420px; }
 .chart.tall { height: 560px; }
 .chart.short { height: 280px; }
@@ -191,7 +195,7 @@ tr.sel td { background: var(--tint-strong); }
 .focus-list { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .focus-list .chip button { border: 0; background: none; cursor: pointer; padding: 0 0 0 2px; color: var(--ink-3); }
 
-/* ── 跨式账本（盈亏沿用数据色：赚 = 蓝、亏 = 橙） */
+/* ── 跨式账本（盈亏沿用数据色：赚 = 绿、亏 = 红） */
 .up { color: var(--pos-ink); }
 .down { color: var(--neg-ink); }
 .sd-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(430px, 100%), 1fr)); gap: 16px; }
@@ -286,7 +290,7 @@ td .reason.warn, td.reason.warn { color: var(--warn); }
 .chat-drawer {
   position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100vw); z-index: 50;
   display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--line);
-  box-shadow: -8px 0 24px rgba(20, 20, 19, .08);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, .45);
 }
 .chat-head { display: flex; align-items: baseline; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--line); }
 .chat-head strong { font: 600 15px/1.2 var(--sans); }

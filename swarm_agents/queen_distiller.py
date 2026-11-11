@@ -822,8 +822,13 @@ class QueenDistiller:
         # 实测不带信息（见本类 `NON_VOTING_AGENTS` 注释）。⚠️ 勿重建：要类似机制先写预注册（它会改变开出哪些单，
         # 截断策略层优势检验的样本）。守卫 `tests/test_bull_veto_retired.py`。
 
+        # v0.45.768：只记**有效结果**的方向（同下面 agent_breakdown 的 `_all_dirs`）。此前从 all_results 建 ⇒ 出错的蜂带着
+        # `make_error_result` 的占位「中性」进 `agent_directions`，再流进 ML 特征 `agent_agreement`（训练端读
+        # `predictions.agent_directions`、服务端读这里，同一个公式）与逐蜂准确率诊断——那张「中性票」蜂后自己从来没数过。
+        # 两端同读这个键 ⇒ 改在源头，训练 / 服务口径一起变，不造 skew。出错的蜂仍在 `agent_details` 里（带 error），审计轨迹不丢。
+        # 11-09 起生产 60 行没有出错的蜂 ⇒ 逐位不变；守卫 tests/test_failed_agent_placeholders.py
         per_agent_directions = {}
-        for r in all_results:
+        for r in valid_results:
             src = r.get("source", "")
             if src:
                 per_agent_directions[src] = r.get("direction", "neutral")

@@ -313,10 +313,40 @@ def demo_bars(ticker: str, as_of: Optional[str] = None, days: int = 120) -> List
     out, d, i = [], d_end, len(closes) - 1
     while i >= 0:
         if d.weekday() < 5:
-            out.append({"date": d.isoformat(), "close": round(closes[i], 2)})
+            c = closes[i]
+            prev = closes[i - 1] if i > 0 else c
+            o = prev * (1.0 + 0.008 * (_rand(seed, 40000 + i) - 0.5))        # 开盘 = 前收附近跳一点
+            hi = max(o, c) * (1.0 + 0.010 * _rand(seed, 50000 + i))
+            lo = min(o, c) * (1.0 - 0.010 * _rand(seed, 60000 + i))
+            out.append({"date": d.isoformat(), "close": round(c, 2),
+                        "open": round(o, 2), "high": round(max(hi, c, o), 2), "low": round(min(lo, c, o), 2),
+                        "volume": round(2e6 * (0.5 + _rand(seed, 30000 + i)))})
             i -= 1
         d -= timedelta(days=1)
     return list(reversed(out))
+
+
+def demo_minutes(ticker: str, day: str) -> List[Dict[str, float]]:
+    """合成的 1 分钟线（09:30–15:59，390 根）：现价沿盘中快照演示用的同一条小路径走（`service._demo_intraday` 的 shift），加一点逐分钟抖动。"""
+    t = str(ticker).upper()
+    seed = _seed(t) + sum(ord(ch) for ch in str(day))
+    base = spot_for(t)
+
+    def px(m: float) -> float:
+        i = m / 10.0
+        return base * (1.0 + 0.012 * math.sin(i / 6.0 + (_seed(t) % 7)) + 0.0006 * i)
+    out, prev = [], px(0)
+    for m in range(390):
+        c = px(m + 1) * (1.0 + 0.0012 * (_rand(seed, 70000 + m) - 0.5))
+        o = prev
+        hi = max(o, c) * (1.0 + 0.0008 * _rand(seed, 80000 + m))
+        lo = min(o, c) * (1.0 - 0.0008 * _rand(seed, 90000 + m))
+        hh, mm = divmod(9 * 60 + 30 + m, 60)
+        out.append({"t": f"{hh:02d}:{mm:02d}", "open": round(o, 2), "high": round(max(hi, o, c), 2),
+                    "low": round(min(lo, o, c), 2), "close": round(c, 2),
+                    "volume": round(40000 * (0.4 + _rand(seed, 95000 + m)) * (2.2 if m < 30 or m > 360 else 1.0))})
+        prev = c
+    return out
 
 
 #: 演示用的「60 日 β / 长窗口 β」：能源（XOM）两套符号相反，其余同号——演示里能直接看到「对照」的意义

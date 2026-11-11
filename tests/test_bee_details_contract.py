@@ -67,12 +67,32 @@ def _schema(node: ast.AST):
     return out
 
 
-def _producers() -> Dict[str, list]:
-    """source → [details 键树, ...]。只收 `source=` 为字面量的构造（error 结果的
-    `make_error_result` 用变量 source，天然排除）。"""
+def _assigned_dict(name: str, call: ast.AST, parents: Dict) -> ast.AST:
+    """`details=<变量>`：在同一函数里找对这个名字的**唯一一次**赋值，值是字面量 dict 就用它（v0.45.765：Oracle 的成功 / 弃权
+    两条路共用一份 `_details`）。找不到 / 赋值不止一次 / 值不是字面量 ⇒ 原样返回 Name ⇒ 记不可证（不猜）。"""
+    fn = call
+    while fn in parents and not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        fn = parents[fn]
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return ast.Name(id=name)
+    vals = [a.value for a in ast.walk(fn) if isinstance(a, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == name for t in a.targets)]
+    vals += [a.value for a in ast.walk(fn) if isinstance(a, (ast.AugAssign, ast.AnnAssign))
+             and isinstance(a.target, ast.Name) and a.target.id == name]
+    return vals[0] if len(vals) == 1 and isinstance(vals[0], ast.Dict) else ast.Name(id=name)
+
+
+def _producers(sources=None) -> Dict[str, list]:
+    """source → [details 键树, ...]。只收 `source=` 为字面量、且**不带 `error=`** 的构造：
+    error 结果不是 details 的生产者——`_read_bee_detail` 对报了 error 的蜂直接返回 default（不算契约断裂）。
+    `make_error_result` 用变量 source，本来就排除；v0.45.765 起 Oracle 的「期权链不可用 ⇒ 弃权」用字面量 source + `error=`，按后者排除。
+    `details=` 是变量时按 `_assigned_dict` 解析。`sources` 可传 {文件名: 源码}，给扫描器自证用。"""
+    items = ([(py.name, py.read_text(encoding="utf-8")) for py in sorted((ROOT / "swarm_agents").glob("*.py"))]
+             if sources is None else list(sources.items()))
     found: Dict[str, list] = {}
-    for py in sorted((ROOT / "swarm_agents").glob("*.py")):
-        tree = ast.parse(py.read_text(encoding="utf-8"))
+    for _fname, text in items:
+        tree = ast.parse(text)
+        parents = {c: p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
         for n in ast.walk(tree):
             if not (isinstance(n, ast.Call) and getattr(n.func, "id", None) == "AgentResult"):
                 continue
@@ -80,7 +100,12 @@ def _producers() -> Dict[str, list]:
             src = kw.get("source")
             if not (isinstance(src, ast.Constant) and isinstance(src.value, str)):
                 continue
+            err = kw.get("error")
+            if err is not None and not (isinstance(err, ast.Constant) and err.value is None):
+                continue
             det = kw.get("details")
+            if isinstance(det, ast.Name):
+                det = _assigned_dict(det.id, n, parents)
             found.setdefault(src.value, []).append(_schema(det) if det is not None else {})
     return found
 
@@ -134,6 +159,29 @@ class TestProducerScanner:
         assert _check(producers, "OracleBeeEcho", "iv_rank") == "unprovable"
         # Scout 的 components 值是变量 ⇒ 其下不可证
         assert _check(producers, "ScoutBeeNova", "components.social_volume") == "unprovable"
+
+    def test_scanner_skips_error_constructions_and_resolves_a_details_variable(self):
+        """自证（v0.45.765 加的两条规则）：带 `error=` 的构造不算生产者；`details=<变量>` 解析到它唯一的字面量赋值；
+        赋值两次 / 不是字面量 ⇒ 不可证（不猜）。变红的变异：去掉 error 过滤（⇒ 2 处构造）；解析时取第一次赋值。"""
+        src = (
+            "def ok(self):\n"
+            "    d = {'a': 1, 'b': {'c': 2}}\n"
+            "    if x:\n"
+            "        return AgentResult(source='Fake', details=d, error='弃权')\n"
+            "    return AgentResult(source='Fake', details=d)\n"
+            "def twice(self):\n"
+            "    d = {'a': 1}\n"
+            "    d = {'z': 1}\n"
+            "    return AgentResult(source='Twice', details=d)\n"
+            "def call(self):\n"
+            "    d = build()\n"
+            "    return AgentResult(source='Call', details=d, error=None)\n"
+        )
+        got = _producers(sources={"fake.py": src})
+        assert len(got["Fake"]) == 1
+        assert _check(got, "Fake", "b.c") == "ok" and _check(got, "Fake", "nope") == "missing"
+        assert _check(got, "Twice", "a") == "unprovable" and _check(got, "Twice", "z") == "unprovable"
+        assert _check(got, "Call", "anything") == "unprovable", "error=None 不是 error 构造，照收"
 
     def test_the_original_bug_would_have_been_red(self, producers):
         """正对照：原缺陷那两个键，扫描器必须判 missing（Buzz）与 unprovable-但不在显式键里（Oracle）。"""

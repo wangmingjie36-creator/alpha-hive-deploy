@@ -28,7 +28,7 @@ function timeline(p, today) {
     h("span", { class: "lbl r", style: { left: "100%" } }, `到期 ${String(p.expiry).slice(5)}`));
 }
 
-// 到期盈亏平衡带 K ± 入场权利金 与现价的位置。卖跨式：带内赚（蓝）；买跨式：带外赚。
+// 到期盈亏平衡带 K ± 入场权利金 与现价的位置。卖跨式：带内赚（绿）；买跨式：带外赚。
 function bandBar(side, be, S) {
   if (!be?.available) return h("div", { class: "small muted" }, "盈亏平衡带不可得");
   const lo = be.lo, hi = be.hi, w = hi - lo;

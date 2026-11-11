@@ -109,7 +109,7 @@ function heatSub(hm) {
     return `行权价 × 拍；${what}；call 与 put 都按正值相加，颜色越深越活跃。实线 = 现价，虚线 = 最近 Zero Gamma`;
   }
   const what = hm.mode === "delta" ? "这一拍减上一拍同一行权价" : "净 GEX（美元 / 现价每变动 1%）";
-  return `行权价 × 拍；${what}；蓝 = 正、橙 = 负。实线 = 现价，虚线 = 最近 Zero Gamma`;
+  return `行权价 × 拍；${what}；绿 = 正、红 = 负。实线 = 现价，虚线 = 最近 Zero Gamma`;
 }
 function heatNotes(hm) {
   if (!hm.available) return null;

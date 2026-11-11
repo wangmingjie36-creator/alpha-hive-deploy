@@ -121,7 +121,7 @@ FIELDS: List[Dict[str, Any]] = [
     # 但键在而值全 None（全部取数失败）⇒ 照常判降级。基线（取到的日子）27~30/30。
     {"key": "unusual_flow", "path": "OracleBeeEcho.unusual_flow_ok", "recorded_key": "unusual_flow_ok",
      "min_coverage": 0.70, "source": "yfinance 期权链(异常流)",
-     "note": "Oracle 丢了异常流 ⇒ 方向与加分都变（本字段缺 = 取数失败，不是「无异常」）；只记录、评分仍按 5.0 中性混入"},
+     "note": "Oracle 丢了异常流 ⇒ 方向与加分都变（本字段缺 = 取数失败，不是「无异常」）；v0.45.765 起取不到就不进分（只用期权分）"},
     # v0.45.443：分析师目标价。08-04 起 38 个扫描日里 8 天 0/30（08-04/06/11/12/14、09-17/24/25）、5 天部分缺失（16~22/30），
     # 此前没有任何会红的观测点：yfinance `analyst_price_targets` 在取数失败时按库默认（hide_exceptions）返回空 `{}`，
     # 与「该票没有分析师覆盖」在返回值里不可区分（v0.45.270 已记），数据质量标签 `unavailable` 又只占几十个标签之一
