@@ -1,11 +1,11 @@
-// 图表：ECharts（本地托管）+ 一套暖色纸面主题。颜色从 CSS 变量读，保证图与页面是同一套 token。
+// 图表：ECharts（本地托管）+ 深色终端主题（v0.45.762）。颜色从 CSS 变量读，保证图与页面是同一套 token。
 import { isNum, usdShort, num, money } from "./lib.js";
 
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 export const C = () => ({
   ink: css("--ink"), ink2: css("--ink-2"), ink3: css("--ink-3"), line: css("--line"), lineStrong: css("--line-strong"),
   sunk: css("--sunk"), surface: css("--surface"), pos: css("--pos"), neg: css("--neg"), neutral: css("--neutral"),
-  clay: css("--clay"), posSoft: css("--pos-soft"), negSoft: css("--neg-soft"),
+  clay: css("--clay"), paper: css("--paper"), posSoft: css("--pos-soft"), negSoft: css("--neg-soft"),
 });
 const FONT = '-apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Helvetica Neue", Arial, sans-serif';
 
@@ -112,7 +112,7 @@ function niceInterval(range) {
   return (m < 1.5 ? 1 : m < 3 ? 2 : m < 7 ? 5 : 10) * p;
 }
 
-// gamma 曲线：总 GEX 对假想现价。0 以上蓝、0 以下橙：在过零处插入 y=0 的点，拆成两条带面积的线
+// gamma 曲线：总 GEX 对假想现价。0 以上绿、0 以下红：在过零处插入 y=0 的点，拆成两条带面积的线
 // （不用 visualMap：它在两根数值轴的折线上会抛错，ECharts 5.5.1 实测）。
 export function gammaCurve(el, curve, spot) {
   const c = C();
@@ -201,6 +201,74 @@ export function scatter(el, { points, xName, yName, vlines = [], hlines = [], xF
   });
 }
 
+// 日线涨跌柱（标的页「价格」）：每根的实体 = 前一日收盘 → 当日收盘，涨绿跌红；下方成交量按同一涨跌上色。
+// ⚠️ 这不是完整 K 线：共享日线入口只有收盘与成交量，没有开 / 高 / 低 ⇒ 不画影线、不拿别的数冒充开盘价。
+// 第一根没有「前一日」⇒ 画成一条平线（开 = 收）、成交量用中性色。水平线 / ±1σ 带与旧折线图同一套参数。
+export function candles(el, { bars, hmarks = [], bands = [], yFmt = (v) => num(v) }) {
+  const c = C();
+  const rows = bars.filter((r) => isNum(r.close));
+  const x = rows.map((r) => r.date.slice(5));
+  // 这根有开高低 ⇒ 真 K 线（实体 = 开 → 收，影线 = 低 ~ 高，颜色按收对开）；
+  // 没有 ⇒ 退回「前收 → 收盘」的无影线柱（颜色按收对前收）。逐根判，两种可以混在一张图里
+  const full = (r) => isNum(r.open) && isNum(r.high) && isNum(r.low);
+  const openOf = (i) => (full(rows[i]) ? rows[i].open : i > 0 ? rows[i - 1].close : rows[i].close);
+  const dir = (i) => Math.sign(rows[i].close - openOf(i));
+  const colorOf = (d) => (d > 0 ? c.pos : d < 0 ? c.neg : c.neutral);
+  // ECharts 蜡烛数据顺序：[开, 收, 低, 高]
+  const k = rows.map((r, i) => { const o = openOf(i), cl = r.close;
+    return full(r) ? [o, cl, r.low, r.high] : [o, cl, Math.min(o, cl), Math.max(o, cl)]; });
+  const hasVol = rows.some((r) => isNum(r.volume) && r.volume > 0);
+  const marks = hmarks.map((m) => hline(m.value, m.label, m.color || c.ink2, m.type || "dashed", m.width || 1));
+  const last = rows[rows.length - 1];
+  if (last) {
+    const lc = colorOf(dir(rows.length - 1));
+    marks.push({ yAxis: last.close, lineStyle: { color: lc, type: "solid", width: 1, opacity: 0.7 },
+      label: { formatter: yFmt(last.close), position: "end", color: c.paper, backgroundColor: lc,
+        padding: [3, 5], borderRadius: 3, fontSize: 11, fontWeight: 600 } });
+  }
+  const area = bands.map((b) => [{ yAxis: b.lo, itemStyle: { color: b.color || c.sunk, opacity: 0.55 },
+    label: { show: !!b.label, formatter: b.label, color: c.ink3, fontSize: 11, position: "insideTopLeft" } }, { yAxis: b.hi }]);
+  // 水平线与 ±1σ 带可能在价格区间之外：把它们包进纵轴范围，否则被裁掉（看不到 ≠ 没有）
+  const ys = [...rows.flatMap((r) => (full(r) ? [r.low, r.high] : [r.close])), ...hmarks.map((m) => m.value), ...bands.flatMap((b) => [b.lo, b.hi])].filter(isNum);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys), pad = (y1 - y0) * 0.04 || 1;
+  const right = el.clientWidth < 520 ? 60 : 104;
+  const tip = (ps) => {
+    const i = ps[0].dataIndex, r = rows[i];
+    // 涨跌幅一律对前收（和柱子颜色不是一回事：真 K 线的颜色是收对开，跳空高开后收低就是「涨了但柱子是红的」）
+    const chg = i > 0 ? (r.close / rows[i - 1].close - 1) * 100 : null;
+    const d = chg === null ? 0 : Math.sign(chg);
+    const sign = d > 0 ? "+" : d < 0 ? "−" : "";
+    return `${r.date}<br>收盘 <b>${yFmt(r.close)}</b>`
+      + (chg === null ? "" : ` <span style="color:${colorOf(d)}">${sign}${num(Math.abs(chg), 2)}%</span>`)
+      + (full(r) ? `<br>开 ${yFmt(r.open)}　高 ${yFmt(r.high)}　低 ${yFmt(r.low)}` : "<br>这根没有开高低")
+      + (chg === null ? "" : `<br>前收 ${yFmt(rows[i - 1].close)}`)
+      + (isNum(r.volume) ? `<br>成交量 ${num(r.volume / 1e6, 2)}M` : "");
+  };
+  return mount(el, {
+    animation: false,
+    grid: hasVol ? [{ left: 60, right, top: 20, bottom: "27%" }, { left: 60, right, top: "78%", bottom: 40 }]
+      : [{ left: 60, right, top: 20, bottom: 40 }],
+    tooltip: { trigger: "axis", formatter: tip, axisPointer: { type: "cross",
+      lineStyle: { color: c.lineStrong }, crossStyle: { color: c.lineStrong },
+      label: { backgroundColor: c.sunk, color: c.ink, borderColor: c.lineStrong, borderWidth: 1 } } },
+    axisPointer: { link: [{ xAxisIndex: "all" }] },
+    dataZoom: [{ type: "inside", xAxisIndex: hasVol ? [0, 1] : [0], start: 0, end: 100 }],
+    xAxis: [{ type: "category", data: x, boundaryGap: true, gridIndex: 0, axisLabel: { show: !hasVol } },
+      ...(hasVol ? [{ type: "category", data: x, boundaryGap: true, gridIndex: 1 }] : [])],
+    yAxis: [{ type: "value", min: y0 - pad, max: y1 + pad, gridIndex: 0, axisLabel: { formatter: yFmt, showMinLabel: false, showMaxLabel: false } },
+      ...(hasVol ? [{ type: "value", gridIndex: 1, splitNumber: 2, splitLine: { show: false },
+        axisLabel: { formatter: (v) => (v === 0 ? "" : `${num(v / 1e6, 0)}M`) } }] : [])],
+    series: [
+      { name: "日线", type: "candlestick", data: k, barMaxWidth: 14,
+        itemStyle: { color: c.pos, color0: c.neg, borderColor: c.pos, borderColor0: c.neg, borderColorDoji: c.neutral },
+        markLine: marks.length ? { symbol: "none", silent: true, animation: false, data: marks } : undefined,
+        markArea: area.length ? { silent: true, data: area } : undefined },
+      ...(hasVol ? [{ name: "成交量", type: "bar", xAxisIndex: 1, yAxisIndex: 1, barMaxWidth: 14,
+        data: rows.map((r, i) => ({ value: isNum(r.volume) ? r.volume : null, itemStyle: { color: colorOf(dir(i)), opacity: 0.55 } })) }] : []),
+    ],
+  });
+}
+
 export function columns(el, { x, values, fmt = usdShort, diverging = true, color }) {
   const c = C();
   return mount(el, {
@@ -213,7 +281,7 @@ export function columns(el, { x, values, fmt = usdShort, diverging = true, color
   });
 }
 
-// 盘中热力图：x 时间、y 行权价、值 = 净 GEX（发散：橙—暖灰—蓝）
+// 盘中热力图：x 时间、y 行权价、值 = 净 GEX（发散：红—深灰—绿）
 // 盘中热力图（行权价 × 拍）叠现价 / Zero Gamma 路径。x 为类目轴（按拍、不等距），y 为数值轴——
 // 价格线才能画在两个行权价之间；格子用 custom series 自己画（ECharts 的 heatmap 只认两根类目轴）。
 // 数据由服务端 intraday_heat.build 排好：cells 每行 [拍, 行权价（分桶时 = 桶中心）, 真值, 上色用的截断值, 桶里几个行权价]。

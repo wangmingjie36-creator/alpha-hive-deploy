@@ -2,7 +2,7 @@
 import { api, h, helpLink, num, money, pct, pctPts, usdShort, signedPct, distPct, signChip, seg, table, panel, isNum,
   downloadCSV, pref, setPref, timeAgo, SIGN_LABEL, CURVE_LABEL, ROUTE_LABEL, STRUCT_LABEL, TENOR_LABEL,
   EARN_LABEL, SOURCE_LABEL, fill, plain, reasonInfo, fetchReasonText } from "../lib.js";
-import { strikeBars, gammaCurve, lines, columns, payoff, C } from "../charts.js";
+import { strikeBars, gammaCurve, lines, columns, payoff, candles, C } from "../charts.js";
 import { premium } from "./premium.js";
 import { howtoPanel } from "./howto.js";
 import { state, tickers, refreshMeta } from "../app.js";
@@ -131,7 +131,7 @@ function levels(body, d) {
           sub: `美元 / 现价每变动 1% · ${basis === "oi" ? "按持仓 OI" : "按当日成交量（仅展示：成交量看不出买卖方向）"} · 现价 ±${Math.round((d.band_pct || 0.2) * 100)}%`,
           right: h("button", { class: "btn", type: "button", onclick: () => downloadCSV(`alphabot-${d.ticker}-gex-${view}.csv`, csvCols, v.strikes || []) }, "导出 CSV"),
         }, controls, h("div", { style: { height: "10px" } }), rows.length ? ladderEl : h("div", { class: "empty" }, "这个视图没有可用合约。"),
-        h("p", { class: "note" }, "正值（蓝）= 做市商被假设为净多 gamma，价格波动时倾向反向对冲、压低波动；负值（橙）相反。符号用朴素 OI 口径：call 记正、put 记负——个股上 put 侧可能整个反了，所以只作环境参考。")),
+        h("p", { class: "note" }, "正值（绿）= 做市商被假设为净多 gamma，价格波动时倾向反向对冲、压低波动；负值（红）相反。符号用朴素 OI 口径：call 记正、put 记负——个股上 put 侧可能整个反了，所以只作环境参考。")),
         panel("水平", { sub: `${VIEWS.find((x) => x[0] === view)[1]} · ${v.n_contracts ?? "—"} 个合约（行权价 × call/put）` }, levelCards(d, v, S))),
       h("div", { style: { height: "20px" } }),
       panel("Gamma 曲线", { sub: "每个合约固定自身 IV，在现价 ±20% 的假想价格上重算总 GEX；过零点就是 Zero Gamma（路由读的正是 ≤45 天视图的这条线）" },
@@ -373,8 +373,23 @@ async function price(body, d, t, alive) {
   const bands = [];
   if (isNum(em.monthly?.lo)) bands.push({ lo: em.monthly.lo, hi: em.monthly.hi, label: `月度 ±1σ（到 ${em.monthly.expiry}）`, color: c.sunk });
   const el = h("div", { class: "chart tall" });
-  fill(body, panel("收盘价与今日水平", {
-    sub: `最近 ${bars.length} 个交易日收盘（${b.source || ""}）；水平与 ±1σ 带只是**今天**的，历史水平叠其后价格的图在检验冻结前不提供（见口径页）` }, el));
-  lines(el, { x: bars.map((r) => r.date.slice(5)), series: [{ name: "收盘", data: bars.map((r) => r.close), color: c.ink }],
-    hmarks, bands, yFmt: (x) => num(x, 0) });
+  const o = b.ohlc || {};
+  const nFull = bars.filter((r) => isNum(r.open) && isNum(r.high) && isNum(r.low)).length;
+  const src = o.source && o.source !== b.source ? `收盘与成交量 ${b.source || ""}，开高低 ${o.source}` : (b.source || "");
+  const kind = nFull === bars.length ? "日 K 线：实体 = 开盘 → 收盘，影线 = 最低 ~ 最高，收高于开为绿、低于开为红"
+    : nFull > 0 ? `${nFull} 根是日 K 线（实体 = 开盘 → 收盘，带影线），其余 ${bars.length - nFull} 根没有开高低、画成前收 → 收盘的无影线柱`
+      : "每根 = 前一日收盘 → 当日收盘，涨绿跌红，没有影线（不是完整 K 线）";
+  const notes = [];
+  if (!nFull) {
+    const why = o.reason === "rate_limited" ? `Yahoo 限流${isNum(o.retry_after_sec) ? `，约 ${num(o.retry_after_sec, 0)} 秒后重开本页再试` : ""}`
+      : o.reason === "index_not_supported" ? "指数票暂不取开高低"
+        : o.reason === "no_bar_matched" ? "取到了，但没有一根的收盘与日线对得上" : (o.reason || "原因不明");
+    notes.push(h("p", { class: "callout warn" }, `开盘 / 最高 / 最低没取到（${why}），本图退回收盘对前收的涨跌柱。`));
+  } else if (o.close_mismatch || o.missing) {
+    notes.push(h("p", { class: "note" }, `${(o.close_mismatch || 0) + (o.missing || 0)} 根没拼上开高低：`
+      + `${o.missing || 0} 根 ${o.source} 没有这一天，${o.close_mismatch || 0} 根两个源的收盘相差超过 ${num((o.close_tol || 0) * 100, 1)}%（口径不同，不硬拼）。`));
+  }
+  fill(body, panel("日 K 线与今日水平", {
+    sub: `最近 ${bars.length} 个交易日（${src}）；${kind}；滚轮可缩放。水平与 ±1σ 带只是今天的，历史水平叠其后价格的图在检验冻结前不提供（见口径页）` }, el, ...notes));
+  candles(el, { bars, hmarks, bands, yFmt: (x) => num(x, 2) });
 }

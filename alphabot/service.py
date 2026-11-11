@@ -242,7 +242,7 @@ def default_watchlist() -> List[str]:
 
 
 def _default_bars(ticker: str) -> dict:
-    """日线收盘（价格页用）。只走 Twelve Data 共享入口（每日一次、有进程内缓存）；没配 key 就如实说不可得，
+    """日线收盘 + 成交量（价格页用；`volume` 是 v0.45.762 的纯新增，共享入口的行本来就带 `vol`；开高低另由 `AlphaBotService._with_ohlc` 拼）。只走 Twelve Data 共享入口（每日一次、有进程内缓存）；没配 key 就如实说不可得，
     **不**换别的源——别的源（本地价格索引）首次读取会写迁移标记，只读页面不该造成写入。"""
     try:
         import twelve_data
@@ -252,7 +252,7 @@ def _default_bars(ticker: str) -> dict:
         if not rows:
             return {"available": False, "reason": "twelve_data_returned_nothing", "bars": []}
         return {"available": True, "source": "twelve_data",
-                "bars": [{"date": str(r.get("date"))[:10], "close": r.get("close")} for r in rows]}
+                "bars": [{"date": str(r.get("date"))[:10], "close": r.get("close"), "volume": r.get("vol")} for r in rows]}
     except Exception as exc:  # noqa: BLE001
         # 自己的码（不叫 exception：溢价页把那个前缀读成「计算出错」，会把取数失败指错层）
         return {"available": False, "reason": f"bars_fetch_exception:{type(exc).__name__}: {exc}", "bars": []}
@@ -266,9 +266,16 @@ class AlphaBotService:
                  ledger_dir=None, live_ttl: float = LIVE_TTL_SEC, state_dir=None,
                  straddle_root=None, straddle_quote_fn=None, now_fn: Optional[Callable[[], datetime]] = None,
                  premium_root=None, beta_long_fn=None, wheel_prices_fn=None,
-                 completed_session_fn: Optional[Callable[[], Optional[str]]] = None, compare_root=None):
+                 completed_session_fn: Optional[Callable[[], Optional[str]]] = None, compare_root=None,
+                 ohlc_fn=None):
         self.fetch_fn = fetch_fn
         self.bars_fn = bars_fn or _default_bars
+        # 价格页 K 线的开高低（v0.45.762）：`ohlc_fn(标的) -> ({日期: {open, high, low, close}}, {n, reason, …})`。
+        # None 且日线也是缺省源 ⇒ `alphabot.price_ohlc.fetch_ohlc`（yfinance）；注入了 `bars_fn`（测试 / 演示）而没给它 ⇒ 不取，
+        # 免得测试里悄悄出网。成功的按 (标的, 美东日) 缓存；失败不入缓存，下次打开再试
+        self.ohlc_fn = ohlc_fn
+        self._ohlc_default = ohlc_fn is None and bars_fn is None and not demo
+        self._ohlc_cache: Dict[tuple, dict] = {}
         self.clock = clock
         self.demo = demo
         self.ledger_dir = ledger_dir          # None ⇒ 账本自己解析（生产数据根）；只读
@@ -313,7 +320,7 @@ class AlphaBotService:
                       "premium_computed": 0, "premium_cache_hits": 0, "premium_failures": 0,
                       "howto_failures": 0, "yf_fallback_used": 0, "yf_fallback_failed": 0,
                       "beta_sens_computed": 0, "beta_sens_failures": 0, "yf_rate_limited": 0,
-                      "activity_failures": 0}
+                      "activity_failures": 0, "ohlc_failures": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -1265,7 +1272,37 @@ class AlphaBotService:
                 if not res.get("available"):
                     return clean_json({**res, "ticker": t})     # 失败不入缓存，下次再试
                 self._bars_cache[key] = res
-            return clean_json({**self._bars_cache[key], "ticker": t})
+            return clean_json({**self._with_ohlc(t, key, self._bars_cache[key]), "ticker": t})
+
+    def _with_ohlc(self, t: str, key: tuple, res: dict) -> dict:
+        """给日线拼上开 / 高 / 低（纯新增字段 + `ohlc` 说明块）。取不到不影响日线本身：`ohlc.available=False` + 原因，
+        页面退回「前收 → 收盘」的涨跌柱并照实写；失败计 `stats.ohlc_failures`。"""
+        bars = res.get("bars") or []
+        if any(isinstance(r, dict) and r.get("open") is not None for r in bars):
+            return {**res, "ohlc": {"available": True, "source": res.get("source"), "matched": len(bars)}}   # 日线源自带（演示）
+        fn = self.ohlc_fn
+        if fn is None:
+            if not self._ohlc_default:
+                return {**res, "ohlc": {"available": False, "reason": "not_wired"}}
+            from alphabot import price_ohlc
+            fn = price_ohlc.fetch_ohlc
+        from alphabot import price_ohlc as PO
+        if key not in self._ohlc_cache:
+            try:
+                rows, info = fn(t)
+            except Exception as exc:  # noqa: BLE001 - 注入的函数抛了也不能拖垮日线
+                rows, info = {}, {"n": 0, "reason": f"exception:{type(exc).__name__}"}
+            if not rows:
+                self.stats["ohlc_failures"] += 1
+                return {**res, "ohlc": {"available": False, "source": PO.SOURCE, **info}}
+            self._ohlc_cache[key] = rows
+        merged, n = PO.merge(bars, self._ohlc_cache[key])
+        ok = n["matched"] > 0
+        if not ok:
+            self.stats["ohlc_failures"] += 1
+        return {**res, "bars": merged,
+                "ohlc": {"available": ok, "source": PO.SOURCE, "close_tol": PO.CLOSE_TOL, **n,
+                         **({} if ok else {"reason": "no_bar_matched"})}}
 
     # ── 设置（自选 / 盘中关注列表）
     def _settings_path(self) -> Path:

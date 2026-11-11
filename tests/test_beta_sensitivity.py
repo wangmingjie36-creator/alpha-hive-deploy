@@ -512,9 +512,10 @@ class TestDisplayOnly:
         pat = re.compile(r"\b(beta_sensitivity|beta_long|with_beta|fetch_long_betas)\b")
         users = {rel for rel, p in _prod_py() if pat.search(p.read_text(encoding="utf-8"))}
         # 纯函数 / 展示整理 / 取数 / 服务 / 路由；yf_daily 只是调用点注册表里的一行字符串；
-        # wheel_prices（v0.45.722，接货筛选页的日线取数）只借 beta_long 的收盘提取与限流判据，同样只给 Alpha Bot 展示层用
+        # wheel_prices（v0.45.722，接货筛选页的日线取数）只借 beta_long 的收盘提取与限流判据，同样只给 Alpha Bot 展示层用；
+        # price_ohlc（v0.45.762，价格页 K 线的开高低）只借限流判据与「多久后再试」，不碰 β
         assert users == {"tail_budget.py", "alphabot/hedge.py", "alphabot/service.py", "alphabot/beta_long.py",
-                         "alphabot/server.py", "alphabot/wheel_prices.py", "yf_daily.py"}, users
+                         "alphabot/server.py", "alphabot/wheel_prices.py", "alphabot/price_ohlc.py", "yf_daily.py"}, users
 
     def test_portfolio_greeks_still_uses_the_60_day_beta_and_stores_no_alternative(self):
         import portfolio_greeks as pg

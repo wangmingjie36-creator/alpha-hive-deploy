@@ -313,7 +313,14 @@ def demo_bars(ticker: str, as_of: Optional[str] = None, days: int = 120) -> List
     out, d, i = [], d_end, len(closes) - 1
     while i >= 0:
         if d.weekday() < 5:
-            out.append({"date": d.isoformat(), "close": round(closes[i], 2)})
+            c = closes[i]
+            prev = closes[i - 1] if i > 0 else c
+            o = prev * (1.0 + 0.008 * (_rand(seed, 40000 + i) - 0.5))        # 开盘 = 前收附近跳一点
+            hi = max(o, c) * (1.0 + 0.010 * _rand(seed, 50000 + i))
+            lo = min(o, c) * (1.0 - 0.010 * _rand(seed, 60000 + i))
+            out.append({"date": d.isoformat(), "close": round(c, 2),
+                        "open": round(o, 2), "high": round(max(hi, c, o), 2), "low": round(min(lo, c, o), 2),
+                        "volume": round(2e6 * (0.5 + _rand(seed, 30000 + i)))})
             i -= 1
         d -= timedelta(days=1)
     return list(reversed(out))

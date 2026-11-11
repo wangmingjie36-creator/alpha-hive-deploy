@@ -66,6 +66,7 @@ SOURCES: Dict[str, str] = {
     "alphabot_wheel_screen": "alphabot.wheel_prices._fetch：接货页「筛选」的 2 年复权日线（回撤 / 波动 / 权利金重放，只展示，按日期用）",
     "sell_put_rv": "sell_put_wheel._default_rv：接货型卖 put 账本选合约用的 30 日实际波动率（分红复权，按日期截到最近已收盘那场）",
     "alphabot_beta_long": "alphabot.beta_long._fetch_closes：对冲页「β 窗口对照」的 250 日 β 日线（只展示，按日期对齐）",
+    "alphabot_price_ohlc": "alphabot.price_ohlc._fetch：标的「价格」页 K 线的开 / 高 / 低（只展示，按日期拼到 Twelve Data 日线上）",
     # ── Ticker.history()：带日期窗口、按日期用（v0.45.658 迁入；此前是「dated_window」例外）──
     "backtester_history": "backtester.Backtester._history：回测缓存未命中时的逐票取价",
     "outcomes": "outcomes_fetcher.OutcomesFetcher._fetch_remote：T+N 结果回填的逐日 OHLC",
