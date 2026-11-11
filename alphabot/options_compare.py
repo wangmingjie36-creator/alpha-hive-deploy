@@ -51,7 +51,17 @@ RULES = {
     "flows_shown": 12,            # 详情页列出的异动流条数（按权利金金额排）
     "levels_shown": 3,            # 支撑 / 阻力各列几档
     "history_days": 30,           # 趋势线回看的扫描日个数
+    # ── 异动流按到期日的逐层说明（v0.45.769）
+    "expiry_flows_shown": 5,      # 每个到期日列出几笔（按权利金金额排）
+    "flow_lean_strong": 3.0,      # 一侧权利金 ≥ 另一侧的此倍数 ⇒「以 X 为主」
+    "flow_lean_mild": 1.5,        # ≥ 此倍数 ⇒「偏 X」；不到 ⇒「两边接近」
+    "flow_single_share": 40.0,    # 单笔占本到期日权利金 ≥ 此百分比 ⇒ 点名
+    "flow_avg_shift_pct": 1.0,    # Call 加权行权价与上一个到期日相差 ≥ 此百分比才提差多少
 }
+
+#: 异动类型 → 展示名。判据是扫描记的 `type`；**它只说是 Call 还是 Put、成交方式，不知道是买入还是卖出**
+FLOW_TYPE_ZH = {"large_call_volume": "大额 Call 成交", "large_put_volume": "大额 Put 成交",
+                "call_sweep": "Call 扫单", "put_sweep": "Put 扫单"}
 
 DIRECTION_ZH = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
 #: 不可得原因码 → 人话（唯一表；页面直接用 `reason_zh`）
@@ -132,6 +142,180 @@ def _flows(raw) -> Tuple[List[dict], dict]:
     return rows, summary
 
 
+def _lean(call_p: float, put_p: float) -> Tuple[str, Optional[float]]:
+    """两侧权利金 → (倾向标签, 大的一侧是小的一侧的几倍)。标签只说哪一侧的钱多，不说看涨看跌。"""
+    if call_p <= 0 and put_p <= 0:
+        return "none", None
+    if put_p <= 0:
+        return "call_only", None
+    if call_p <= 0:
+        return "put_only", None
+    big, side = (call_p / put_p, "call") if call_p >= put_p else (put_p / call_p, "put")
+    if big >= RULES["flow_lean_strong"]:
+        return f"{side}_strong", round(big, 1)
+    if big >= RULES["flow_lean_mild"]:
+        return f"{side}_mild", round(big, 1)
+    return "balanced", round(big, 1)
+
+
+LEAN_ZH = {"call_only": "只有 Call", "put_only": "只有 Put", "call_strong": "以 Call 为主", "put_strong": "以 Put 为主",
+           "call_mild": "偏 Call", "put_mild": "偏 Put", "balanced": "两边接近", "none": "—"}
+
+
+def flow_by_expiry(raw, spot: Optional[float] = None, resistances: Optional[List[dict]] = None) -> dict:
+    """异动流按到期日分层（v0.45.769，纯函数）：每层给两侧笔数 / 权利金、占全部异动权利金的比例、哪一侧的钱多，
+    以及几条**能从这批记录直接算出来**的说明（`facts`）。
+
+    ⚠️ 只陈述算得出的量：倍数、占比、行权价范围、与上一层的差。**不写**「鲸鱼式定向押注」「市场信念高度集中」这类判断，
+    也不把 Call 多写成看涨——记录不分买卖方向（`bullish` 字段只是按 Call / Put 贴的），买 Call 与卖 Call 在这里长得一样。
+    没有权利金金额的记录不参与金额类的量（计入 `missing_premium`），判不出 Call / Put 的不计入两侧（`unclassified`）。"""
+    rows, unknown, no_prem = [], 0, 0
+    for f in raw if isinstance(raw, list) else []:
+        if not isinstance(f, dict):
+            continue
+        typ = str(f.get("type") or "")
+        side = "call" if "call" in typ else ("put" if "put" in typ else None)
+        k, exp = _num(f.get("strike")), f.get("expiry")
+        if side is None or k is None or not isinstance(exp, str) or not exp:
+            unknown += 1
+            continue
+        prem = _num(f.get("dollar_premium"))
+        if prem is None or prem < 0:
+            no_prem += 1
+            prem = None
+        rows.append({"side": side, "type": typ, "type_zh": FLOW_TYPE_ZH.get(typ, typ), "strike": k, "expiry": exp,
+                     "volume": _num(f.get("volume")), "premium_usd": prem, "otm_pct": _num(f.get("otm_pct")),
+                     "days_to_exp": _num(f.get("days_to_exp"))})
+    total = sum(r["premium_usd"] or 0.0 for r in rows)
+    res = sorted(x["strike"] for x in (resistances or []) if isinstance(x, dict) and _num(x.get("strike")) is not None
+                 and (spot is None or x["strike"] > spot))
+    near_res = res[0] if res else None
+    layers: List[dict] = []
+    prev: Optional[dict] = None
+    for exp in sorted({r["expiry"] for r in rows}):
+        grp = [r for r in rows if r["expiry"] == exp]
+        calls, puts = [r for r in grp if r["side"] == "call"], [r for r in grp if r["side"] == "put"]
+        cp, pp = sum(r["premium_usd"] or 0.0 for r in calls), sum(r["premium_usd"] or 0.0 for r in puts)
+        lean, times = _lean(cp, pp)
+        ranked = sorted(grp, key=lambda r: -(r["premium_usd"] or 0.0))
+        cw = sum((r["premium_usd"] or 0.0) for r in calls)
+        call_avg = round(sum(r["strike"] * (r["premium_usd"] or 0.0) for r in calls) / cw, 2) if cw > 0 else None
+        dte = next((r["days_to_exp"] for r in grp if r["days_to_exp"] is not None), None)
+        layer = {"expiry": exp, "days_to_exp": dte, "n_call": len(calls), "n_put": len(puts),
+                 "call_premium": cp, "put_premium": pp, "lean": lean, "lean_zh": LEAN_ZH[lean], "times": times,
+                 "share_pct": round((cp + pp) / total * 100, 1) if total > 0 else None,
+                 "call_strike_lo": min((r["strike"] for r in calls), default=None),
+                 "call_strike_hi": max((r["strike"] for r in calls), default=None),
+                 "call_strike_avg": call_avg,
+                 "top": ranked[: int(RULES["expiry_flows_shown"])],
+                 "n_more": max(0, len(grp) - int(RULES["expiry_flows_shown"]))}
+        facts: List[str] = []
+        if layer["share_pct"] is not None:
+            facts.append(f"占全部异动权利金的 {layer['share_pct']:.0f}%" if layer["share_pct"] >= 1 else "占全部异动权利金不到 1%")
+        if lean in ("call_only", "put_only"):
+            facts.append(f"这个到期日的异动{LEAN_ZH[lean]}")
+        elif times is not None:
+            a, b = ("Call", "Put") if cp >= pp else ("Put", "Call")
+            facts.append(f"{a} 权利金是 {b} 的 {times:.1f} 倍" if lean != "balanced" else f"{a} 权利金是 {b} 的 {times:.1f} 倍，两边接近")
+        if prev is not None and cp > 0 and pp > 0 and prev["call_premium"] > 0 and prev["put_premium"] > 0:
+            r0, r1 = prev["call_premium"] / prev["put_premium"], cp / pp
+            facts.append(f"Call 对 Put 的倍数：上一个到期日 {r0:.1f}，这里 {r1:.1f}")
+        if ranked and (cp + pp) > 0 and (ranked[0]["premium_usd"] or 0.0) / (cp + pp) * 100 >= RULES["flow_single_share"] and len(grp) > 1:
+            t0 = ranked[0]
+            facts.append(f"单笔 {t0['type_zh']} ${t0['strike']:g} 占本到期日权利金 "
+                         f"{(t0['premium_usd'] or 0.0) / (cp + pp) * 100:.0f}%，其余 {len(grp) - 1} 笔合计 "
+                         f"{100 - (t0['premium_usd'] or 0.0) / (cp + pp) * 100:.0f}%")
+        if calls:
+            lo, hi = layer["call_strike_lo"], layer["call_strike_hi"]
+            rng = f"Call 异动的行权价在 ${lo:g}" + (f"–${hi:g}" if hi != lo else "")
+            if near_res is not None:
+                above = sum(1 for r in calls if r["strike"] >= near_res)
+                rng += f"；{len(calls)} 笔里 {above} 笔在最近的阻力位 ${near_res:g} 或之上"
+            facts.append(rng)
+        if call_avg is not None:
+            line = f"Call 按权利金加权的行权价 ${call_avg:,.2f}"
+            pa = prev["call_strike_avg"] if prev is not None else None
+            # 差不到 1% 的不提（几毛钱的差是噪声，写出来像是有含义）
+            if pa and abs(call_avg / pa - 1) * 100 >= RULES["flow_avg_shift_pct"]:
+                line += f"，比上一个到期日{'高' if call_avg > pa else '低'} ${abs(call_avg - pa):,.2f}"
+            facts.append(line)
+        if prev is not None and (prev["call_premium"] + prev["put_premium"]) > 0 and (cp + pp) > 0:
+            k = (cp + pp) / (prev["call_premium"] + prev["put_premium"])
+            facts.append(f"权利金合计是上一个到期日的 {k:.1f} 倍" if k >= 1 else
+                         f"权利金合计是上一个到期日的 {k * 100:.0f}%" if k >= 0.01 else "权利金合计不到上一个到期日的 1%")
+        layer["facts"] = facts
+        layers.append(layer)
+        prev = layer
+    tc, tp = sum(x["call_premium"] for x in layers), sum(x["put_premium"] for x in layers)
+    lean, times = _lean(tc, tp)
+    return {"count": len(rows), "unclassified": unknown, "missing_premium": no_prem,
+            "n_call": sum(x["n_call"] for x in layers), "n_put": sum(x["n_put"] for x in layers),
+            "call_premium": tc, "put_premium": tp, "lean": lean, "lean_zh": LEAN_ZH[lean], "times": times,
+            "nearest_resistance": near_res, "layers": layers}
+
+
+#: 对比页每个读数「怎么读」（v0.45.769）。只讲这个数是什么、高低各意味着什么量变，不讲该怎么交易
+METRIC_READS = {
+    "score": "综合分 0–10，由各维度分数按权重合成。它没有被证实有预测力，只用来在名单里排先后。",
+    "spot": "现价取自期权快照那一刻；涨跌幅是对上一次扫描的。",
+    "full_pc_ratio": "全链 P/C = 全部到期日的 Put 未平仓 ÷ Call 未平仓。大于 1 是 Put 更多。Put 多可能是买保护，也可能是卖 Put 收权利金，单看这个数分不出方向。",
+    "full_oi": "全链 OI = 全部到期日的未平仓合约数。增加是新开的仓多于平掉的；月度到期日当天会因合约到期而明显减少。",
+    "iv_rank": "IV Rank = 当前波动率在过去一年最低到最高之间的位置（0–100）。标着「HV 代」时用的是已实现波动率的排名，真 IV 历史攒够 63 个交易日后自动切换。",
+    "iv_rv": "IV 是期权隐含的年化波动率，RV30 是过去 30 天实际走出来的。IV 高于 RV 是期权定价比近期实际波动贵，差得越多越贵。",
+    "skew": "IV Skew = 虚值 Put 的隐含波动率 ÷ 虚值 Call 的。大于 1 是下行保护比上行期权贵，是多数股票的常态；数值升高是这个差距在拉大。",
+    "max_pain": "Max Pain = 让近 7 天到期的期权买方合计亏得最多的那个价位。它没有可靠的预测力，只当作未平仓集中在哪里的一个参照。",
+    "window": "「近端窗口」的两项只数扫描选中的 4 个到期日，月度到期日进出窗口时会大幅跳变，所以不算变化。",
+}
+
+
+def readings(today: dict, prev: Optional[dict], d: dict) -> List[dict]:
+    """对比页的逐项解读（纯函数）：`[{key, label, now, change, read}]`。`now` / `change` 只陈述这次的数和它相对上一次的变化，
+    取不到就是 None（页面写「—」）；`read` 是固定的「怎么读」。不把任何变化解读成看涨 / 看跌。"""
+    prev = prev or {}
+    ok = bool(d.get("available"))
+
+    def chg(val, fmt, up, down, flat="与上一次相同"):
+        if not ok or val is None:
+            return None
+        if val == 0:
+            return flat
+        return (up if val > 0 else down).format(fmt.format(abs(val)))
+    out = []
+
+    def add(key, label, now, change):
+        out.append({"key": key, "label": label, "now": now, "change": change, "read": METRIC_READS[key]})
+    sc = today.get("score")
+    add("score", "综合分", f"{sc:.2f}" if sc is not None else None, chg(d.get("score"), "{:.2f}", "比上一次高 {}", "比上一次低 {}"))
+    sp = today.get("spot")
+    add("spot", "现价", f"{sp:,.2f}" if sp is not None else None, chg(d.get("spot_pct"), "{:.2f}%", "比上一次涨 {}", "比上一次跌 {}"))
+    pc = today.get("full_pc_ratio")
+    add("full_pc_ratio", "P/C（全链）", f"{pc:.2f}（Put 未平仓{'多于' if pc > 1 else '少于' if pc < 1 else '等于'} Call）" if pc is not None else None,
+        chg(d.get("full_pc_ratio"), "{:.2f}", "比上一次高 {}：Put 相对 Call 变多了", "比上一次低 {}：Put 相对 Call 变少了"))
+    oi = today.get("full_oi")
+    add("full_oi", "全链 OI", f"{oi / 1e6:.2f}M 张" if oi is not None else None,
+        chg(d.get("full_oi_pct"), "{:.1f}%", "比上一次多 {}", "比上一次少 {}"))
+    ivr = today.get("iv_rank")
+    src = "（已实现波动率的排名）" if today.get("iv_rank_source") == "hv_proxy" else ""
+    ivr_now = None if ivr is None else (f"{ivr:.0f}{src}" + ("：等于过去一年的最高值" if ivr >= 100 else "：等于过去一年的最低值" if ivr <= 0 else ""))
+    add("iv_rank", "IV Rank", ivr_now,
+        "两次的口径不同，不比" if ok and d.get("iv_rank_comparable") is False
+        else chg(d.get("iv_rank"), "{:.0f} 点", "比上一次高 {}", "比上一次低 {}"))
+    iv, rv = today.get("iv_current"), today.get("rv_30d")
+    add("iv_rv", "IV / RV30",
+        f"{iv:.1f} / {rv:.1f}：IV 是 RV 的 {iv / rv:.2f} 倍" if iv is not None and rv else (f"{iv:.1f} / —" if iv is not None else None),
+        chg(d.get("iv_current"), "{:.2f}", "IV 比上一次高 {}", "IV 比上一次低 {}", "IV 与上一次相同"))
+    sk = today.get("skew")
+    add("skew", "IV Skew", f"{sk:.3f}（虚值 Put 的 IV {'高于' if sk > 1 else '低于' if sk < 1 else '等于'}虚值 Call）" if sk is not None else None,
+        chg(d.get("skew"), "{:.3f}", "比上一次高 {}：差距拉大", "比上一次低 {}：差距缩小"))
+    mp = today.get("max_pain")
+    mp_now = None
+    if mp is not None:
+        mp_now = f"{mp:,.2f}" + (f"，在现价{'上方' if mp > sp else '下方'} {abs(mp / sp - 1) * 100:.1f}%" if sp else "")
+    add("max_pain", "Max Pain", mp_now, chg(d.get("max_pain"), "{:.2f}", "比上一次高 {}", "比上一次低 {}"))
+    add("window", "近端窗口两项", None, None)
+    return out
+
+
 def day_view(result) -> Optional[dict]:
     """一只标的某天的扫描结果 → 期权结构读数。没有 OracleBee 的 details ⇒ `options_available: False`（分数 / 方向仍给）。
     取不到的字段一律 None，不填默认值。"""
@@ -170,6 +354,7 @@ def day_view(result) -> Optional[dict]:
         "supports": _levels(_dig(o, "key_levels", "support"), spot),
         "resistances": _levels(_dig(o, "key_levels", "resistance"), spot),
         "flows": flows[: int(RULES["flows_shown"])], "flow_summary": flow_sum,
+        "flow_expiries": flow_by_expiry(o.get("unusual_activity"), spot, _levels(_dig(o, "key_levels", "resistance"), spot)),
         "unusual_flow_ok": o.get("unusual_flow_ok"),
     }
 
@@ -311,4 +496,5 @@ def build_ticker(t: str, days: List[Tuple[str, dict]], date: str) -> dict:
                      "call_pct": v["flow_summary"]["call_pct"]})
     return base | {"available": True, "reason": None if pv else "no_prev", "reason_zh": None if pv else reason_zh("no_prev"),
                    "prev_date": pd_, "scans_between": gap, "today": today, "prev": pv, "delta": d,
-                   "alerts": alerts(today, pv, d), "history": hist[-int(RULES["history_days"]):]}
+                   "alerts": alerts(today, pv, d), "readings": readings(today, pv, d),
+                   "history": hist[-int(RULES["history_days"]):]}

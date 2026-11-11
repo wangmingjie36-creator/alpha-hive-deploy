@@ -154,6 +154,11 @@ function drawTicker(root, d, pick) {
     panel("今天 vs 上一次", { sub: prevNote(d) }, kpis,
       t.options_available ? null : h("p", { class: "callout warn" }, "这一天这只标的没有期权分析记录，期权读数都是空的。"),
       h("p", { class: "note small muted" }, "「近端窗口」的两项只数扫描选中的 4 个到期日。月度到期日进出这个窗口时它们会大幅跳变（窗口换了，不是持仓变了），所以只摆出来、不算变化也不挂提示；看变化请看「全链」。")),
+    (d.readings || []).length ? panel("逐项解读", { sub: "每个读数现在是多少、和上一次比怎么变、这个数怎么读；只陈述量的变化，不解读成看涨 / 看跌" },
+      table([{ label: "读数", render: (r) => h("b", {}, r.label) },
+        { label: "现在", render: (r) => r.now || "—" },
+        { label: "和上一次比", render: (r) => r.change || "—" },
+        { label: "怎么读", render: (r) => h("span", { class: "small muted" }, r.read) }], d.readings)) : null,
     panel("变化提示", { sub: "只陈述哪个数变得多，不解读成看涨 / 看跌" },
       d.alerts.length ? h("ul", {}, d.alerts.map((a) => h("li", {}, a.level === "flip" ? h("b", {}, a.text) : a.text)))
         : h("div", { class: "empty" }, p ? "没有超过阈值的变化。" : (d.reason_zh || "没东西可比。"))),

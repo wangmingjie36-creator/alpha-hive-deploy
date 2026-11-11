@@ -128,9 +128,34 @@ function options(d) {
       kpi("Gamma 环境", g.available ? zh(WORD, g.regime) : "不可得", g.available && isNum(g.flip) ? `翻转位 ${num(g.flip, 0)}` : null)),
     r.flows.length ? h("div", {}, h("h3", {}, "金额最大的异动成交", h("span", { class: "sub" }, ` 共 ${fs.count} 条，call 占成交量的 ${pctOf(fs.call_pct)}`)),
       table(flowCols, r.flows)) : null,
+    flowLayers(r.flow_expiries),
     note("异动成交来自延迟快照，分不出是买还是卖。和前一天比变了什么，看 ",
       h("a", { href: `#/compare/${encodeURIComponent(d.ticker)}` }, "对比页"), "；实时水平看 ",
       h("a", { href: `#/t/${encodeURIComponent(d.ticker)}/levels` }, "标的页"), "。"));
+}
+
+// 异动成交按到期日分层（v0.45.769）：每层两侧笔数与金额、哪一侧的钱多、金额最大的几笔，以及服务端算好的几条说明。
+// 说明只有算得出的量（倍数、占比、行权价范围、与上一层的差）；「Call 多」不写成看涨——记录分不出买卖方向。
+function flowLayers(fx) {
+  if (!fx || !fx.layers || !fx.layers.length) return null;
+  const item = (x) => `${x.type_zh} ${num(x.strike, 0)}（${isNum(x.volume) ? `${num(x.volume, 0)} 手` : "— 手"}，${usd(x.premium_usd)}`
+    + `${isNum(x.otm_pct) ? `，${x.otm_pct > 0 ? `虚值 ${pctOf(x.otm_pct, 0)}` : x.otm_pct < 0 ? `实值 ${pctOf(-x.otm_pct, 0)}` : "平值"}` : ""}）`;
+  const lead = `共 ${num(fx.count, 0)} 笔：Call ${num(fx.n_call, 0)} 笔、${usd(fx.call_premium)}；Put ${num(fx.n_put, 0)} 笔、${usd(fx.put_premium)}。`
+    + `${isNum(fx.times) ? `按权利金算${fx.lean_zh}（${fx.call_premium >= fx.put_premium ? "Call 是 Put" : "Put 是 Call"} 的 ${num(fx.times, 1)} 倍）。` : fx.lean_zh !== "—" ? `${fx.lean_zh}。` : ""}`
+    + `${isNum(fx.nearest_resistance) ? `下文的阻力位指现价上方最近的 Call 侧未平仓集中位 ${num(fx.nearest_resistance, 0)}。` : ""}`;
+  return h("div", {},
+    h("h3", {}, "异动成交按到期日", h("span", { class: "sub" }, ` ${fx.layers.length} 个到期日`)),
+    line(lead),
+    fx.layers.map((L) => h("div", { class: "flow-layer" },
+      h("h3", {}, `${L.expiry}${isNum(L.days_to_exp) ? `（${num(L.days_to_exp, 0)} 天后到期）` : ""} `,
+        h("span", { class: `chip ${L.lean.startsWith("call") ? "pos" : L.lean.startsWith("put") ? "neg" : ""}` }, L.lean_zh),
+        h("span", { class: "sub" }, ` Call ${num(L.n_call, 0)} 笔 ${usd(L.call_premium)} · Put ${num(L.n_put, 0)} 笔 ${usd(L.put_premium)}`)),
+      h("p", { class: "small" }, L.top.map((x, i) => h("span", { class: x.side === "call" ? "up" : "down" }, `${i ? "；" : ""}${item(x)}`)),
+        L.n_more ? h("span", { class: "muted" }, `；另有 ${num(L.n_more, 0)} 笔`) : null),
+      L.facts.length ? h("ul", { class: "small" }, L.facts.map((f) => h("li", {}, f))) : null)),
+    fx.unclassified || fx.missing_premium ? note(`${fx.unclassified ? `${fx.unclassified} 笔分不出 Call / Put 或缺到期日，没计入。` : ""}`
+      + `${fx.missing_premium ? `${fx.missing_premium} 笔没有权利金金额，只计笔数、不计金额。` : ""}`) : null,
+    note("颜色只区分 Call（绿）与 Put（红），不表示看涨看跌：记录里没有买卖方向，买 Call 与卖 Call 在这里长得一样。倍数与占比都按权利金金额算。"));
 }
 
 function macro(d) {
@@ -152,7 +177,18 @@ function macro(d) {
       kpi("Reddit 热度", isNum(m.reddit_rank) ? `第 ${num(m.reddit_rank, 0)}` : "—", isNum(m.reddit_mentions) ? `${num(m.reddit_mentions, 0)} 次提及` : null)),
     m.layers.length ? table(layerCols, m.layers) : null,
     m.peers.length ? table(peerCols, m.peers) : null,
-    note(`当天所有标的共用的大盘读数：${market.join("，")}。`));
+    note(`当天所有标的共用的大盘读数：${market.join("，")}。`),
+    vixTerm(m));
+}
+
+// VIX 期限结构（v0.45.769）。扫描只记了形态标签，没记两个月份的点位 ⇒ 不写点位与价差；没取到就写没取到，不给结论
+function vixTerm(m) {
+  const vix = isNum(m.vix) ? `当天 VIX ${num(m.vix, 1)}${m.vix_stale ? "（数据陈旧）" : ""}，` : "";
+  if (!m.vix_term || m.vix_term === "unknown") return note(`${vix}VIX 期限结构这一天没取到。`);
+  if (!m.vix_term_zh) return note(`${vix}VIX 期限结构记的是「${m.vix_term}」，这个标签页面还不认识，不配说明。`);
+  return h("p", { class: "note small" }, h("b", {}, "VIX 期限结构："), `${vix}形态为`, h("b", {}, m.vix_term_zh), `。${m.vix_term_read}`,
+    m.vix_term_source && m.vix_term_source !== "live" ? `（来源：${m.vix_term_source}，不是当天现取的）` : "",
+    " 扫描只记了形态，没记近月与远月各自的点位。");
 }
 
 function levels(d) {
