@@ -254,6 +254,12 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         except BadRequest as exc:
             return _json({"error": str(exc)}, 400)
 
+    def watch(request: Request):
+        try:
+            return _json(svc.watch(request.path_params["ticker"]))
+        except BadRequest as exc:
+            return _json({"error": str(exc)}, 400)
+
     def index(request: Request):
         return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
@@ -276,6 +282,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/intraday-heat/{ticker}", intraday_heat),
         Route("/api/intraday-dates/{ticker}", intraday_dates),
         Route("/api/intraday/{ticker}/snap", snap_now, methods=["POST"]),
+        Route("/api/watch/{ticker}", watch, methods=["POST"]),
         Route("/api/straddle", straddle),
         Route("/api/hedge", hedge),
         Route("/api/wheel", wheel),

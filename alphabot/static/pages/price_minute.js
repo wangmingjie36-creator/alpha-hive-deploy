@@ -14,6 +14,17 @@ import { state } from "../app.js";
 import { createRetryGate } from "../retry_gate.js";
 
 const TICK_MS = 5000;
+const WATCH_RENEW_MS = 60000;
+// 盯盘（v0.45.764）没生效时的说明。生效与否由服务端回（续上了但没人拍，不能显示成「盯上了」）
+const WATCH_OFF = {
+  demo: "演示模式不盯盘",
+  no_poller: "这个 Alpha Bot 没开盘中快照（--no-poll），不盯盘",
+  poll_disabled: "盘中快照在设置里关着，不盯盘",
+  session_closed: "不在交易时段，不盯盘",
+  index_not_supported: "指数票不盯盘",
+  yf_fallback_ticker: "这只票的期权链盘中要改走 Yahoo（一次十来个请求），不逐分钟拍，免得把 Yahoo 打到限流",
+  error: "盯盘续期失败",
+};
 const RETRY_NOTE = {
   scheduled: "冷却一结束会自动再试一次。",
   tried: "已自动再试过一次、仍被限流，不再自动重试；过一会儿点「再试」。",
@@ -28,7 +39,7 @@ export async function minutePrice(body, d, t, routeAlive, makeSwitch) {
   const c = C();
   const retry = createRetryGate();
   const KEY = `minute:${t}`;
-  let day = null, chart = null, busy = false, nextAt = null;
+  let day = null, chart = null, busy = false, again = false, nextAt = null, watch = null, watchAt = null, liveToday = false;
   const dates = await api(`/api/intraday-dates/${encodeURIComponent(t)}`).catch(() => ({ dates: [] }));
   if (!alive()) return;
   const today = state.meta?.session?.date_et;
@@ -36,28 +47,45 @@ export async function minutePrice(body, d, t, routeAlive, makeSwitch) {
 
   const beat = setInterval(() => {
     if (!alive()) { clearInterval(beat); release(chart); return; }
-    if (nextAt !== null && Date.now() >= nextAt) load(true);
+    if (nextAt !== null && Date.now() >= nextAt) { load(true); return; }
+    // 图因为限流停刷了，盯盘不该跟着悄悄过期（快照不走 Yahoo）：单独续期，不重画
+    if (liveToday && nextAt === null && !busy && watchAt !== null && Date.now() >= watchAt) renewWatch();
   }, TICK_MS);
 
+  async function renewWatch() {
+    watchAt = Date.now() + WATCH_RENEW_MS;
+    try { watch = await api(`/api/watch/${encodeURIComponent(t)}`, { method: "POST" }); }
+    catch (e) { watch = { active: false, reason: "error", detail: String(e.message || e) }; }
+  }
+
   async function load(isRefresh) {
-    if (busy) return;
+    if (busy) { again = true; return; }      // 正在取：记下「还要再来一次」（切日期不能被吞掉）
     busy = true; nextAt = null;
     retry.begin(KEY);
     let m;
-    try { m = await api(`/api/minute-bars/${encodeURIComponent(t)}${day ? `?date=${day}` : ""}`); }
-    catch (e) { m = { available: false, reason: "exception", detail: String(e.message || e), bars: [], level_path: [] }; }
-    finally { busy = false; }
+    try {
+      try { m = await api(`/api/minute-bars/${encodeURIComponent(t)}${day ? `?date=${day}` : ""}`); }
+      catch (e) { m = { available: false, reason: "exception", detail: String(e.message || e), bars: [], level_path: [] }; }
+      // 盯盘：看的是今天、在交易时段 ⇒ 续期；离开这页没人续，服务端自己到期停
+      liveToday = !!(m.is_today && m.session_live);
+      watch = null; watchAt = null;
+      if (liveToday && alive()) await renewWatch();
+    } finally { busy = false; }
     if (!alive()) return;
+    if (again) { again = false; load(false); return; }
     const fail = m.available ? m.refresh_failed : m;
     const limited = fail?.reason === "rate_limited";
     const plan = retry.plan(KEY, { limited, retryAfterSec: fail?.retry_after_sec, alive, run: () => load(true) });
     draw(m, isRefresh, plan);
-    // 续刷：只在取到了、没在限流、看的是今天且在交易时段时安排下一拍
-    if (m.available && !m.refresh_failed && m.is_today && m.session_live && isNum(m.refresh_sec)) nextAt = Date.now() + m.refresh_sec * 1000;
+    // 续刷：看的是今天且在交易时段、没在限流（限流归 retry_gate 管）。别的失败（网络抖一下）照常下一拍再试，服务端另有限频
+    if (liveToday && !limited && isNum(m.refresh_sec)) nextAt = Date.now() + m.refresh_sec * 1000;
   }
 
   function draw(m, isRefresh, plan) {
-    const zoom = isRefresh && chart ? (() => { const z = chart.getOption()?.dataZoom?.[0]; return z ? { start: z.start, end: z.end } : undefined; })() : undefined;
+    let zoom;
+    if (isRefresh && chart) {
+      try { const z = chart.getOption()?.dataZoom?.[0]; if (z) zoom = { start: z.start, end: z.end }; } catch { /* 图已被释放：按缺省缩放重画 */ }
+    }
     release(chart); chart = null;
     const label = (code) => m.reason_labels?.[code] || code || "原因不明";
     const maxAge = m.max_age_days ?? 7;
@@ -88,7 +116,9 @@ export async function minutePrice(body, d, t, routeAlive, makeSwitch) {
       if (isNum(zg.nearest)) hmarks.push({ value: zg.nearest, label: `ZG ${num(zg.nearest)}`, color: c.ink3 });
       if (isNum(mj.net_major_pos_strike)) hmarks.push({ value: mj.net_major_pos_strike, label: `Major+ ${num(mj.net_major_pos_strike, 0)}`, color: c.pos, type: "dotted" });
       if (isNum(mj.net_major_neg_strike)) hmarks.push({ value: mj.net_major_neg_strike, label: `Major− ${num(mj.net_major_neg_strike, 0)}`, color: c.neg, type: "dotted" });
-      notes.push(h("p", { class: "note" }, "这只票今天没有盘中快照（不在盘中关注列表里），水平只有此刻这一组，画成横线；加进关注列表后才有随时间变的路径。"));
+      notes.push(h("p", { class: "note" }, watch?.active
+        ? "这只票今天还没有盘中快照，水平先画成此刻这一组横线；盯盘已开始，一两分钟后就有随时间变的路径。"
+        : "这只票今天没有盘中快照，水平只有此刻这一组，画成横线。"));
     } else if (!hasPath) {
       notes.push(h("p", { class: "note" }, "这一天没有这只票的盘中快照，所以不叠水平：今天的水平不画在过去的价格上。"));
     } else {
@@ -104,13 +134,19 @@ export async function minutePrice(body, d, t, routeAlive, makeSwitch) {
     const off = latest.filter(([, v]) => isNum(v) && pr && (v < pr.lo || v > pr.hi))
       .map(([name, v]) => `${name} ${num(v, 2)}（${v > pr.hi ? "上方" : "下方"}，距最新价 ${signedPct((v / last.close - 1) * 100)}）`);
     if (off.length) notes.unshift(h("p", { class: "note" }, `纵轴只贴着当天价格。不在图内的水平：${off.join("；")}。`));
+    if (watch) {
+      notes.push(h("p", { class: "note" }, watch.active
+        ? `盯盘中：这页开着时，${t} 约每 ${num(watch.interval_sec, 0)} 秒拍一张快照（其余关注票间隔不变）；离开这页约 ${num(watch.lease_sec / 60, 1)} 分钟后自动停。`
+          + `${watch.replaced ? `原先盯的 ${watch.replaced} 已停（同一时刻只盯一只）。` : ""}`
+        : `${WATCH_OFF[watch.reason] || watch.reason || "没在盯盘"}${watch.detail ? `（${watch.detail}）` : ""}；水平路径仍是原来的间隔。`));
+    }
     if (m.refresh_failed) {
       const f = m.refresh_failed;
       notes.unshift(h("p", { class: "callout warn" }, `刷新失败（${label(f.reason)}），图停在 ${last.t}`
         + `${isNum(f.retry_after_sec) ? `，约 ${num(f.retry_after_sec, 0)} 秒后冷却结束` : ""}。${RETRY_NOTE[plan]} `, again));
     }
     const el = h("div", { class: "chart tall" });
-    const status = m.is_today ? (m.refresh_failed ? "刷新已停" : m.session_live ? `盘中，每 ${m.refresh_sec} 秒刷新` : "不在交易时段，不刷新") : "历史日";
+    const status = m.is_today ? (plan === "tried" || plan === "manual" ? "刷新已停" : m.session_live ? `盘中，每 ${m.refresh_sec} 秒刷新` : "不在交易时段，不刷新") : "历史日";
     fill(host, panel("盘中 1 分钟 K 线", { right,
       sub: `${m.date} · ${bars.length} 根（${m.source}，${status}）；实体 = 开 → 收，影线 = 低 ~ 高，收高于开为绿、低于开为红；正在走的这一分钟不画；滚轮可缩放` },
     el, ...notes));

@@ -54,6 +54,13 @@ LIVE_TTL_SEC = 60.0
 #: 盘中分钟线（v0.45.763）同一只票多久内不重取：盘中略短于页面的刷新间隔（开两个窗口也只发一次）；不在盘中时没有新线可取
 MINUTE_TTL_LIVE_SEC = 55.0
 MINUTE_TTL_IDLE_SEC = 1800.0
+#: 「盯盘」（v0.45.764）：开着盘中图的那一只票每隔这么久拍一张快照（其余关注票仍按 `interval_min`）。
+#: CBOE 延迟行情约每分钟更新一次（2026-11-11 从 NVDA / TSLA 各 21 张快照的落后幅度推断），更密拿到的多是同一份
+WATCH_INTERVAL_SEC = 60.0
+#: 页面每次续期后盯盘再维持多久。页面约每 60 秒续一次；窗口关了 / 切走了没人续，过了这段时间自己停——不靠页面「记得说再见」
+WATCH_LEASE_SEC = 150.0
+#: 盯盘生效时轮询线程多久醒一次（平时 30 秒一醒，60 秒的节拍会被拉成 60 / 90 秒交替）
+WATCH_POLL_SEC = 5.0
 #: 失败结果也短暂缓存：CBOE 不可达时别让每次切页都再排 15 秒 × 3 次重试
 FAIL_TTL_SEC = 15.0
 MAX_FOCUS = 5
@@ -281,10 +288,14 @@ class AlphaBotService:
         self._ohlc_default = ohlc_fn is None and bars_fn is None and not demo
         self._ohlc_cache: Dict[tuple, dict] = {}
         # 价格页盘中 1 分钟 K 线（v0.45.763）：`minute_fn(标的, 日期, 美东此刻) -> (分钟线, {n, reason, …})`。缺省接线规则同 `ohlc_fn`
-        # （注入了日线而没给它 ⇒ 不取，免得测试出网；演示 ⇒ 合成）。`{(标的, 日期): (取到的时刻, 分钟线, 是否已定)}`
+        # （注入了日线而没给它 ⇒ 不取，免得测试出网；演示 ⇒ 合成）。`{(标的, 日期): (取到的时刻, 分钟线, 是否已定, 取的时候在不在盘中)}`
         self.minute_fn = minute_fn
         self._minute_default = minute_fn is None and bars_fn is None and not demo
         self._minute_cache: Dict[tuple, tuple] = {}
+        # 盯盘（v0.45.764）：`{"ticker", "until"（self.clock() 时刻）}`；同一时刻只盯一只、后来的为准。只在内存里，重启即无。
+        # `_watch_consumer`：有没有轮询线程在消费它（演示 / `--no-poll` 没有 ⇒ 续期照收，但如实回「不会拍」）
+        self._watch: Optional[dict] = None
+        self._watch_consumer = False
         self.clock = clock
         self.demo = demo
         self.ledger_dir = ledger_dir          # None ⇒ 账本自己解析（生产数据根）；只读
@@ -1346,7 +1357,9 @@ class AlphaBotService:
         with self._lock_for("minute:" + t):
             hit = self._minute_cache.get(key)
             ttl = MINUTE_TTL_LIVE_SEC if live_now else MINUTE_TTL_IDLE_SEC
-            if hit and (hit[2] or self.clock() - hit[0] < ttl):
+            # 盘中取的那份到收盘后就不完整了（缺收盘前最后几根）：时段一结束必须重取一次，不能套「不在盘中 30 分钟内不重取」
+            went_idle = bool(hit) and hit[3] and not live_now
+            if hit and (hit[2] or (not went_idle and self.clock() - hit[0] < ttl)):
                 self.stats["minute_cache_hits"] += 1
                 return clean_json({**out, "available": True, "reason": None, "bars": hit[1]})
             self.stats["minute_fetches"] += 1
@@ -1355,7 +1368,7 @@ class AlphaBotService:
             except Exception as exc:  # noqa: BLE001 - 注入的函数抛了也要带原因返回
                 rows, info = [], {"n": 0, "reason": "exception", "detail": type(exc).__name__}
             if rows:
-                self._minute_cache[key] = (self.clock(), rows, d < today)
+                self._minute_cache[key] = (self.clock(), rows, d < today, live_now)
                 return clean_json({**out, "available": True, "reason": None, "bars": rows,
                                    "dropped_forming": info.get("dropped_forming", 0)})    # 成交量异常的根数页面自己数（缓存命中时也要有）
             self.stats["minute_failures"] += 1
@@ -1363,6 +1376,36 @@ class AlphaBotService:
             if hit:      # 刷新失败：上一次取到的照旧画，页面写明它停在哪
                 return clean_json({**out, "available": True, "reason": None, "bars": hit[1], "refresh_failed": fail})
             return clean_json({**out, "available": False, "bars": [], **fail})
+
+    # ── 盯盘（v0.45.764）
+    def watch_ticker(self) -> Optional[str]:
+        """此刻被盯的那只票（租约过期 ⇒ None）。"""
+        w = self._watch
+        return w["ticker"] if w and self.clock() < w["until"] else None
+
+    def watch(self, ticker) -> dict:
+        """续期盯盘：这只票在租约内每 `WATCH_INTERVAL_SEC` 拍一张快照。返回它**会不会真的被拍**与原因——
+        续上了但没人拍（演示 / 没开轮询 / 盘中快照被关 / 不在交易时段）不能回成「盯上了」。"""
+        t = norm_ticker(ticker)
+        base = {"ticker": t, "interval_sec": WATCH_INTERVAL_SEC, "lease_sec": WATCH_LEASE_SEC}
+        if self.demo:
+            return {**base, "active": False, "reason": "demo"}
+        if t.startswith("_"):
+            return {**base, "active": False, "reason": "index_not_supported"}     # 指数一张链几十 MB，不逐分钟拉
+        if t in YF_FALLBACK_TICKERS:
+            # 这些票 CBOE 盘中是陈旧的，现算会改走 Yahoo 的期权链（一次十来个请求）：每分钟一拍很容易把 Yahoo 打到限流，
+            # 一限流 Alpha Bot 里所有走 Yahoo 的功能一起停 180 秒。它们留在原来的间隔上
+            return {**base, "active": False, "reason": "yf_fallback_ticker"}
+        prev = self.watch_ticker()
+        self._watch = {"ticker": t, "until": self.clock() + WATCH_LEASE_SEC}
+        out = {**base, "replaced": prev if prev and prev != t else None}
+        if not self._watch_consumer:
+            return {**out, "active": False, "reason": "no_poller"}
+        if not self.settings().get("poll_enabled"):
+            return {**out, "active": False, "reason": "poll_disabled"}
+        if not market_session(self.now_fn())["live"]:
+            return {**out, "active": False, "reason": "session_closed"}
+        return {**out, "active": True, "reason": None}
 
     # ── 设置（自选 / 盘中关注列表）
     def _settings_path(self) -> Path:
@@ -1635,7 +1678,10 @@ class IntradayPoller:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_round: Optional[float] = None
-        self.status = {"running": False, "last_round_et": None, "last_results": [], "rounds": 0, "errors": 0}
+        self._last_watch: Optional[tuple] = None      # (标的, 上次给它拍的单调时刻)：盯盘的节拍
+        service._watch_consumer = True
+        self.status = {"running": False, "last_round_et": None, "last_results": [], "rounds": 0, "errors": 0,
+                       "watch": {"ticker": None, "shots": 0, "last_result": None}}
 
     def start(self) -> None:
         if self._thread is None:
@@ -1650,8 +1696,27 @@ class IntradayPoller:
     def due(self, now_mono: float, interval_min: int) -> bool:
         return self._last_round is None or (now_mono - self._last_round) >= interval_min * 60.0
 
+    def _watch_tick(self, now_mono: float) -> Optional[dict]:
+        """盯盘：租约内的那只票到点就拍一张（常规一轮刚拍过它也算数，不重复拍）。返回这次的结果或 None（没人盯 / 没到点）。"""
+        t = self.service.watch_ticker()
+        self.status["watch"]["ticker"] = t
+        if t is None:
+            self._last_watch = None
+            return None
+        if self._last_watch and self._last_watch[0] == t and now_mono - self._last_watch[1] < WATCH_INTERVAL_SEC:
+            return None
+        self._last_watch = (t, now_mono)
+        try:
+            res = self.service.take_snapshot(t)
+        except Exception as exc:  # noqa: BLE001 - 盯盘失败不挡常规轮；计数 + 日志
+            self.status["errors"] += 1
+            _log.warning("[%s] 盯盘快照失败：%s: %s", t, type(exc).__name__, exc)
+            res = {"ticker": t, "recorded": False, "reason": f"exception:{type(exc).__name__}"}
+        self.status["watch"].update({"shots": self.status["watch"]["shots"] + 1, "last_result": res})
+        return res
+
     def tick(self, *, now_mono: Optional[float] = None) -> Optional[list]:
-        """跑一轮（到点且在盘中才拍）；返回本轮结果或 None（没到点 / 不在盘中 / 关闭）。"""
+        """跑一轮（到点且在盘中才拍）；返回本轮结果或 None（没到点 / 不在盘中 / 关闭）。盯盘的那一张不算进返回值，见 `status["watch"]`。"""
         st = self.service.settings()
         if not st.get("poll_enabled"):
             return None
@@ -1660,10 +1725,14 @@ class IntradayPoller:
             return None
         now_mono = time.monotonic() if now_mono is None else now_mono
         if not self.due(now_mono, int(st.get("interval_min") or DEFAULT_INTERVAL_MIN)):
+            self._watch_tick(now_mono)
             return None
         self._last_round = now_mono
         results = []
+        watched = self.service.watch_ticker()
         for t in (st.get("focus") or [])[:MAX_FOCUS]:
+            if t == watched:
+                self._last_watch = (t, now_mono)      # 常规轮这就拍它：盯盘的节拍从这里重新数
             try:
                 results.append(self.service.take_snapshot(t))
             except Exception as exc:  # noqa: BLE001 - 一只失败不挡其余；计数 + 日志
@@ -1676,6 +1745,7 @@ class IntradayPoller:
                          [(r["ticker"], r.get("reason")) for r in failed])
         self.status.update({"last_round_et": sess.get("now_et"), "last_results": results,
                             "rounds": self.status["rounds"] + 1})
+        self._watch_tick(now_mono)     # 被盯的票不在关注列表里时，这一轮没拍到它
         return results
 
     def _run(self) -> None:
@@ -1685,4 +1755,5 @@ class IntradayPoller:
             except Exception as exc:  # noqa: BLE001 - 后台线程不能死；死了页面上就只剩旧状态
                 self.status["errors"] += 1
                 _log.warning("盘中快照线程异常：%s: %s", type(exc).__name__, exc, exc_info=True)
-            self._stop.wait(self.sleep_sec)
+            # 有人盯盘时醒得勤一点，60 秒的节拍才不会被 30 秒的睡眠拉成 60 / 90 秒交替
+            self._stop.wait(min(self.sleep_sec, WATCH_POLL_SEC) if self.service.watch_ticker() else self.sleep_sec)

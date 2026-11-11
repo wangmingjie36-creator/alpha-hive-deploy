@@ -260,6 +260,24 @@ class TestService:
         assert res["refresh_failed"] == {"reason": "rate_limited", "retry_after_sec": 120.0}
         assert s.stats["minute_failures"] == 1
 
+    def test_bars_fetched_during_the_session_are_refetched_once_it_closes(self, tmp_path):
+        # 15:58 取的那份缺收盘前最后几根：16:01 再打开必须重取，不能当成「不在盘中 30 分钟内不用重取」的缓存
+        calls, clock, when = [], _Clock(), {"now": datetime(2026, 11, 10, 15, 58, 30, tzinfo=ET)}
+
+        def fn(t, day, now):
+            calls.append(now.strftime("%H:%M"))
+            return ROWS, {"n": 2, "reason": None}
+        s = AlphaBotService(state_dir=tmp_path, bars_fn=lambda t: {"available": False, "bars": []},
+                            minute_fn=fn, now_fn=lambda: when["now"], clock=clock)
+        s.minute_bars("NVDA")
+        when["now"] = datetime(2026, 11, 10, 16, 1, tzinfo=ET)
+        clock.t += 150
+        s.minute_bars("NVDA")
+        assert calls == ["15:58", "16:01"]
+        clock.t += 600
+        s.minute_bars("NVDA")
+        assert len(calls) == 2, "收盘后取过一次就够了（30 分钟内不再取）"
+
     def test_raising_fn_is_a_reasoned_failure(self, tmp_path):
         def boom(t, day, now):
             raise ValueError("x")
