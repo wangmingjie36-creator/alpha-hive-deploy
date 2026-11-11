@@ -412,8 +412,9 @@ def _risks(r: dict) -> dict:
     }
 
 
-def build(ticker: str, date: str, result, rank: Optional[dict] = None) -> dict:
-    """一只票某天的扫描结果 → 各板块。`result` 不是对象 ⇒ `ticker_not_scanned`。`rank` = `rank_of(那天全部结果, ticker)`。"""
+def build(ticker: str, date: str, result, rank: Optional[dict] = None, prev=None, prev_date: Optional[str] = None) -> dict:
+    """一只票某天的扫描结果 → 各板块。`result` 不是对象 ⇒ `ticker_not_scanned`。`rank` = `rank_of(那天全部结果, ticker)`。
+    `prev` / `prev_date`（v0.45.771）：这只票上一次有记录的扫描结果与日期，只给「做市商与大额成交」板块做隔日对比；没有 ⇒ 那部分写明做不了。"""
     base = {"available": False, "ticker": ticker, "date": date, "rules": public_rules()}
     opt = OC.day_view(result)
     if opt is None:
@@ -423,5 +424,8 @@ def build(ticker: str, date: str, result, rank: Optional[dict] = None) -> dict:
     return base | {"available": True, "reason": None, "reason_zh": None,
                    "summary": _summary(result, opt) | {"rank": rank or {"rank": None, "of": None}},
                    "risks": _risks(result), "catalysts": cat, "options": optx, "macro": _macro(result),
+                   "positioning": {"prev_date": prev_date if isinstance(prev, dict) else None,
+                                   "dealer": OC.dealer_view(result, prev),
+                                   "big": OC.big_trades(result, prev, date, prev_date)},
                    "levels": _levels(result, opt, cat, optx), "dimensions": _dimensions(result), "agents": _agents(result),
                    "pipeline": _pipeline(result), "side_effects": _side_effects(result)}

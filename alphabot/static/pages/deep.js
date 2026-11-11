@@ -25,7 +25,7 @@ const note = (...kids) => h("p", { class: "note small muted" }, ...kids);
 const sec = (id, title, ...body) => { const p = panel(title, {}, ...body); p.id = `deep-${id}`; return p; };
 
 const SECTIONS = [["summary", "摘要"], ["risks", "风险"], ["catalysts", "催化剂"], ["options", "期权要点"],
-  ["macro", "人气与板块"], ["levels", "参考价位"], ["swarm", "各蜂明细"]];
+  ["positioning", "做市商与大额成交"], ["macro", "人气与板块"], ["levels", "参考价位"], ["swarm", "各蜂明细"]];
 
 function pickers(d, ticker, onDate) {
   const tickers = d.tickers || [];
@@ -140,7 +140,7 @@ function flowLayers(fx) {
   if (!fx || !fx.layers || !fx.layers.length) return null;
   const item = (x) => `${x.type_zh} ${num(x.strike, 0)}（${isNum(x.volume) ? `${num(x.volume, 0)} 手` : "— 手"}，${usd(x.premium_usd)}`
     + `${isNum(x.otm_pct) ? `，${x.otm_pct > 0 ? `虚值 ${pctOf(x.otm_pct, 0)}` : x.otm_pct < 0 ? `实值 ${pctOf(-x.otm_pct, 0)}` : "平值"}` : ""}）`;
-  const lead = `共 ${num(fx.count, 0)} 笔：Call ${num(fx.n_call, 0)} 笔、${usd(fx.call_premium)}；Put ${num(fx.n_put, 0)} 笔、${usd(fx.put_premium)}。`
+  const lead = `共 ${num(fx.count, 0)} 个合约有异动：Call ${num(fx.n_call, 0)} 个、${usd(fx.call_premium)}；Put ${num(fx.n_put, 0)} 个、${usd(fx.put_premium)}。`
     + `${isNum(fx.times) ? `按权利金算${fx.lean_zh}（${fx.call_premium >= fx.put_premium ? "Call 是 Put" : "Put 是 Call"} 的 ${num(fx.times, 1)} 倍）。` : fx.lean_zh !== "—" ? `${fx.lean_zh}。` : ""}`
     + `${isNum(fx.nearest_resistance) ? `下文的阻力位指现价上方最近的 Call 侧未平仓集中位 ${num(fx.nearest_resistance, 0)}。` : ""}`;
   return h("div", {},
@@ -149,13 +149,13 @@ function flowLayers(fx) {
     fx.layers.map((L) => h("div", { class: "flow-layer" },
       h("h3", {}, `${L.expiry}${isNum(L.days_to_exp) ? `（${num(L.days_to_exp, 0)} 天后到期）` : ""} `,
         h("span", { class: `chip ${L.lean.startsWith("call") ? "pos" : L.lean.startsWith("put") ? "neg" : ""}` }, L.lean_zh),
-        h("span", { class: "sub" }, ` Call ${num(L.n_call, 0)} 笔 ${usd(L.call_premium)} · Put ${num(L.n_put, 0)} 笔 ${usd(L.put_premium)}`)),
+        h("span", { class: "sub" }, ` Call ${num(L.n_call, 0)} 个 ${usd(L.call_premium)} · Put ${num(L.n_put, 0)} 个 ${usd(L.put_premium)}`)),
       h("p", { class: "small" }, L.top.map((x, i) => h("span", { class: x.side === "call" ? "up" : "down" }, `${i ? "；" : ""}${item(x)}`)),
-        L.n_more ? h("span", { class: "muted" }, `；另有 ${num(L.n_more, 0)} 笔`) : null),
+        L.n_more ? h("span", { class: "muted" }, `；另有 ${num(L.n_more, 0)} 个`) : null),
       L.facts.length ? h("ul", { class: "small" }, L.facts.map((f) => h("li", {}, f))) : null)),
-    fx.unclassified || fx.missing_premium ? note(`${fx.unclassified ? `${fx.unclassified} 笔分不出 Call / Put 或缺到期日，没计入。` : ""}`
-      + `${fx.missing_premium ? `${fx.missing_premium} 笔没有权利金金额，只计笔数、不计金额。` : ""}`) : null,
-    note("颜色只区分 Call（绿）与 Put（红），不表示看涨看跌：记录里没有买卖方向，买 Call 与卖 Call 在这里长得一样。倍数与占比都按权利金金额算。"));
+    fx.unclassified || fx.missing_premium ? note(`${fx.unclassified ? `${fx.unclassified} 条分不出 Call / Put 或缺到期日，没计入。` : ""}`
+      + `${fx.missing_premium ? `${fx.missing_premium} 个没有权利金金额，只计个数、不计金额。` : ""}`) : null,
+    note("每一条是一个合约（某到期日、某行权价的 Call 或 Put）当天的成交合计，不是一笔订单。颜色只区分 Call（绿）与 Put（红），不表示看涨看跌：记录里没有买卖方向，买 Call 与卖 Call 在这里长得一样。倍数与占比都按权利金金额算。"));
 }
 
 function macro(d) {
@@ -179,6 +179,54 @@ function macro(d) {
     m.peers.length ? table(peerCols, m.peers) : null,
     note(`当天所有标的共用的大盘读数：${market.join("，")}。`),
     vixTerm(m));
+}
+
+// 做市商与大额成交（v0.45.771）。两半都是推算：做市商一半建立在「净多 Call、净空 Put」的假设上；大额成交一半只按规模定义、
+// 看不到身份与买卖方向。前提各说一次（服务端给的原文），说明句也由服务端算好，页面只排版。
+function positioning(d) {
+  const p = d.positioning;
+  if (!p) return null;
+  const dl = p.dealer, bg = p.big;
+  const sideChip = (x) => h("span", { class: `chip ${x.side === "call" ? "pos" : "neg"}` }, x.side === "call" ? "CALL" : "PUT");
+  const contract = [{ label: "侧", render: sideChip }, { label: "行权价", cls: "r", render: (x) => num(x.strike, 2) }, { label: "到期", render: (x) => x.expiry || "—" }];
+  const expCols = [{ label: "到期日", render: (x) => h("span", {}, x.expiry || "—", isNum(x.days_to) ? h("span", { class: "sub" }, ` ${num(x.days_to, 0)} 天后`) : null) },
+    { label: "占所列到期日 gamma", cls: "r", render: (x) => pctOf(x.share_pct, 0) },
+    { label: "Call 未平仓", cls: "r", render: (x) => qty(x.call_oi) }, { label: "Put 未平仓", cls: "r", render: (x) => qty(x.put_oi) }];
+  const topCols = [...contract, { label: "成交量", cls: "r", render: (x) => num(x.volume, 0) },
+    { label: "当时未平仓", cls: "r", render: (x) => num(x.oi, 0) },
+    { label: "量 ÷ 未平仓", cls: "r", render: (x) => (isNum(x.vol_oi) ? `${num(x.vol_oi, 2)}×` : "—") },
+    { label: "成交权利金", cls: "r", render: (x) => usd(x.premium_usd) }];
+  const followCols = [...contract, { label: "上次成交量", cls: "r", render: (x) => num(x.volume, 0) },
+    { label: "未平仓：上次 → 这次", cls: "r", render: (x) => (isNum(x.oi_before) && isNum(x.oi_after) ? `${num(x.oi_before, 0)} → ${num(x.oi_after, 0)}` : "—") },
+    { label: "增减 ÷ 成交量", cls: "r", render: (x) => (isNum(x.kept_ratio) ? h("span", { class: tone(x.kept_ratio) }, signedPct(x.kept_ratio * 100, 0)) : "—") },
+    { label: "结论", render: (x) => x.verdict_zh }];
+  const moverCols = [...contract, { label: "未平仓：上次 → 这次", cls: "r", render: (x) => `${num(x.oi_before, 0)} → ${num(x.oi_after, 0)}` },
+    { label: "增减", cls: "r", render: (x) => h("span", { class: tone(x.oi_change) }, `${x.oi_change > 0 ? "+" : "−"}${num(Math.abs(x.oi_change), 0)}`) }];
+  const facts = (xs) => (xs && xs.length ? h("ul", {}, xs.map((f) => h("li", {}, f))) : null);
+  const dealer = dl.available
+    ? [h("div", { class: "kpis" },
+      kpi("净 gamma", zh(WORD, dl.regime), isNum(dl.total_gex_musd) ? `${num(dl.total_gex_musd, 0)} 百万美元 / 每 1 美元` : null),
+      kpi("翻转位", num(dl.flip, 0), isNum(dl.flip_dist_pct) ? `距现价 ${signedPct(dl.flip_dist_pct, 1)}` : null),
+      kpi("Call 侧集中位", num(dl.call_wall, 0), isNum(dl.call_wall_dist_pct) ? `距现价 ${signedPct(dl.call_wall_dist_pct, 1)}` : null),
+      kpi("Put 侧集中位", num(dl.put_wall, 0), isNum(dl.put_wall_dist_pct) ? `距现价 ${signedPct(dl.put_wall_dist_pct, 1)}` : null)),
+    facts(dl.facts),
+    (dl.expiries || []).length ? table(expCols, dl.expiries) : null]
+    : [line(`这一天扫描没有可用的 gamma 读数（${dl.reason_zh || dl.reason || "原因不明"}），做市商一侧不做推算。`)];
+  const fo = bg.follow || {};
+  // 未平仓隔夜才更新：某次扫描记的是它前一个交易日收盘时的持仓 ⇒ 两次扫描之差 = 上一次扫描那天（含）到这一次前一天的开平仓
+  const when = fo.prev_date ? `这些增减发生在 ${fo.prev_date}（含）到 ${d.date}（不含）之间的交易日里；两次扫描是相邻交易日时，就是 ${fo.prev_date} 那一天。`
+    + `${d.date} 当天的开平仓要到下一次扫描才看得到。` : "";
+  return sec("positioning", "做市商与大额成交",
+    h("h3", {}, "做市商对冲"), note(dl.assumption), ...dealer,
+    h("h3", {}, "大额成交", h("span", { class: "sub" }, ` 当天成交权利金 ≥ ${usd(bg.threshold_usd)} 的合约`)), note(bg.caveat),
+    facts(bg.facts),
+    bg.top.length ? h("div", {}, h("h3", {}, "今天金额最大的几个合约", bg.n_more ? h("span", { class: "sub" }, ` 另有 ${num(bg.n_more, 0)} 个`) : null), table(topCols, bg.top)) : null,
+    fo.available && fo.rows.length ? h("div", {}, h("h3", {}, `上一次（${fo.prev_date || "—"}）的大额成交，这一次还在不在`,
+      fo.n_more ? h("span", { class: "sub" }, ` 按金额列前 ${fo.rows.length} 个，另有 ${num(fo.n_more, 0)} 个`) : null), table(followCols, fo.rows),
+      note(when, "未平仓的增减是这个合约全部参与者合计的结果，不只是那天成交的人；所以「留下」说的是这个合约上的净持仓增加了，不是某一方没走。")) : null,
+    (bg.oi_movers || []).length ? h("div", {}, h("h3", {}, "未平仓增减最多的合约", h("span", { class: "sub" }, ` 全部到期日，和 ${fo.prev_date || "上一次"} 比`)),
+      table(moverCols, bg.oi_movers),
+      note(when, "增加 = 新开的仓多于平掉的；减少 = 平掉的多。同一到期日里一档减少、相邻一档增加，常见于移仓，但数据里对不出是不是同一批人。")) : null);
 }
 
 // VIX 期限结构（v0.45.769）。扫描只记了形态标签，没记两个月份的点位 ⇒ 不写点位与价差；没取到就写没取到，不给结论
@@ -252,7 +300,7 @@ export async function renderDeep(root, ticker, alive) {
     if (!d.available) { fill(root, head, empty(d.reason_zh || "没有可显示的数据。")); return; }
     const toc = h("p", { class: "small" }, SECTIONS.map(([id, name], i) => h("span", {}, i ? " · " : "",
       h("a", { href: "javascript:void 0", onclick: () => document.getElementById(`deep-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" }) }, name))));
-    fill(root, head, toc, summary(d), risks(d), catalysts(d), options(d), macro(d), levels(d), swarm(d));
+    fill(root, head, toc, summary(d), risks(d), catalysts(d), options(d), positioning(d), macro(d), levels(d), swarm(d));
   }
   await draw();
 }

@@ -49,10 +49,10 @@ class TestFlowByExpiry:
     def test_facts_are_computed_quantities(self):
         a, b = OC.flow_by_expiry(FLOWS, 195.0, RES)["layers"]
         assert "占全部异动权利金的 50%" in a["facts"] and "Call 权利金是 Put 的 1.5 倍" in a["facts"]
-        assert "Call 异动的行权价在 $200；1 笔里 0 笔在最近的阻力位 $205 或之上" in a["facts"]
+        assert "Call 异动的行权价在 $200；1 个里 0 个在最近的阻力位 $205 或之上" in a["facts"]
         assert "Call 对 Put 的倍数：上一个到期日 1.5，这里 19.0" in b["facts"]
-        assert "单笔 Call 扫单 $210 占本到期日权利金 90%，其余 2 笔合计 10%" in b["facts"]
-        assert "Call 异动的行权价在 $210–$220；2 笔里 2 笔在最近的阻力位 $205 或之上" in b["facts"]
+        assert "单个合约（Call 成交远超未平仓 $210）占本到期日权利金 90%，其余 2 个合计 10%" in b["facts"]
+        assert "Call 异动的行权价在 $210–$220；2 个里 2 个在最近的阻力位 $205 或之上" in b["facts"]
         assert "权利金合计是上一个到期日的 1.0 倍" in b["facts"]
         assert any(x.startswith("Call 按权利金加权的行权价 $210.53，比上一个到期日高 $10.53") for x in b["facts"])
 
@@ -83,7 +83,7 @@ class TestFlowByExpiry:
         many = [_f("large_call_volume", 100 + i, 1e6 + i, "2026-11-20") for i in range(9)]
         L = OC.flow_by_expiry(many)["layers"][0]
         assert len(L["top"]) == OC.RULES["expiry_flows_shown"] and L["n_more"] == 9 - OC.RULES["expiry_flows_shown"]
-        assert L["top"][0]["strike"] == 108 and L["top"][0]["type_zh"] == "大额 Call 成交"
+        assert L["top"][0]["strike"] == 108 and L["top"][0]["type_zh"] == "Call 大额成交"
 
     def test_day_view_carries_it(self):
         res = {"final_score": 6.0, "direction": "bearish",
@@ -173,6 +173,19 @@ class TestPages:
         assert "flowLayers(r.flow_expiries)" in deep and "vixTerm(m)" in deep and "d.readings" in cmp_
         assert "不表示看涨看跌" in deep and "买 Call 与卖 Call 在这里长得一样" in deep
         assert "style=" not in deep and "style=" not in cmp_, "本站 CSP 不许行内样式"
+
+    def test_chart_tooltips_never_use_echarts_inline_styled_layout(self):
+        """本站 CSP 不许行内样式：ECharts 自带的提示排版（缺省 formatter / `valueFormatter` / `p.marker`）整段是行内样式，
+        被拦掉后色点没了、名字和数值挤在一起（用户 2026-11-11 的 P/C 截图里「全链0.99」）。提示一律自己排、色点经 CSSOM 涂色。"""
+        js = (REPO / "alphabot" / "static" / "charts.js").read_text(encoding="utf-8")
+        code = "\n".join(ln for ln in js.splitlines() if not ln.lstrip().startswith("//"))
+        assert "valueFormatter" not in code and ".marker" not in code and "style=" not in code
+        tips = re.findall(r"tooltip: \{[^\n]*", code)
+        assert len(tips) >= 8 and all("formatter" in t or "backgroundColor" in t or t.rstrip().endswith("{") for t in tips), \
+            [t for t in tips if "formatter" not in t]
+        assert 'n.style.backgroundColor = n.dataset.c' in code and "MutationObserver" in code and "__tipObs?.disconnect()" in code
+        css = (REPO / "alphabot" / "static" / "alphabot.css").read_text(encoding="utf-8")
+        assert ".tip-dot {" in css and ".tip-name {" in css
 
     def test_thresholds_live_in_one_table(self):
         src = (REPO / "alphabot" / "options_compare.py").read_text(encoding="utf-8")
