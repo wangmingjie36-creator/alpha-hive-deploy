@@ -8,6 +8,7 @@ import { renderLedger } from "./pages/ledger.js";
 import { renderStraddle } from "./pages/straddle.js";
 import { renderHedge } from "./pages/hedge.js";
 import { renderWheel } from "./pages/wheel.js";
+import { renderCompare } from "./pages/compare.js";
 import { renderWheelScreen } from "./pages/wheel_screen.js";
 import { renderResults } from "./pages/results.js";
 import { renderMethod } from "./pages/method.js";
@@ -143,6 +144,7 @@ async function route() {
     else if (page === "straddle") await renderStraddle(app, alive);
     else if (page === "hedge") await renderHedge(app, alive);
     else if (page === "wheel") await (a === "screen" ? renderWheelScreen(app, alive) : renderWheel(app, alive));
+    else if (page === "compare") await renderCompare(app, a ? a.toUpperCase() : null, alive);
     else if (page === "results") await renderResults(app, a, alive);
     else if (page === "method") await renderMethod(app, alive);
     else if (page === "help") await renderHelp(app, a, alive);
