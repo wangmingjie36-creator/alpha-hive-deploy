@@ -52,7 +52,8 @@ function summary(d) {
     line(rs.detected ? `共振已触发：${num(rs.supporting_agents, 0)} 只蜂同向${zh(DIR, rs.direction)}` + (isNum(rs.boost_pct) ? `，综合分加成 ${num(rs.boost_pct, 0)}%` : "") + "。" : "共振没有触发。",
       ` ${conflict}。`,
       isNum(s.total_penalty) && s.total_penalty > 0 ? ` 综合分里扣了 ${num(s.total_penalty, 2)} 分。` : "",
-      v.non_voting.length ? ` ${v.non_voting.map(short).join("、")} 不参与投票。` : ""),
+      v.non_voting.length ? ` ${v.non_voting.map(short).join("、")} 不参与投票。` : "",
+      v.failed.length ? ` ${v.failed.map(short).join("、")} 当天出错，不计票。` : ""),
     isNum(s.data_real_pct) && s.data_real_pct < 90 ? h("p", { class: "callout warn" }, `扫描给这一天的数据真实度打了 ${pctOf(s.data_real_pct)}，偏低，读数要打折看。`) : null,
     s.coverage_warning ? h("p", { class: "callout warn" }, s.coverage_warning) : null,
     failed.length ? h("p", { class: "callout warn" }, `这一天有 ${failed.length} 只蜂运行出错（${failed.map((a) => a.label.split(" · ")[0]).join("、")}），它们的分数和方向不是正常算出来的；报错原文在「各蜂明细」里。`) : null);
@@ -170,7 +171,8 @@ function swarm(d) {
     { label: "维度", render: (r) => h("b", {}, r.label) },
     { label: "分数", cls: "r", render: (r) => num(r.score, 2) },
     ...(routed ? [{ label: "基础权重", cls: "r", render: (r) => (isNum(r.base_weight) ? pctOf(r.base_weight * 100) : "—") }] : []),
-    { label: routed ? "当天权重" : "权重", cls: "r", render: (r) => (r.in_score ? pctOf(r.weight * 100) : h("span", { class: "sub" }, "0，不计分")) },
+    { label: routed ? "当天权重" : "权重", cls: "r", render: (r) => (r.in_score ? pctOf(r.weight * 100)
+      : h("span", { class: "sub", title: r.missing_reason || "" }, r.live ? "0，不计分" : "当天缺这一维")) },
     { label: "数据质量", cls: "r", render: (r) => pctOf(r.data_quality) },
   ];
   const yesNo = (ok) => (ok ? "是" : h("span", { class: "sub" }, "否"));
@@ -192,7 +194,7 @@ function swarm(d) {
   const inScore = d.agents.filter((a) => a.in_score).map((a) => a.label.split(" · ")[0]);
   return sec("swarm", "各蜂明细",
     d.agents.length ? table(agCols, d.agents) : line("这一天没有各蜂的记录。"),
-    d.agents.length ? note(inScore.length ? `当天进综合分的只有 ${inScore.join("、")}；其余的蜂有分数，但权重为 0 或不在五个维度里。` : "当天没有任何一只蜂的权重大于 0。",
+    d.agents.length ? note(inScore.length ? `当天进综合分的只有 ${inScore.join("、")}；其余的蜂有分数，但权重为 0、不在五个维度里，或当天出错。` : "当天没有任何一只蜂的权重大于 0。",
       on.length ? ` 另外动了综合分的：${on.join("、")}。` : "",
       off.length ? ` 算了但没用进综合分的：${off.join("、")}。` : "") : null,
     h("h3", {}, "五个维度"), table(dimCols, d.dimensions),

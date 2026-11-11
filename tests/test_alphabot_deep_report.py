@@ -169,6 +169,7 @@ class TestScoringSync:
                   "dimension_weights_base": {"signal": 0.0, "catalyst": 0.332, "sentiment": 0.325, "odds": 0.343, "risk_adj": 0.0},
                   "base_score_before_resonance": 4.97, "pre_penalty_score": 5.96, "score_after_dq": 5.96,
                   "score_after_guard": 5.96, "score_after_bear": 5.96, "final_score": 5.96,
+                  "dimension_status": {k: "present" for k in ("signal", "catalyst", "sentiment", "odds", "risk_adj")},
                   "ml_auxiliary_in_score": False, "gex_regime_mod": {"gex_adjustment": -0.5, "applied": False},
                   "guard_penalty": 0.0, "bear_strength": 8.04, "bear_cap_applied": False})
         for name, dim in (("BuzzBeeWhisper", "sentiment"), ("RivalBeeVanguard", "ml_auxiliary"), ("GuardBeeSentinel", "risk_adj"),
@@ -179,13 +180,29 @@ class TestScoringSync:
     def test_votes_count_only_voting_bees(self):
         v = DR.build("NVDA", D3, self._full())["summary"]["votes"]
         assert v["counts"] == {"bullish": 0, "bearish": 4, "neutral": 1} and v["voters"] == 5      # 不是记录里的 6 空 1 中性
-        assert v["non_voting"] == ["BearBeeContrarian", "GuardBeeSentinel"] and v["weights"]["bearish"] == 3.26
+        assert v["non_voting"] == ["BearBeeContrarian", "GuardBeeSentinel"] and v["weights"]["bearish"] == 3.26 and v["failed"] == []
 
     def test_old_record_without_exclusion_list_counts_everyone(self):
         r = self._full()
         del r["vote_excluded_agents"]
         v = DR.build("NVDA", D3, r)["summary"]["votes"]
         assert v["voters"] == 7 and v["counts"]["bearish"] == 6 and v["non_voting"] == []
+
+    def test_failed_bee_neither_votes_nor_feeds_the_score(self):
+        """SNOW 2026-10-26 实例：Chronos 出错，记录里仍带着方向「中性」和 34% 的催化剂权重——但它不是有效结果。"""
+        r = self._full()
+        r["agent_details"]["ChronosBeeHorizon"]["discovery"] = "Error: catalyst_sources_unavailable"
+        r["dimension_status"] = {"signal": "present", "catalyst": "error", "sentiment": "present", "odds": "present", "risk_adj": "present"}
+        r["dimension_missing_reason"] = {"catalyst": "catalyst_sources_unavailable: calendar=YFRateLimited"}
+        d = DR.build("NVDA", D3, r)
+        v = d["summary"]["votes"]
+        assert v["counts"] == {"bullish": 0, "bearish": 4, "neutral": 0} and v["voters"] == 4 and v["failed"] == ["ChronosBeeHorizon"]
+        ag = {a["name"]: a for a in d["agents"]}
+        assert (ag["ChronosBeeHorizon"]["votes"], ag["ChronosBeeHorizon"]["in_score"], ag["ChronosBeeHorizon"]["weight"]) == (False, False, 0.3322)
+        dim = {x["key"]: x for x in d["dimensions"]}["catalyst"]
+        assert (dim["live"], dim["in_score"], dim["weight"]) == (False, False, 0.3322) and dim["missing_reason"].startswith("catalyst_sources")
+        page = (STATIC / "pages" / "deep.js").read_text(encoding="utf-8")
+        assert "当天缺这一维" in page and "当天出错，不计票" in page
 
     def test_which_bees_feed_the_score(self):
         ag = {a["name"]: a for a in DR.build("NVDA", D3, self._full())["agents"]}

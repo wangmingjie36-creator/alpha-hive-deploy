@@ -143,6 +143,19 @@ def _dist(level: Optional[float], spot: Optional[float]) -> Optional[float]:
     return round((level / spot - 1) * 100, 2) if level is not None and spot else None
 
 
+def _failed(a) -> bool:
+    """这只蜂当天出错了：扫描把报错原文记进它的「发现」（以 Error 或 ❌ 开头）。出错的蜂不算有效结果——不计票、它那一维也没有分数
+    （全部 2721 份记录里，`supporting_agents` = 有方向的蜂数 − 按这个判据出错的蜂数，2704 份成立；`error` 键不可靠，345 份对不上）。"""
+    disc = str((a or {}).get("discovery") or "").lstrip() if isinstance(a, dict) else ""
+    return disc.startswith("Error") or disc.startswith("\u274c")
+
+
+def _dim_live(r: dict, k: str) -> bool:
+    """这一维当天有没有分数：有 `dimension_status` 就认它（present 才算；error / absent 是缺这一维），老记录没有就看有没有分数。"""
+    st = _dig(r, "dimension_status", k)
+    return st == "present" if st is not None else _num(_dig(r, "dimension_scores", k)) is not None
+
+
 def _directions(r: dict) -> dict:
     """各蜂当天的方向 `{蜂: 方向}`：先取 `agent_directions`，没有就取各蜂自己记的。"""
     out = {}
@@ -158,11 +171,14 @@ def _votes(r: dict) -> dict:
     把不投票的蜂也数在里面：NVDA 2026-11-10 记「6 只看空、1 只中性」，其中 Bear 与 Guard 自 2026-09-14 起不投票，真投票的是 4 空 1 中性。
     不投票的名单取**那一天记录里**的 `vote_excluded_agents`（没有这个键的老记录 = 当时全体都投）。"""
     excluded = set(_texts(r.get("vote_excluded_agents")))
+    recorded = r.get("agent_details") if isinstance(r.get("agent_details"), dict) else {}
+    failed = {n for n, a in recorded.items() if _failed(a)}
     dirs = _directions(r)
-    voting = {n: d for n, d in dirs.items() if n not in excluded}
+    # 出错的蜂记录里也带着一个方向（兜底的「中性」），但它不是有效结果、不计票——二次检查前这里把它数成了一张中性票
+    voting = {n: d for n, d in dirs.items() if n not in excluded and n not in failed}
     return {"counts": {k: sum(1 for d in voting.values() if d == k) for k in ("bullish", "bearish", "neutral")},
-            "voters": len(voting),
-            "non_voting": sorted(n for n in (r.get("agent_details") if isinstance(r.get("agent_details"), dict) else {}) if n in excluded),
+            "voters": len(voting), "non_voting": sorted(n for n in recorded if n in excluded),
+            "failed": sorted(failed - excluded),
             "weights": {k: _num(_dig(r, "direction_vote_weights", k)) for k in ("bullish", "bearish", "neutral")}}
 
 
@@ -206,7 +222,9 @@ def _dimensions(r: dict) -> List[dict]:
              "weight": _num(_dig(r, "dimension_weights", k)), "base_weight": _num(_dig(r, "dimension_weights_base", k)),
              "confidence": _num(_dig(r, "dimension_confidence", k)),
              "status": _dig(r, "dimension_status", k), "data_quality": _num(_dig(r, "dim_data_quality", k)),
-             "in_score": (_num(_dig(r, "dimension_weights", k)) or 0.0) > 0} for k, zh in DIMENSIONS]
+             # 权重 > 0 还不够：那一维的蜂出错时记录里权重照旧（SNOW 2026-10-26 催化剂 34%），但没有分数、不进综合分
+             "live": _dim_live(r, k), "missing_reason": clean_text(_dig(r, "dimension_missing_reason", k)),
+             "in_score": (_num(_dig(r, "dimension_weights", k)) or 0.0) > 0 and _dim_live(r, k)} for k, zh in DIMENSIONS]
 
 
 def _agents(r: dict) -> List[dict]:
@@ -225,16 +243,17 @@ def _agents(r: dict) -> List[dict]:
             continue
         dim = a.get("dimension")
         weight = _num(_dig(r, "dimension_weights", dim)) if dim in dims else None
-        disc = str(a.get("discovery") or "").lstrip()
+        failed = _failed(a)
         out.append({"name": name, "label": known.get(name) or RETIRED_AGENTS.get(name, name), "known": name in known,
-                    "dimension": dim, "dimension_label": dims.get(dim), "weight": weight, "in_score": bool(weight and weight > 0),
+                    "dimension": dim, "dimension_label": dims.get(dim), "weight": weight,
+                    "in_score": bool(weight and weight > 0) and not failed and _dim_live(r, dim),
                     "score": _num(a.get("score")),
                     "direction": a.get("direction") or _dig(r, "agent_directions", name),
                     "confidence": _num(a.get("confidence")), "findings": findings(a.get("discovery")),
                     # 这只蜂当天出错了（扫描把报错原文记进「发现」，以 Error 或 ❌ 开头）——它的分数与方向不是正常算出来的，
                     # 页面要在摘要里点名，不能只躺在收起的明细里
-                    "failed": disc.startswith("Error") or disc.startswith("\u274c"),
-                    "votes": name not in excluded})
+                    "failed": failed,
+                    "votes": name not in excluded and not failed})
     return out
 
 
