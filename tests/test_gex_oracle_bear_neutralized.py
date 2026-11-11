@@ -259,10 +259,11 @@ class TestOracleMarkerOnEveryPath:
         self._assert_marked(out)
 
     def test_options_agent_failure_path(self, monkeypatch):
-        """OptionsAgent 抛错 ⇒ result={}、options_score=5.0，照样要带标记。
+        """OptionsAgent 抛错 ⇒ result={}，照样要带标记。v0.45.765 起这条路弃权（error 形状、odds 维缺席），
+        details 仍落进归档 ⇒ 印记照写。
         变红的变异：把标记改成从 OptionsAgent 结果里抄（`result.get(...)`）。"""
         out, _ = _run_oracle(monkeypatch, _options_stub(None, raise_exc=ConnectionError("桩：链不可用")))
-        assert "error" not in out and out["data_quality"]["options"] == "fallback", "前提：走的是失败兜底"
+        assert out.get("error") and out["data_quality"]["options"] == "fallback", "前提：走的是期权链不可用的弃权"
         self._assert_marked(out)
 
     def test_agent_error_fallback_path(self, monkeypatch):

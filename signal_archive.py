@@ -2461,6 +2461,11 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     "v0.45.674": ("agent.GuardBeeSentinel.*",),
     # 11-09：CodeExecutorAgent 退役 —— 下游（Guard 普查 / 拥挤度看多数、swarm_agreement、final_score）由依赖边推出
     "v0.45.750": ("agent.CodeExecutorAgent.*",),
+    # 11-09（v0.45.765，并进 11-09 起点、作废 0 条，等价论证见 ic_rerun_readiness 同版条目）：Oracle 取不到数据时不拿兜底常量进分——
+    # 异常流兜底不再以 5.0 混入融合分（Oracle 分与按分数带定的方向变）；期权链整条取不到 ⇒ Oracle 弃权（分 / 方向成为 error 占位）。
+    # ⇒ `agent.OracleBeeEcho.*` 点名；BearBee 的 options_bear 读 Oracle 方向与板上条目（弃权那天读不到 ⇒ 走自己的回落）⇒ `bear.options_bear`
+    # 点名（同 v0.45.383 / 423）。下游（Guard 普查、swarm_agreement 等）由 _scope_closure 带出。
+    "v0.45.765": ("agent.OracleBeeEcho.*", "bear.options_bear"),
 }
 
 

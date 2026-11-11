@@ -37,6 +37,7 @@ def _mark_gex_out_of_score(out: Dict) -> Dict:
     det[OPTIONS_DQ_MARKER] = True
     det[HV_GAP_MARKER] = True
     det[TD_SESSION_MARKER] = True
+    det[NO_FALLBACK_SCORE_MARKER] = True
     return out
 
 
@@ -52,6 +53,27 @@ HV_GAP_MARKER = "hv_gap_checked"
 #: 此前只比日期、收盘后也丢。只在 yfinance 失败、Twelve Data 兜底的那几天改分（成交量回落 / 日线缺口第二源），
 #: 等价判据见 `ic_rerun_readiness._equiv_td_session_bar`。每条返回路径都写字面量 True（同上三个印记）。
 TD_SESSION_MARKER = "td_session_aware"
+
+#: v0.45.765 世代印记：本结果的分数里没有兜底常量——
+#:   ① 异常期权流取不到（`_unusual_observed` 为假）不再以兜底 dict 的 5.0 混进融合分（此前按 0.10/0.65 把期权分往 5 拉；
+#:      而 `detect_unusual_flow` 抛异常那条路 flow 为空、只用期权分 ⇒ 同样是「没取到」，两条路不同分）；
+#:   ② 期权链整条取不到（`_options_data_usable` 为假）⇒ 本蜂弃权（`OPTIONS_UNAVAILABLE_ERROR`，error 形状）：不打分、
+#:      不投方向票、不上信息素板 ⇒ 蜂后把 odds 维当缺席、用其余四维重新归一（`_prepare_dimension_data` 认 error 键）。
+#: 每条返回路径都写字面量 True（同上四个印记；`_mark_gex_out_of_score` 覆盖异常 / 无效 ticker，弃权与成功路径写在 details 字面量里）。
+#: 等价判据与边界登记见 `ic_rerun_readiness._COHORT_HISTORY` 的 v0.45.765 条。
+NO_FALLBACK_SCORE_MARKER = "fallback_not_scored"
+
+#: 期权链整条取不到时本蜂弃权的 error 文本（v0.45.765）。蜂后把它截前 80 字写进 `dimension_missing_reason["odds"]`
+OPTIONS_UNAVAILABLE_ERROR = "期权链不可用，OracleBee 弃权（odds 维缺席，不拿兜底分进综合分）"
+
+
+def _unusual_observed(flow) -> bool:
+    """异常期权流真取到了吗（v0.45.765）。融合分的基数与调整项**都**只认它。
+
+    `detect_unusual_flow` 取不到（全部到期日失败 / OI 陈旧 / 无到期日 / 无现价 / 内部异常）一律返回
+    `data_source: "fallback"` 的兜底 dict（`unusual_score` 恒 5.0、neutral）；它自己抛出、被本蜂吞掉时 flow 为空。
+    两种都是「没有观测」⇒ 都只用期权分。取到 ⇒ `data_source: "yfinance_chain"`。"""
+    return bool(flow) and flow.get("data_source") != "fallback"
 
 
 def _unusual_flow_status(flow) -> dict:
@@ -380,7 +402,7 @@ class OracleBeeEcho(BeeAgent):
             try:
                 from unusual_options import detect_unusual_flow
                 unusual_flow = detect_unusual_flow(ticker, stock_price=current_price)
-                if unusual_flow.get("data_source") != "fallback":
+                if _unusual_observed(unusual_flow):
                     uf_score = unusual_flow.get("unusual_score", 5.0)
                     uf_dir = unusual_flow.get("unusual_direction", "neutral")
                     # 异常流作为额外调整项（±1.5 分最大影响）
@@ -391,13 +413,56 @@ class OracleBeeEcho(BeeAgent):
             except (ImportError, ConnectionError, ValueError, KeyError, TypeError) as e:
                 _log.debug("P2 unusual_options 不可用 %s: %s", ticker, e)
 
+            # v0.45.369：「可用」按 OptionsAgent 自己的 data_quality 判（样本链早退的非空结果不算）
+            _opts_ok = _options_data_usable(result)
+            # 取到链 ⇒ real；样本链早退 ⇒ unavailable；OptionsAgent 抛异常（result 为空）⇒ fallback。写成字面量条件式：
+            # `tests/test_dq_label_classification.py` 的扫描器要看得到全部取值（藏进函数调用它就只能记「不透明」）。
+            # v0.45.765 起后两种走下面的弃权分支，成功路径上恒为 real；弃权结果的 data_quality 照样带这个标签（说明为什么缺席）
+            _options_dq = "real" if _opts_ok else ("unavailable" if result else "fallback")
+            # 落进 `.swarm_results_*.json` 的那一份（成功 / 弃权两条路共用）。字面量印记放在展开之后 ⇒ 不依赖 OptionsAgent 结果里有没有这些键
+            _details = {**(result or {}), "term_structure": term_structure,
+                        "deep_skew": deep_skew, "max_pain": max_pain,
+                        # v0.45.349：字面量，放在展开之后 ⇒ 不依赖 OptionsAgent 结果里有没有这个键
+                        "gex_signal_in_score": False,
+                        # v0.45.369：同理，世代印记（见 OPTIONS_DQ_MARKER）
+                        OPTIONS_DQ_MARKER: True,
+                        # v0.45.383：同理（见 HV_GAP_MARKER）；放在展开之后，不依赖 OptionsAgent 结果里有没有 hv_gap
+                        HV_GAP_MARKER: True,
+                        # v0.45.421：异常期权流（yfinance 链）取数状态。`unusual_flow_ok` 为 True 表示取到了数据（"ok" / "partial"），
+                        # 取不到是 None——`scan_coverage_gate` 按「有值 = 取到」数覆盖率；键本身在 ⇒ 新代码产出（旧结果没有这个键，
+                        # 闸据此判「未记录」而不是「全降级」）。v0.45.765 起取不到就不进分（`_unusual_observed`）
+                        "unusual_flow_ok": _unusual_flow_ok(unusual_flow),
+                        "unusual_flow_status": _unusual_flow_status(unusual_flow),
+                        # v0.45.423 世代印记：同 HV_GAP_MARKER，字面量放在展开之后（见 TD_SESSION_MARKER）
+                        TD_SESSION_MARKER: True,
+                        # v0.45.765 世代印记（见 NO_FALLBACK_SCORE_MARKER）
+                        NO_FALLBACK_SCORE_MARKER: True}
+
+            # ---- v0.45.765：期权链整条取不到 ⇒ 弃权 ----
+            # 此前照样出分：options_score 停在 5.0（深度调整也取不到 ⇒ 0），再混异常流 ⇒ 一个由兜底常量撑起来的 odds 分进综合分，
+            # 方向票也照投（分数带 / 异常流）。现在走 error 形状：蜂后 `_prepare_dimension_data` 把它当缺席、其余四维重新归一；
+            # 方向投票、`agent_votes`（日报快照）都按 error 键排除。**不上信息素板**——板上一条中性条目会被 Guard 普查当成一张同伴票，
+            # BearBee 读不到 Oracle 条目时自己取一次 OptionsAgent（同 Oracle 抛异常那天的既有路径）。不调 LLM（没有期权数据可解读）。
+            # details 照留（取数状态、OptionsAgent 自己的 data_quality、覆盖率闸要读的字段都在里面）。
+            if not _opts_ok:
+                _log.warning("OracleBeeEcho %s：期权链不可用（%s），本蜂弃权、odds 维缺席", ticker, _options_dq)
+                return AgentResult(
+                    score=5.0, direction="neutral", confidence=0.0,   # 占位，同 make_error_result；error 键在 ⇒ 下游都不读它
+                    discovery=f"期权链不可用（{_options_dq}），本蜂弃权、不打分 | ${current_price:.1f}",
+                    source="OracleBeeEcho", dimension="odds",
+                    data_quality={"options": _options_dq},
+                    details=_details,
+                    error=f"{OPTIONS_UNAVAILABLE_ERROR}：{_options_dq}",
+                ).to_dict()
+
             # ---- 融合评分（期权 + 异常流）----
             # v0.45.315：原「无 Polymarket」分支原样保留为唯一路径（生产自 v0.45.30
             # 起只走这条）。两权重是相对值，除以 `_ow + _uw` 归一；config 刻意保留
             # 原值 0.55/0.10 以保证浮点逐位不变（理由见 config.AGENT_SCORING 注释）。
             _ow = _AS.get("oracle_options_weight", 0.55)
             _uw = _AS.get("oracle_unusual_weight", 0.10)
-            _unusual_base = unusual_flow.get("unusual_score", None) if unusual_flow else None
+            # v0.45.765：只认真取到的异常流（同上面的调整项）。此前判 `if unusual_flow`：兜底 dict 非空 ⇒ 它的 5.0 照样当基数混入
+            _unusual_base = unusual_flow.get("unusual_score", None) if _unusual_observed(unusual_flow) else None
             if _unusual_base is not None:
                 _total_w = _ow + _uw
                 if _total_w > 0:
@@ -490,13 +555,9 @@ class OracleBeeEcho(BeeAgent):
                         })
                 if _ua:
                     _pub_details["unusual_activity"] = _ua[:15]  # 最多保留15条
-            # v0.45.369：「可用」按 OptionsAgent 自己的 data_quality 判（样本链早退的非空结果不算）
-            _opts_ok = _options_data_usable(result)
-            # v0.45.639：同一个标签上板（不在 `if result:` 里——OptionsAgent 抛异常时 result={} 也要带上）。BearBee 读 Oracle 的条目时
-            # 照抄它当自己的 data_quality.options；此前板上没有这个判定，Bear 读到条目就一律记 "real"（10-14 一行实测）
-            # 取到链 ⇒ real；样本链早退 ⇒ unavailable；OptionsAgent 抛异常（result 为空）⇒ fallback。写成字面量条件式：
-            # `tests/test_dq_label_classification.py` 的扫描器要看得到全部取值（藏进函数调用它就只能记「不透明」）
-            _options_dq = "real" if _opts_ok else ("unavailable" if result else "fallback")
+            # v0.45.639：同一个标签上板（不在 `if result:` 里）。BearBee 读 Oracle 的条目时照抄它当自己的 data_quality.options；
+            # 此前板上没有这个判定，Bear 读到条目就一律记 "real"（10-14 一行实测）。v0.45.765 起走到这里的都是取到链的（恒 real），
+            # 降级的两种在上面弃权、不上板；键照留——Bear 认不出 / 缺键按 unavailable 记，删了它 Bear 就把真实链也记成降级
             _pub_details[OPTIONS_DQ_BOARD_KEY] = _options_dq
             self._publish(ticker, discovery, "options", score, direction, details=_pub_details)
 
@@ -514,25 +575,11 @@ class OracleBeeEcho(BeeAgent):
                 source="OracleBeeEcho",
                 dimension="odds",
                 data_quality={
-                    # v0.45.369：样本链早退 ⇒ "unavailable"（与 "fallback" 同在 Queen 的 PROXY_SOURCES）；
-                    # OptionsAgent 抛异常（result={}）⇒ "fallback"，同旧。v0.45.639：与板上那份同一个变量
+                    # v0.45.639：与板上那份同一个变量。v0.45.765 起成功路径上恒为 "real"
+                    # （"unavailable" / "fallback" 两种走上面的弃权分支，标签留在弃权结果里）
                     "options": _options_dq,
                 },
-                details={**(result or {}), "term_structure": term_structure,
-                         "deep_skew": deep_skew, "max_pain": max_pain,
-                         # v0.45.349：字面量，放在展开之后 ⇒ 不依赖 OptionsAgent 结果里有没有这个键
-                         "gex_signal_in_score": False,
-                         # v0.45.369：同理，世代印记（见 OPTIONS_DQ_MARKER）
-                         OPTIONS_DQ_MARKER: True,
-                         # v0.45.383：同理（见 HV_GAP_MARKER）；放在展开之后，不依赖 OptionsAgent 结果里有没有 hv_gap
-                         HV_GAP_MARKER: True,
-                         # v0.45.421：异常期权流（yfinance 链）取数状态，**只记录、不进评分**。`unusual_flow_ok` 为 True 表示
-                         # 取到了数据（"ok" / "partial"），取不到是 None——`scan_coverage_gate` 按「有值 = 取到」数覆盖率；
-                         # 键本身在 ⇒ 新代码产出（旧结果没有这个键，闸据此判「未记录」而不是「全降级」）。
-                         "unusual_flow_ok": _unusual_flow_ok(unusual_flow),
-                         "unusual_flow_status": _unusual_flow_status(unusual_flow),
-                         # v0.45.423 世代印记：同 HV_GAP_MARKER，字面量放在展开之后（见 TD_SESSION_MARKER）
-                         TD_SESSION_MARKER: True},
+                details=_details,
             ).to_dict()
 
         except AGENT_ERRORS as e:

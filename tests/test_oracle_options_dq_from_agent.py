@@ -50,11 +50,13 @@ def _no_llm(monkeypatch):
 class TestOracleLabelsByAgentDataQuality:
 
     def test_sample_chain_early_exit_is_not_real(self, monkeypatch):
-        """变红的变异：`_options_data_usable` 退回 `bool(result)`（样本链结果非空 ⇒ real + 0.7）。"""
+        """变红的变异：`_options_data_usable` 退回 `bool(result)`（样本链结果非空 ⇒ real + 0.7，且不弃权）。
+
+        v0.45.765 起这一种不再出分：弃权（error 形状、置信度 0），标签 unavailable 留在弃权结果里。"""
         out, _ = _run_oracle(monkeypatch, _stub_with_dq("unavailable"))
-        assert "error" not in out
+        assert out.get("error"), "期权链不可用 ⇒ 弃权（v0.45.765）"
         assert out["data_quality"]["options"] == "unavailable"
-        assert out["confidence"] == pytest.approx(0.4)
+        assert out["confidence"] == 0.0
 
     @pytest.mark.parametrize("dq", ["real", "degraded"])
     def test_real_and_degraded_unchanged(self, monkeypatch, dq):
@@ -63,16 +65,20 @@ class TestOracleLabelsByAgentDataQuality:
         assert out["data_quality"]["options"] == "real" and out["confidence"] == pytest.approx(0.7)
 
     def test_agent_exception_still_fallback(self, monkeypatch):
+        """标签照旧 fallback；v0.45.765 起同样弃权（error 形状、置信度 0）。"""
         out, _ = _run_oracle(monkeypatch, _options_stub(None, raise_exc=ConnectionError("桩")))
-        assert out["data_quality"]["options"] == "fallback" and out["confidence"] == pytest.approx(0.4)
+        assert out.get("error")
+        assert out["data_quality"]["options"] == "fallback" and out["confidence"] == 0.0
 
-    def test_score_and_direction_do_not_depend_on_the_label(self, monkeypatch):
-        """同一份期权结果，只换 `data_quality` 的值：分与方向逐位相同 ⇒ 本版只动标签与置信度。"""
+    def test_unavailable_label_decides_abstention(self, monkeypatch):
+        """同一份期权结果，只换 `data_quality` 的值。v0.45.369 时分与方向逐位相同（本版只动标签与置信度）；
+        v0.45.765 起 `unavailable` ⇒ 弃权：那份「样本链早退」结果的分不再进综合分，哪怕桩里的指标看着像真的。
+        判据就是 `_options_data_usable` 这一处——变红的变异：弃权改按 `options_score == 5.0` 之类的取值判（这里 a 的分不是 5.0）。"""
         a, _ = _run_oracle(monkeypatch, _stub_with_dq("real", iv_rank=40.0, put_call_ratio=0.9))
         b, _ = _run_oracle(monkeypatch, _stub_with_dq("unavailable", iv_rank=40.0, put_call_ratio=0.9,
                                                        options_score=a["details"]["options_score"],
                                                        signal_summary=a["details"]["signal_summary"]))
-        assert (a["score"], a["direction"]) == (b["score"], b["direction"])
+        assert "error" not in a and b.get("error")
         assert (a["data_quality"]["options"], b["data_quality"]["options"]) == ("real", "unavailable")
 
     def test_new_label_is_registered_with_the_queen(self):
