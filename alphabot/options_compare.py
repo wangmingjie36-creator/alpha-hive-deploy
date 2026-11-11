@@ -24,8 +24,11 @@
 综合分（`final_score`）本身也没有被证实有预测力，这里照实摆出来只为看它怎么变。
 
 口径（照扫描记录的原样，不重算）
-  · P/C = `put_call_ratio`：按到期远近加权的未平仓量比（近端权重大）；`full_pc_ratio` 是全链不加权的那个，两个都给；
-  · 总 OI = `total_oi`：只数 7 天以后到期的合约（避开到期日脱落造成的假骤降）；
+  · **全链** P/C（`full_pc_ratio`）与**全链** OI（call + put 合计）是总览列、变化与提示的口径：覆盖全部到期日，日间可比；
+  · **近端窗口** P/C（`put_call_ratio`）与窗口 OI（`total_oi`）只在详情页并排摆出、**不挂提示**：它们只数扫描主链选中的
+    那 4 个到期日（8 个日历日之后最近的 4 个）。月度到期日（第三个周五，OI 是周度的好几倍）进出这个窗口时，窗口 OI 会
+    跳 3～5 倍、窗口 P/C 也跟着变，那是窗口换了、不是持仓变了（2026-11-11 实测：NVDA 10-08 → 10-09 窗口 OI 171 万 → 47 万，
+    同两天全链 OI 1081 万 → 1078 万；10 / 11 月全部标的 836 个相邻扫描日里，窗口 OI 变化 ≥ 15% 的有 184 个，全链的 34 个）；
   · IV Rank 带 `iv_rank_source`——`hv_proxy` 是拿历史波动率顶替的，不是真 IV Rank，页面照实标出；
   · 异动流 = `unusual_activity`，是 CBOE 延迟快照里「量大 / 量 OI 比高」的合约，**分不出买卖方向与开平仓**。
 """
@@ -40,10 +43,10 @@ SCOUT = "ScoutBeeNova"
 #: 提示阈值与展示条数。页面与帮助页只经 `public_rules()` 取，不另抄。
 RULES = {
     "score_jump": 1.5,            # 综合分单日变化 ≥ 此值
-    "pc_jump": 0.25,              # P/C 单日变化 ≥ 此值
+    "pc_jump": 0.25,              # 全链 P/C 单日变化 ≥ 此值
     "iv_rank_jump": 20.0,         # IV Rank 单日变化 ≥ 此值（百分位点）；两天口径不同（source 变了）不比
     "skew_jump": 0.10,            # IV Skew 比值单日变化 ≥ 此值
-    "oi_jump_pct": 15.0,          # 总 OI 单日变化 ≥ 此百分比
+    "oi_jump_pct": 15.0,          # 全链 OI 单日变化 ≥ 此百分比
     "centroid_shift_pct": 2.5,    # Call 成交量重心迁移 ≥ 现价的此百分比
     "flows_shown": 12,            # 详情页列出的异动流条数（按权利金金额排）
     "levels_shown": 3,            # 支撑 / 阻力各列几档
@@ -129,30 +132,6 @@ def _flows(raw) -> Tuple[List[dict], dict]:
     return rows, summary
 
 
-#: `day_view` 从 OracleBee details 里读的键（`slim` 只留这些：一天的结果文件近 2 MB，逐行权价 OI 表占大头，缓存时不留）
-_ORACLE_KEYS = ("_snapshot_stock_price", "unusual_activity", "iv_term_structure", "data_quality", "put_call_ratio",
-                "iv_rank", "iv_rank_source", "iv_current", "rv_30d", "iv_rv_spread", "iv_skew_ratio", "iv_skew_detail",
-                "total_oi", "max_pain", "key_levels", "unusual_flow_ok")
-_FULL_CHAIN_KEYS = ("full_pc_ratio", "total_call_oi", "total_put_oi")
-
-
-def slim(result) -> Optional[dict]:
-    """一只票的扫描结果 → 只留 `day_view` 要读的部分（给服务端缓存用）。`day_view(slim(x)) == day_view(x)`（测试钉住）。"""
-    if not isinstance(result, dict):
-        return None
-    o = _dig(result, "agent_details", ORACLE, "details")
-    details = {}
-    if isinstance(o, dict) and o:
-        details = {k: o[k] for k in _ORACLE_KEYS if k in o}
-        fc = o.get("full_chain_oi")
-        if isinstance(fc, dict):
-            details["full_chain_oi"] = {k: fc[k] for k in _FULL_CHAIN_KEYS if k in fc}
-    return {"final_score": result.get("final_score"), "direction": result.get("direction"),
-            "resonance": {"resonance_detected": _dig(result, "resonance", "resonance_detected")},
-            "agent_details": {ORACLE: {"details": details},
-                              SCOUT: {"details": {"price": _dig(result, "agent_details", SCOUT, "details", "price")}}}}
-
-
 def day_view(result) -> Optional[dict]:
     """一只标的某天的扫描结果 → 期权结构读数。没有 OracleBee 的 details ⇒ `options_available: False`（分数 / 方向仍给）。
     取不到的字段一律 None，不填默认值。"""
@@ -167,6 +146,8 @@ def day_view(result) -> Optional[dict]:
         spot = _num(_dig(result, "agent_details", SCOUT, "details", "price"))
         spot_source = "scout" if spot is not None else None
     flows, flow_sum = _flows(o.get("unusual_activity"))
+    fc_call, fc_put = _num(_dig(o, "full_chain_oi", "total_call_oi")), _num(_dig(o, "full_chain_oi", "total_put_oi"))
+    full_oi = fc_call + fc_put if fc_call is not None and fc_put is not None else None      # 缺一侧不拿另一侧顶替
     ts = o.get("iv_term_structure") if isinstance(o.get("iv_term_structure"), dict) else {}
     return {
         "score": _num(result.get("final_score")), "direction": result.get("direction"),
@@ -183,6 +164,7 @@ def day_view(result) -> Optional[dict]:
         "total_oi": _num(o.get("total_oi")),
         "full_call_oi": _num(_dig(o, "full_chain_oi", "total_call_oi")),
         "full_put_oi": _num(_dig(o, "full_chain_oi", "total_put_oi")),
+        "full_oi": full_oi,
         "max_pain": _num(_dig(o, "max_pain", "max_pain")),
         "term_shape": ts.get("shape"), "front_iv": _num(ts.get("front_iv")), "back_iv": _num(ts.get("back_iv")),
         "supports": _levels(_dig(o, "key_levels", "support"), spot),
@@ -190,6 +172,17 @@ def day_view(result) -> Optional[dict]:
         "flows": flows[: int(RULES["flows_shown"])], "flow_summary": flow_sum,
         "unusual_flow_ok": o.get("unusual_flow_ok"),
     }
+
+
+def views_of(results) -> dict:
+    """一天的全部扫描结果 → `{标的（大写）: day_view 读数}`。服务端缓存的就是它（原始文件近 2 MB，读数只有几十 KB）。
+    不是对象的条目丢掉；顶层不是对象由调用方先判。"""
+    out = {}
+    for t, r in (results or {}).items():
+        v = day_view(r)
+        if v is not None:
+            out[str(t).upper()] = v
+    return out
 
 
 def _delta(a: Optional[float], b: Optional[float], dp: int = 2) -> Optional[float]:
@@ -214,12 +207,14 @@ def compare(today: dict, prev: Optional[dict]) -> dict:
         "direction_flipped": bool(today.get("direction") and prev.get("direction")
                                   and today.get("direction") != prev.get("direction")),
         "spot_pct": _pct(today.get("spot"), prev.get("spot")),
-        "pc_ratio": _delta(today.get("pc_ratio"), prev.get("pc_ratio")),
+        "full_pc_ratio": _delta(today.get("full_pc_ratio"), prev.get("full_pc_ratio"), 3),
+        "window_pc_ratio": _delta(today.get("pc_ratio"), prev.get("pc_ratio")),
         "iv_rank": _delta(today.get("iv_rank"), prev.get("iv_rank"), 1) if same_ivr else None,
         "iv_rank_comparable": same_ivr,
         "iv_current": _delta(today.get("iv_current"), prev.get("iv_current")),
         "skew": _delta(today.get("skew"), prev.get("skew"), 3),
-        "total_oi_pct": _pct(today.get("total_oi"), prev.get("total_oi")),
+        "full_oi_pct": _pct(today.get("full_oi"), prev.get("full_oi")),
+        "window_oi_pct": _pct(today.get("total_oi"), prev.get("total_oi")),
         "max_pain": _delta(today.get("max_pain"), prev.get("max_pain")),
         "call_pct": _delta(_dig(today, "flow_summary", "call_pct"), _dig(prev, "flow_summary", "call_pct"), 1),
         "call_centroid": _delta(tc, pc),
@@ -242,14 +237,15 @@ def alerts(today: dict, prev: Optional[dict], d: dict) -> List[dict]:
             out.append({"level": "move", "key": key, "text": text})
     move("score", d["score"], RULES["score_jump"],
          f"综合分单日 {d['score']:+.2f}（{prev.get('score')} → {today.get('score')}）" if d["score"] is not None else "")
-    move("pc_ratio", d["pc_ratio"], RULES["pc_jump"],
-         f"P/C 单日 {d['pc_ratio']:+.2f}（{prev.get('pc_ratio')} → {today.get('pc_ratio')}）" if d["pc_ratio"] is not None else "")
+    move("full_pc_ratio", d["full_pc_ratio"], RULES["pc_jump"],
+         f"全链 P/C 单日 {d['full_pc_ratio']:+.2f}（{prev.get('full_pc_ratio')} → {today.get('full_pc_ratio')}）"
+         if d["full_pc_ratio"] is not None else "")
     move("iv_rank", d["iv_rank"], RULES["iv_rank_jump"],
          f"IV Rank 单日 {d['iv_rank']:+.0f}（{prev.get('iv_rank')} → {today.get('iv_rank')}）" if d["iv_rank"] is not None else "")
     move("skew", d["skew"], RULES["skew_jump"],
          f"IV Skew 单日 {d['skew']:+.3f}（{prev.get('skew')} → {today.get('skew')}）" if d["skew"] is not None else "")
-    move("total_oi", d["total_oi_pct"], RULES["oi_jump_pct"],
-         f"总 OI 单日 {d['total_oi_pct']:+.1f}%" if d["total_oi_pct"] is not None else "")
+    move("full_oi", d["full_oi_pct"], RULES["oi_jump_pct"],
+         f"全链 OI 单日 {d['full_oi_pct']:+.1f}%" if d["full_oi_pct"] is not None else "")
     move("call_centroid", d["call_centroid_pct_of_spot"], RULES["centroid_shift_pct"],
          (f"Call 成交重心{'上移' if (d['call_centroid'] or 0) > 0 else '下移'} {abs(d['call_centroid'] or 0):.2f}"
           f"（现价的 {abs(d['call_centroid_pct_of_spot']):.1f}%）") if d["call_centroid_pct_of_spot"] is not None else "")
@@ -262,31 +258,29 @@ def _brief(t: str, date: str, prev_date: Optional[str], today: dict, prev: Optio
     return {"ticker": t, "date": date, "prev_date": prev_date, "scans_between": gap,
             "score": today["score"], "direction": today["direction"], "spot": today["spot"],
             "options_available": today["options_available"],
-            "pc_ratio": today["pc_ratio"], "iv_rank": today["iv_rank"], "iv_rank_source": today["iv_rank_source"],
-            "skew": today["skew"], "total_oi": today["total_oi"],
+            "full_pc_ratio": today["full_pc_ratio"], "iv_rank": today["iv_rank"], "iv_rank_source": today["iv_rank_source"],
+            "skew": today["skew"], "full_oi": today["full_oi"],
             "call_pct": today["flow_summary"]["call_pct"],
             "delta": d, "alerts": al, "alert_count": len(al), "flipped": bool(d.get("direction_flipped"))}
 
 
 def _prev_for(t: str, days: List[Tuple[str, dict]], idx: int) -> Tuple[Optional[str], Optional[dict], int]:
-    """`days` 按日期升序、`idx` 是今天。往前找这只票**有记录**的最近一个扫描日；返回 (日期, 读数, 中间跳过了几个扫描日)。"""
+    """`days` = [(日期, {标的: `day_view` 读数})]，按日期升序、`idx` 是今天。往前找这只票**有记录**的最近一个扫描日；返回 (日期, 读数, 中间跳过了几个扫描日)。"""
     for j in range(idx - 1, -1, -1):
-        v = day_view((days[j][1] or {}).get(t))
+        v = (days[j][1] or {}).get(t)
         if v is not None:
             return days[j][0], v, idx - 1 - j
     return None, None, 0
 
 
 def build_overview(days: List[Tuple[str, dict]], date: str) -> dict:
-    """`days` = [(日期, 那天的全部扫描结果)]，升序，最后一个是 `date`。每只票一行：今天的读数 + 相对上一个有记录的扫描日的变化。"""
+    """`days` = [(日期, `views_of(那天的全部扫描结果)`)]，升序。每只票一行：今天的读数 + 相对上一个有记录的扫描日的变化。"""
     idx = next((i for i, (d, _) in enumerate(days) if d == date), None)
     if idx is None:
         return {"available": False, "reason": "no_such_date", "reason_zh": reason_zh("no_such_date"), "date": date, "rows": []}
     rows = []
     for t in sorted((days[idx][1] or {})):
-        today = day_view(days[idx][1][t])
-        if today is None:
-            continue
+        today = days[idx][1][t]
         pd_, pv, gap = _prev_for(t, days, idx)
         rows.append(_brief(t, date, pd_, today, pv, gap))
     rows.sort(key=lambda r: (-int(r["flipped"]), -r["alert_count"], r["ticker"]))
@@ -301,18 +295,18 @@ def build_ticker(t: str, days: List[Tuple[str, dict]], date: str) -> dict:
     idx = next((i for i, (d, _) in enumerate(days) if d == date), None)
     if idx is None:
         return base | {"reason": "no_such_date", "reason_zh": reason_zh("no_such_date")}
-    today = day_view((days[idx][1] or {}).get(t))
+    today = (days[idx][1] or {}).get(t)
     if today is None:
         return base | {"reason": "ticker_not_scanned", "reason_zh": reason_zh("ticker_not_scanned")}
     pd_, pv, gap = _prev_for(t, days, idx)
     d = compare(today, pv)
     hist = []
     for dt, res in days[: idx + 1]:
-        v = day_view((res or {}).get(t))
+        v = (res or {}).get(t)
         if v is None:
             continue
         hist.append({"date": dt, "score": v["score"], "direction": v["direction"], "spot": v["spot"],
-                     "pc_ratio": v["pc_ratio"], "iv_rank": v["iv_rank"], "iv_rank_source": v["iv_rank_source"],
+                     "full_pc_ratio": v["full_pc_ratio"], "pc_ratio": v["pc_ratio"], "full_oi": v["full_oi"], "iv_rank": v["iv_rank"], "iv_rank_source": v["iv_rank_source"],
                      "iv_current": v["iv_current"], "skew": v["skew"], "total_oi": v["total_oi"],
                      "call_pct": v["flow_summary"]["call_pct"]})
     return base | {"available": True, "reason": None if pv else "no_prev", "reason_zh": None if pv else reason_zh("no_prev"),

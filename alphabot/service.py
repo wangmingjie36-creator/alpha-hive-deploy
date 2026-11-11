@@ -292,7 +292,7 @@ class AlphaBotService:
         self.completed_session_fn = completed_session_fn
         self._wheel_closes: Dict[str, tuple] = {}
         # 「对比」页（v0.45.759）：每日扫描结果 `.swarm_results_<日期>.json` 所在目录；None ⇒ 调用时的 PATHS.home。
-        # `{日期: ((mtime_ns, size), {标的: 瘦身后的结果})}`——文件没变就不重读（一份近 2 MB）
+        # `{日期: ((mtime_ns, size), {标的: 读数})}`——文件没变就不重读（一份近 2 MB，缓存的读数只有几十 KB）
         self.compare_root = compare_root
         self._compare_cache: Dict[str, tuple] = {}
         # Yahoo 限流时各票「最早什么时候值得再试」（self.clock() 的时刻）：`live()` 把它折成 `retry_after_sec` 给页面
@@ -564,7 +564,7 @@ class AlphaBotService:
         return sorted(m.group(1) for m in (self._SWARM_RE.match(n) for n in os.listdir(home)) if m)
 
     def _compare_day(self, date: str):
-        """某天的全部结果（瘦身后）→ `(结果, 原因)`。读不了 / 不是对象 ⇒ `(None, "file_unreadable:…")`，不当成空的一天。"""
+        """某天全部标的的读数（`OC.views_of`）→ `(结果, 原因)`。读不了 / 不是对象 ⇒ `(None, "file_unreadable:…")`，不当成空的一天。"""
         path = self._compare_home() / f".swarm_results_{date}.json"
         try:
             st = path.stat()
@@ -578,7 +578,7 @@ class AlphaBotService:
         except Exception as exc:  # noqa: BLE001 - 原因原样给页面
             _log.warning("扫描结果读不了（%s）：%s: %s", date, type(exc).__name__, exc)
             return None, f"file_unreadable:{type(exc).__name__}"
-        day = {str(t).upper(): s for t, s in ((t, OC.slim(r)) for t, r in raw.items()) if s is not None}
+        day = OC.views_of(raw)
         self._compare_cache[date] = (key, day)
         return day, None
 

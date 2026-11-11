@@ -1,8 +1,9 @@
 """Alpha Bot「对比」页（v0.45.759，`alphabot/options_compare.py` + `/api/compare` + `static/pages/compare.js`）的守卫。离线。
 
 每组回答一句「谁会红」：
-  · 读数照记录原样抽：取不到 ⇒ None 不填默认值；瘦身缓存不丢 `day_view` 要读的键（`TestDayView`）；
-  · 变化：任一边缺 ⇒ None（不当 0 变化）；IV Rank 两天口径不同不比；提示恰在阈值上挂、差一点不挂（`TestCompare`）；
+  · 读数照记录原样抽：取不到 ⇒ None 不填默认值；全链 OI 缺一侧不拿另一侧顶替（`TestDayView`）；
+  · 变化：任一边缺 ⇒ None（不当 0 变化）；IV Rank 两天口径不同不比；提示恰在阈值上挂、差一点不挂；
+    近端窗口的 OI / P/C 跳变**不挂提示**（月度到期日进出窗口造成的假跳变，`TestCompare`）；
   · 「上一次」= 这只票有记录的上一个扫描日，跳过了几天要说（`TestBuild`）；
   · 读盘：文件在自己的 tmp 里；坏文件 ≠ 空的一天、没文件 ≠ 坏文件、演示模式不读盘（`TestService`）；
   · 前端接线：顶栏 / 路由 / 帮助章节一致；阈值取自服务端不写字面量；页面不出方向判断字段（`TestFrontend`）；
@@ -26,7 +27,7 @@ D0, D1, D2 = "2026-11-06", "2026-11-09", "2026-11-10"
 
 
 def _res(score=6.0, direction="bullish", spot=100.0, pc=0.80, ivr=50.0, src="iv_history", skew=1.00, oi=1000.0,
-         flows=None, **extra):
+         flows=None, fpc=1.20, fcall=5000, fput=6000, **extra):
     flows = flows if flows is not None else [
         {"type": "call_sweep", "strike": 110.0, "volume": 300, "oi": 100, "ratio": 3.0, "otm_pct": 10.0,
          "dollar_premium": 9e5, "days_to_exp": 9, "expiry": "2026-11-20"},
@@ -39,7 +40,7 @@ def _res(score=6.0, direction="bullish", spot=100.0, pc=0.80, ivr=50.0, src="iv_
                "iv_term_structure": {"shape": "contango", "front_iv": 40.0, "back_iv": 45.0},
                "key_levels": {"support": [{"strike": 90.0, "oi": 500.0}, {"strike": 85.0, "oi": 300.0}],
                               "resistance": [{"strike": 110.0, "oi": 700.0}]},
-               "full_chain_oi": {"full_pc_ratio": 1.2, "total_call_oi": 5000, "total_put_oi": 6000,
+               "full_chain_oi": {"full_pc_ratio": fpc, "total_call_oi": fcall, "total_put_oi": fput,
                                  "oi_by_strike_call": {"100.0": 1}}, **extra}
     return {"final_score": score, "direction": direction, "resonance": {"resonance_detected": True},
             "agent_details": {"OracleBeeEcho": {"details": details}, "ScoutBeeNova": {"details": {"price": 99.0}}}}
@@ -50,6 +51,7 @@ class TestDayView:
         v = OC.day_view(_res())
         assert (v["score"], v["direction"], v["spot"], v["spot_source"]) == (6.0, "bullish", 100.0, "options_snapshot")
         assert (v["pc_ratio"], v["full_pc_ratio"], v["iv_rank"], v["total_oi"], v["max_pain"]) == (0.8, 1.2, 50.0, 1000.0, 95.0)
+        assert v["full_oi"] == 11000.0
         assert v["supports"][0] == {"strike": 90.0, "oi": 500.0, "dist_pct": -10.0}
         fs = v["flow_summary"]                     # call 300 手 @110、put 100 手 ⇒ call 占 75%，重心 110
         assert (fs["call_pct"], fs["call_centroid"], fs["count"], fs["unclassified"]) == (75.0, 110.0, 2, 0)
@@ -58,7 +60,7 @@ class TestDayView:
     def test_missing_values_stay_none(self):
         v = OC.day_view({"final_score": 5.0, "direction": "neutral"})
         assert v["options_available"] is False and v["score"] == 5.0
-        for k in ("spot", "pc_ratio", "iv_rank", "skew", "total_oi", "max_pain"):
+        for k in ("spot", "pc_ratio", "full_pc_ratio", "iv_rank", "skew", "total_oi", "full_oi", "max_pain"):
             assert v[k] is None, k
         assert v["flow_summary"]["call_pct"] is None and v["flows"] == [] and v["supports"] == []
         assert OC.day_view(None) is None and OC.day_view("x") is None
@@ -76,27 +78,30 @@ class TestDayView:
         assert v["flow_summary"] == {"count": 0, "unclassified": 1, "call_volume": 0.0, "put_volume": 0.0,
                                      "call_pct": None, "call_centroid": None}
 
-    def test_slim_keeps_everything_day_view_reads(self):
-        """缓存存的是瘦身后的结果：`day_view` 新读一个键而忘了登记 `_ORACLE_KEYS` ⇒ 这里红（否则页面静默变 None）。"""
-        full = _res()
-        assert OC.day_view(OC.slim(full)) == OC.day_view(full)
-        slim = OC.slim(full)
-        assert "oi_by_strike_call" not in json.dumps(slim)                 # 大表确实没留
-        assert OC.slim(None) is None
+    def test_full_oi_needs_both_sides(self):
+        assert OC.day_view(_res(fcall=None))["full_oi"] is None and OC.day_view(_res(fput=float("nan")))["full_oi"] is None
+
+    def test_views_of_uppercases_and_drops_non_objects(self):
+        v = OC.views_of({"nvda": _res(), "bad": 3, "x": None})
+        assert list(v) == ["NVDA"] and v["NVDA"] == OC.day_view(_res()) and OC.views_of(None) == {}
+        assert len(json.dumps(v)) < 4000 and "oi_by_strike_call" not in json.dumps(v)     # 缓存的是读数，不是原始大表
 
 
 class TestCompare:
     def test_deltas(self):
-        t, p = OC.day_view(_res(score=6.5, spot=110.0, pc=1.0, ivr=60.0, skew=1.05, oi=1100.0)), OC.day_view(_res())
+        t = OC.day_view(_res(score=6.5, spot=110.0, pc=1.0, fpc=1.3, ivr=60.0, skew=1.05, oi=1100.0, fcall=5600, fput=6500))
+        p = OC.day_view(_res())
         d = OC.compare(t, p)
-        assert (d["score"], d["spot_pct"], d["pc_ratio"], d["iv_rank"], d["skew"], d["total_oi_pct"]) == \
-            (0.5, 10.0, 0.2, 10.0, 0.05, 10.0)
+        assert (d["score"], d["spot_pct"], d["full_pc_ratio"], d["iv_rank"], d["skew"], d["full_oi_pct"]) == \
+            (0.5, 10.0, 0.1, 10.0, 0.05, 10.0)
+        assert (d["window_pc_ratio"], d["window_oi_pct"]) == (0.2, 10.0)
         assert d["direction_flipped"] is False and d["iv_rank_comparable"] is True
 
     def test_missing_side_is_none_not_zero(self):
         d = OC.compare(OC.day_view(_res()), OC.day_view({"final_score": 6.0, "direction": "bullish"}))
         assert d["available"] is True and d["score"] == 0.0
-        for k in ("spot_pct", "pc_ratio", "skew", "total_oi_pct", "max_pain", "call_pct", "call_centroid"):
+        for k in ("spot_pct", "full_pc_ratio", "window_pc_ratio", "skew", "full_oi_pct", "window_oi_pct", "max_pain",
+                  "call_pct", "call_centroid"):
             assert d[k] is None, k
         assert OC.compare(OC.day_view(_res()), None) == {"available": False}
 
@@ -108,16 +113,25 @@ class TestCompare:
 
     @pytest.mark.parametrize("kw,key,hit", [
         ({"score": 7.5}, "score", True), ({"score": 7.49}, "score", False),
-        ({"pc": 1.05}, "pc_ratio", True), ({"pc": 1.04}, "pc_ratio", False),
+        ({"fpc": 1.45}, "full_pc_ratio", True), ({"fpc": 1.44}, "full_pc_ratio", False),
         ({"ivr": 70.0}, "iv_rank", True), ({"ivr": 69.0}, "iv_rank", False),
         ({"skew": 1.10}, "skew", True), ({"skew": 1.09}, "skew", False),
-        ({"oi": 1150.0}, "total_oi", True), ({"oi": 1149.0}, "total_oi", False),
-        ({"oi": 850.0}, "total_oi", True),
+        ({"fcall": 6650}, "full_oi", True), ({"fcall": 6649}, "full_oi", False),
+        ({"fput": 4350}, "full_oi", True),
     ])
     def test_alert_thresholds(self, kw, key, hit):
         t, p = OC.day_view(_res(**kw)), OC.day_view(_res())
         keys = [a["key"] for a in OC.alerts(t, p, OC.compare(t, p))]
         assert (key in keys) is hit, keys
+
+    def test_window_jumps_raise_no_alert(self):
+        """月度到期日进出 4 个到期日的窗口 ⇒ 窗口 OI 跳 3～5 倍、窗口 P/C 跟着变，全链几乎不动（2026-11-11 实测 NVDA
+        10-29 → 10-30：窗口 OI 52.8 万 → 175.7 万、窗口 P/C 1.24 → 0.85；全链 OI 1106 万 → 1096 万）。那不是持仓变化。"""
+        t = OC.day_view(_res(oi=1757385.0, pc=0.85, fpc=0.979, fcall=5500000, fput=5462461))
+        p = OC.day_view(_res(oi=527916.0, pc=1.24, fpc=0.906, fcall=5800000, fput=5259639))
+        d = OC.compare(t, p)
+        assert d["window_oi_pct"] > 200 and abs(d["full_oi_pct"]) < 1
+        assert OC.alerts(t, p, d) == []
 
     def test_flip_and_centroid_alerts(self):
         up = [{"type": "call_sweep", "strike": 113.0, "volume": 300, "dollar_premium": 1.0}]
@@ -128,15 +142,16 @@ class TestCompare:
         assert OC.alerts(t, None, {"available": False}) == []
 
     def test_alert_text_never_reads_direction_into_a_move(self):
-        t, p = OC.day_view(_res(score=9.0, pc=2.0, ivr=99.0, skew=1.5, oi=5000.0)), OC.day_view(_res())
+        t, p = OC.day_view(_res(score=9.0, fpc=2.0, ivr=99.0, skew=1.5, fcall=50000)), OC.day_view(_res())
+        assert len(OC.alerts(t, p, OC.compare(t, p))) == 5
         text = " ".join(a["text"] for a in OC.alerts(t, p, OC.compare(t, p)))
         for word in ("看涨", "看跌", "买入", "卖出", "建议", "升温", "谨慎"):
             assert word not in text, word
 
 
 class TestBuild:
-    DAYS = [(D0, {"AAA": _res(score=5.0), "BBB": _res()}), (D1, {"BBB": _res()}),
-            (D2, {"AAA": _res(score=7.0, direction="bearish"), "BBB": _res(), "CCC": _res()})]
+    DAYS = [(D0, OC.views_of({"AAA": _res(score=5.0), "BBB": _res()})), (D1, OC.views_of({"BBB": _res()})),
+            (D2, OC.views_of({"AAA": _res(score=7.0, direction="bearish"), "BBB": _res(), "CCC": _res()}))]
 
     def test_prev_is_last_scan_with_that_ticker(self):
         o = OC.build_overview(self.DAYS, D2)
@@ -160,7 +175,7 @@ class TestBuild:
         assert first["available"] and first["reason"] == "no_prev" and first["prev"] is None and first["alerts"] == []
 
     def test_history_is_capped_and_never_looks_past_the_date(self):
-        days = [(f"2026-{m:02d}-{d:02d}", {"AAA": _res()}) for m in (9, 10) for d in range(1, 29)]
+        days = [(f"2026-{m:02d}-{d:02d}", OC.views_of({"AAA": _res()})) for m in (9, 10) for d in range(1, 29)]
         d = OC.build_ticker("AAA", days, days[-3][0])
         assert len(d["history"]) == OC.RULES["history_days"] and d["history"][-1]["date"] == days[-3][0]
 
@@ -217,9 +232,9 @@ class TestService:
     def test_endpoints(self, tmp_path):
         from starlette.testclient import TestClient
         from alphabot.server import create_app
-        svc = self._svc(tmp_path, {D1: {"NVDA": _res()}, D2: {"NVDA": _res(pc=1.2)}})
+        svc = self._svc(tmp_path, {D1: {"NVDA": _res()}, D2: {"NVDA": _res(fpc=1.6)}})
         c = TestClient(create_app(svc, port=8765), base_url="http://127.0.0.1:8765")
-        assert c.get("/api/compare").json()["rows"][0]["alerts"][0]["key"] == "pc_ratio"
+        assert c.get("/api/compare").json()["rows"][0]["alerts"][0]["key"] == "full_pc_ratio"
         assert c.get(f"/api/compare/NVDA?date={D1}").json()["reason"] == "no_prev"
         assert c.get("/api/compare?date=nope").status_code == 400
         assert c.get("/api/compare/N!VDA").status_code == 400
@@ -252,7 +267,11 @@ class TestFrontend:
         days = TestBuild.DAYS
         row = OC.build_overview(days, D2)["rows"][0]
         det = OC.build_ticker("AAA", days, D2)
+        hist = set(det["history"][0])
+        assert set(re.findall(r"hist\.map\(\(r\) => r\.(\w+)\)", txt)) <= hist
         for pat, have in ((r"\br\.delta\.(\w+)", set(row["delta"])), (r"\bdl\.(\w+)", set(det["delta"])),
+                          (r"\bp\.(\w+)", set(det["today"])),
+                          (r"\(r\) => \w+\((?:num|oiShort)\(r\.(\w+)", set(row)),
                           (r"\bfs\.(\w+)", set(det["today"]["flow_summary"])),
                           (r"\bt\.(\w+)", set(det["today"])), (r"\bd\.(\w+)", set(det) | {"prev_scan_date", "rows", "dates", "unreadable"})):
             used = set(re.findall(pat, txt))
