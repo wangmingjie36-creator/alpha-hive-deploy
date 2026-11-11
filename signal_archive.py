@@ -2483,6 +2483,8 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # ⇒ `agent.OracleBeeEcho.*` 点名；BearBee 的 options_bear 读 Oracle 方向与板上条目（弃权那天读不到 ⇒ 走自己的回落）⇒ `bear.options_bear`
     # 点名（同 v0.45.383 / 423）。下游（Guard 普查、swarm_agreement 等）由 _scope_closure 带出。
     "v0.45.765": ("agent.OracleBeeEcho.*", "bear.options_bear"),
+    # Oracle 弃权时 Bear 照抄、不再自取 ⇒ 只在弃权行改 options_bear（765 已把它的起点挪到 11-09，本条同日不再挪）
+    "v0.45.770": ("bear.options_bear",),
 }
 
 
