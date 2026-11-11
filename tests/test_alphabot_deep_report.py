@@ -54,8 +54,10 @@ def _res(**top):
             {"level": "level_1_warning", "label": "毛利率", "machine": False, "fired": None},
             {"level": "level_1_warning", "label": "综合分跌破 p2", "machine": True, "fired": False, "field": "score",
              "op": "<", "value": 4.0, "actual": 6.0},
-            {"level": "level_2_stop", "label": "看空信号达 p98", "machine": True, "fired": True,
-             "field": "bear_signals_count", "op": ">=", "value": 7, "actual": 8}, "junk"],
+            {"level": "level_2_stop_loss", "label": "看空信号达 p98", "machine": True, "fired": True,
+             "field": "bear_signals_count", "op": ">=", "value": 7, "actual": 8},
+            {"level": "level_2_stop_loss", "label": "IV 进入 p99", "machine": True, "fired": None, "field": "iv", "op": ">",
+             "value": 109.0, "actual": None}, "junk"],
         "agent_details": {
             "OracleBeeEcho": {"score": 3.7, "direction": "bearish", "confidence": 0.7, "dimension": "odds",
                               "discovery": "97 个看涨异动 | Skew25d:1.06 | 历史5条:多0/空0,均分5.9|历史T+7准确率39%(41次,均收益-2.07%)", "details": oracle},
@@ -131,7 +133,8 @@ class TestBuild:
         assert r["enough_bear_points"] is True and "crowding_note" not in r
         assert len(r["insider"]["trades"]) == DR.RULES["insider_trades_shown"]
         tb = r["thesis_breaks"]
-        assert [(x["level"], x["machine"], x["fired"]) for x in tb] == [(1, False, None), (1, True, False), (2, True, True)]
+        assert [(x["level"], x["machine"], x["fired"]) for x in tb] == \
+            [(1, False, None), (1, True, False), (2, True, True), (2, True, None)]   # 最后一条：有判据但当天缺数
         assert r["thesis_fired"] == 1                                         # 人工条件 fired=None：不数成已触发，也不写成未触发
         few = DR.build("NVDA", D3, _res(agent_details={"BearBeeContrarian": {"details": {"bearish_signals": ["a", "b"]}}}))
         assert few["risks"]["enough_bear_points"] is False
@@ -161,9 +164,22 @@ class TestCleaning:
         ("共振✅ 4 Agent 同向", "共振 4 Agent 同向"), ("⚠️ Regime:风险规避", "Regime:风险规避"),
         ("TSM 领先 1.5pp——上游需求强劲，有望传导至订单端。", "TSM 领先 1.5pp"),
         ("  ", None), (None, None), (3, None), ("（高拥挤度）", None),
+        # 二次检查：不含数字但是事实的括号曾被误删
+        ("高波动率 53%（年化）", "高波动率 53%（年化）"), ("期权数据不可用（真实链获取失败）", "期权数据不可用（真实链获取失败）"),
+        ("F&G 33(Fear)", "F&G 33(Fear)"), ("宏观:VIX 27.3(elevated)", "宏观:VIX 27.3"),
+        ("Error: unsupported operand type(s) for -: 'int' and 'NoneType'", "Error: unsupported operand type(s) for -: 'int' and 'NoneType'"),
     ])
     def test_clean_text(self, raw, want):
         assert DR.clean_text(raw) == want
+
+    def test_failed_bee_is_flagged(self):
+        r = _res()
+        r["agent_details"]["ChronosBeeHorizon"]["discovery"] = "Error: catalyst_sources_unavailable: calendar=YFRateLimited"
+        ag = {a["name"]: a for a in DR.build("NVDA", D3, r)["agents"]}
+        assert ag["ChronosBeeHorizon"]["failed"] is True and ag["ChronosBeeHorizon"]["findings"][0].startswith("Error: catalyst")
+        assert ag["OracleBeeEcho"]["failed"] is False
+        page = (STATIC / "pages" / "deep.js").read_text(encoding="utf-8")
+        assert "a.failed" in page and "运行出错" in page                      # 摘要里点名，不只躺在收起的明细里
 
     def test_findings_drop_accuracy_and_model_fragments(self):
         ag = {a["name"]: a["findings"] for a in DR.build("NVDA", D3, _res())["agents"]}
@@ -297,7 +313,8 @@ class TestFrontend:
         txt = self.PAGE.read_text(encoding="utf-8")
         body = "\n".join(ln for ln in txt.splitlines() if not ln.lstrip().startswith("//"))
         assert body.count("没有被证实") == 1 and body.count("不构成投资建议") == 1
-        assert "「未核对」不等于「未触发」" in body
+        assert "「未核对」不等于「未触发」" in body and "缺数据，判不了" in body
+        assert "调到" not in body and "兜底" not in body and "近期" not in body      # 二次检查删掉的三句没有数据支持的说法
         for word in ("照登", "原话", "规则引擎", "概率区间", "模型预期"):
             assert word not in body, word
 

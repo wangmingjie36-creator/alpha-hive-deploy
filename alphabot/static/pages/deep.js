@@ -38,6 +38,7 @@ function pickers(d, ticker, onDate) {
 
 function summary(d) {
   const s = d.summary, v = s.votes, rs = s.resonance, rk = s.rank;
+  const failed = d.agents.filter((a) => a.failed);
   const conflict = rs.conflict_level && rs.conflict_level !== "none"
     ? `各蜂之间有${zh(WORD, rs.conflict_level)}分歧` + (rs.arbitration_triggered ? (rs.arbitration_flipped ? "，仲裁后方向被翻转" : "，触发过仲裁、方向没变") : "")
     : "各蜂之间没有明显分歧";
@@ -47,22 +48,26 @@ function summary(d) {
       kpi("综合分", num(s.score, 2), s.confidence_band ? `区间 ${num(s.confidence_band[0], 1)}～${num(s.confidence_band[1], 1)}` : null),
       kpi("当天排名", isNum(rk.rank) ? `第 ${rk.rank}` : "—", isNum(rk.of) ? `名单共 ${rk.of} 只` : null),
       kpi("现价", num(s.spot, 2))),
-    line(rs.detected ? `共振已触发：${num(rs.supporting_agents, 0)} 只蜂同向${zh(DIR, rs.direction)}` + (isNum(s.score_before_resonance) ? `，综合分由 ${num(s.score_before_resonance, 2)} 调到 ${num(s.score, 2)}` : "") + "。" : "共振没有触发。",
+    line(rs.detected ? `共振已触发：${num(rs.supporting_agents, 0)} 只蜂同向${zh(DIR, rs.direction)}。` : "共振没有触发。",
       ` ${conflict}。`,
       isNum(s.total_penalty) && s.total_penalty > 0 ? ` 综合分里扣了 ${num(s.total_penalty, 2)} 分。` : ""),
-    isNum(s.data_real_pct) && s.data_real_pct < 90 ? h("p", { class: "callout warn" }, `这一天只有 ${pctOf(s.data_real_pct)} 的数据是真实取到的，其余是兜底值，读数要打折看。`) : null,
-    s.coverage_warning ? h("p", { class: "callout warn" }, s.coverage_warning) : null);
+    isNum(s.data_real_pct) && s.data_real_pct < 90 ? h("p", { class: "callout warn" }, `扫描给这一天的数据真实度打了 ${pctOf(s.data_real_pct)}，偏低，读数要打折看。`) : null,
+    s.coverage_warning ? h("p", { class: "callout warn" }, s.coverage_warning) : null,
+    failed.length ? h("p", { class: "callout warn" }, `这一天有 ${failed.length} 只蜂运行出错（${failed.map((a) => a.label.split(" · ")[0]).join("、")}），它们的分数和方向不是正常算出来的；报错原文在「各蜂明细」里。`) : null);
 }
 
 function risks(d) {
   const r = d.risks, ins = r.insider, tb = r.thesis_breaks;
-  const manual = tb.filter((x) => x.fired === null).length;
+  // 没核对有两种：本来就要人判断的（machine = false），和有判据但当天缺数判不了的——分开数、分开写
+  const manual = tb.filter((x) => !x.machine).length;
+  const undecided = tb.filter((x) => x.machine && x.fired === null).length;
   const tbCols = [
     { label: "级别", render: (x) => (x.level === 2 ? h("span", { class: "chip neg" }, "止损") : h("span", { class: "chip warn" }, "预警")) },
     { label: "条件", render: (x) => h("b", {}, x.label || "—") },
     { label: "判据", render: (x) => (x.machine && x.field ? `${x.field} ${x.op || ""} ${plain(x.value)}` : "需人工判断") },
     { label: "当前", cls: "r", render: (x) => plain(x.actual) },
-    { label: "状态", render: (x) => (x.fired === true ? h("span", { class: "chip neg" }, "已触发") : x.fired === false ? "未触发" : h("span", { class: "sub" }, "未核对")) },
+    { label: "状态", render: (x) => (x.fired === true ? h("span", { class: "chip neg" }, "已触发") : x.fired === false ? "未触发"
+      : h("span", { class: "sub" }, x.machine ? "缺数据，判不了" : "未核对")) },
   ];
   const tradeCols = [{ label: "内部人", render: (x) => x.insider || "—" }, { label: "动作", render: (x) => x.action || "—" },
     { label: "日期", render: (x) => x.date || "—" }, { label: "股数", cls: "r", render: (x) => qty(x.shares) },
@@ -71,7 +76,7 @@ function risks(d) {
   const facts = [
     isNum(r.short_pct_float) ? `做空占流通股 ${pctOf(r.short_pct_float, 1)}` + (isNum(r.days_to_cover) ? `，回补约需 ${num(r.days_to_cover, 1)} 天` : "") : null,
     isNum(r.crowding_score) ? `拥挤度 ${num(r.crowding_score, 0)} / 100` : null,
-    ins && isNum(ins.sold_usd) ? `内部人近期卖出 ${usd(ins.sold_usd)}、买入 ${usd(ins.bought_usd)}` : null,
+    ins && isNum(ins.sold_usd) ? `已申报的内部人交易：卖出 ${usd(ins.sold_usd)}、买入 ${usd(ins.bought_usd)}` : null,
   ].filter(Boolean);
   return sec("risks", "风险",
     h("h3", {}, `看空一方的理由（强度 ${num(r.bear_score, 1)} / 10）`),
@@ -79,7 +84,7 @@ function risks(d) {
     r.enough_bear_points ? null : h("p", { class: "callout warn" }, `看空理由不到 ${d.rules.min_bear_points} 条，反对意见偏少，下结论前请自己再找反例。`),
     facts.length ? line(facts.join("；"), "。") : null,
     h("h3", {}, "什么情况下这个判断不再成立",
-      h("span", { class: "sub" }, ` ${tb.length} 条里已触发 ${r.thesis_fired} 条` + (manual ? `，${manual} 条需人工判断` : ""))),
+      h("span", { class: "sub" }, ` ${tb.length} 条里已触发 ${r.thesis_fired} 条` + (manual ? `，${manual} 条需人工判断` : "") + (undecided ? `，${undecided} 条当天缺数据判不了` : ""))),
     tb.length ? table(tbCols, tb) : empty("这只标的当天没有记录。"),
     manual ? note("需人工判断的条件（如财报数据、管理层变动）扫描不会去核对。「未核对」不等于「未触发」。") : null,
     ins && ins.trades.length ? h("div", {}, h("h3", {}, "内部人交易"), table(tradeCols, ins.trades)) : null);
@@ -165,7 +170,8 @@ function swarm(d) {
     { label: "数据质量", cls: "r", render: (r) => pctOf(r.data_quality) },
   ];
   const agCols = [
-    { label: "蜂", render: (r) => h("span", {}, h("b", {}, r.label), r.votes ? null : h("span", { class: "sub" }, " 不投票")) },
+    { label: "蜂", render: (r) => h("span", {}, h("b", {}, r.label), r.votes ? null : h("span", { class: "sub" }, " 不投票"),
+      r.failed ? h("span", { class: "chip neg" }, "出错") : null) },
     { label: "方向", render: (r) => dirChip(r.direction) },
     { label: "分数", cls: "r", render: (r) => num(r.score, 2) },
     { label: "扫描时记下的要点", render: (r) => (r.findings.length ? r.findings.join(" · ") : "—") },

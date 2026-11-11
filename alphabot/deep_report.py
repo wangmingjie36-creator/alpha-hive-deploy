@@ -46,7 +46,10 @@ RULES = {"insider_trades_shown": 5, "peers_shown": 6, "min_bear_points": 3, "flo
 #: 命中才列出来的日历窗口（Guard 的 `cycle_context` 布尔位 → 展示名）
 CALENDAR_FLAGS = (("is_opex_week", "月度期权到期周"), ("is_weekly_opex_day", "周度期权到期日"), ("is_fomc_week", "FOMC 周"),
                   ("is_month_end_window", "月末再平衡窗口"), ("is_post_earnings_window", "财报后窗口"))
-_NO_DIGIT_PAREN = re.compile(r"[（(][^（()）\d]*[）)]")
+_NO_DIGIT_PAREN = re.compile(r"[（(]([^（()）\d]*)[）)]")
+#: 不含数字、但是事实的括号——留着。全量 2721 份实测（二次检查）：「高波动率 53%（年化）」「期权数据不可用（真实链获取失败）」
+#: 「F&G 33(Fear)」（指数自己的分档名）、报错原文里的 `type(s)` 都曾被当成情绪词删掉
+_KEEP_PAREN = re.compile(r"年化|失败|不可用|陈旧|缺失|过期|Fear|Greed|Neutral|^s$")
 _SYMBOLS = re.compile("[\u2600-\u27bf\U0001f300-\U0001faff\ufe0f]")
 _ACCURACY = re.compile(r"准确率|历史\s*\d+\s*条")
 #: 模型预期收益的片段（「预期 7d -12.49%」「30d -18.73%」「ML预测7日回报-12.5%」）：未证实有预测力，不上页面
@@ -97,12 +100,13 @@ def _texts(v) -> List[str]:
 
 
 def clean_text(v) -> Optional[str]:
-    """扫描生成的一小段文字 → 去掉符号、破折号之后的推断句、**不含数字**的括号（挂在数字后面的情绪词；含数字的括号是事实，留着）。
-    只删不写：不改写、不润色。"""
+    """扫描生成的一小段文字 → 去掉符号、破折号之后的推断句、**不含数字**的括号（挂在数字后面的情绪词）。含数字的括号是事实，留着；
+    不含数字但属于事实的（`_KEEP_PAREN`：年化、取数失败、指数分档名）也留着。只删不写：不改写、不润色。"""
     t = _text(v)
     if t is None:
         return None
-    t = _NO_DIGIT_PAREN.sub("", _SYMBOLS.sub("", t.split("——")[0]))      # 破折号后面是模板接的推断句，只留前半句事实
+    t = _SYMBOLS.sub("", t.split("——")[0])                              # 破折号后面是模板接的推断句，只留前半句事实
+    t = _NO_DIGIT_PAREN.sub(lambda m: m.group(0) if _KEEP_PAREN.search(m.group(1)) else "", t)
     return re.sub(r"\s{2,}", " ", t).strip(" ：:;；|") or None
 
 
@@ -149,7 +153,6 @@ def _summary(r: dict, opt: dict) -> dict:
         "data_real_pct": _num(r.get("data_real_pct")), "coverage_pct": _num(r.get("dimension_coverage_pct")),
         "data_quality_grade": r.get("data_quality_grade"), "distill_mode": r.get("distill_mode"),
         "macro_regime": r.get("macro_regime"),
-        "score_before_resonance": _num(r.get("base_score_before_resonance")),
         "total_penalty": _num(r.get("total_penalty")), "coverage_warning": _text(r.get("coverage_warning")),
         "resonance": _resonance(r),
     }
@@ -172,6 +175,9 @@ def _agents(r: dict) -> List[dict]:
         out.append({"name": name, "label": zh, "dimension": a.get("dimension"), "score": _num(a.get("score")),
                     "direction": a.get("direction") or _dig(r, "agent_directions", name),
                     "confidence": _num(a.get("confidence")), "findings": findings(a.get("discovery")),
+                    # 这只蜂当天出错了（扫描把报错原文记进「发现」：2721 份里 Chronos 123 次、Scout 39 次、Buzz 6 次）——
+                    # 它的分数与方向是兜底值，页面要在摘要里点名，不能只躺在收起的明细里
+                    "failed": str(a.get("discovery") or "").lstrip().startswith("Error"),
                     "votes": name not in excluded})
     return out
 
