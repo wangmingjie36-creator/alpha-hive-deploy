@@ -100,6 +100,26 @@ class TestBearCopiesOracleEndToEnd:
         assert (ok == "real") and (bad != "real")
 
 
+class TestBearSurvivesWhatOracleSurvives:
+    """v0.45.767（765 二次检查）：OptionsAgent 抛的异常，Oracle 吞下就弃权、不上板 ⇒ Bear 没有条目可读、自己再取一次，多半撞上同一个异常。
+    所以 **Oracle 吞得下的，Bear 的回落分支也得吞得下**。765 时 Bear 的元组缺 OSError：URLError / SSLError / socket 超时都不是
+    ConnectionError ⇒ 从 `_assess_options_puts` 漏出、`Bear.analyze` 与扫描逐蜂的 except 都不接 ⇒ 整只票这一轮丢掉（审查用旧 / 新
+    oracle_bee 对拍复现：旧代码 Bear 读 Oracle 条目、不走回落；新代码 Bear 抛 URLError）。
+    变红的变异：Bear 回落的 except 元组去掉 OSError。"""
+
+    @pytest.mark.parametrize("exc", [
+        ConnectionError("桩"), ImportError("桩"), ValueError("桩"), KeyError("桩"), TypeError("桩"), AttributeError("桩"),
+        OSError("桩"), TimeoutError("桩"),
+        __import__("urllib.error", fromlist=["URLError"]).URLError("桩：cboe down"),
+        __import__("ssl").SSLError("EOF occurred in violation of protocol"),      # 09-24 全网直连失败那天的真实报错
+    ], ids=lambda e: type(e).__name__)
+    def test_oracle_abstains_and_bear_still_answers(self, monkeypatch, exc):
+        out, board = _run_oracle(monkeypatch, _options_stub(None, raise_exc=exc))
+        assert out.get("error") and out["data_quality"]["options"] == "fallback", "前提：Oracle 吞下了它并弃权"
+        assert BearBeeContrarian(board)._read_peer(TICKER, "OracleBeeEcho") is None, "前提：Bear 读不到条目、必走回落"
+        assert _bear_options_label(board, monkeypatch) == "unavailable"
+
+
 class TestBearWhenBoardCannotTell:
 
     @pytest.mark.parametrize("details", [

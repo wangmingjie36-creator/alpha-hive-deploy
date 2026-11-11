@@ -178,6 +178,25 @@ class TestQueenTreatsAbstainAsAbsent:
         ad = with_abstain["agent_details"]["OracleBeeEcho"]
         assert ad["error"] and ad["details"].get(MARK) is True
 
+    @pytest.mark.parametrize("chain", ["sample_chain_early_exit", "options_agent_raised"])
+    def test_alphabot_deep_page_sees_abstain_as_failed(self, monkeypatch, chain):
+        """v0.45.767（765 二次检查）：Alpha Bot 深度页按 discovery 前缀（Error / ❌）认出错蜂——老记录没有 error 键，所以它不读那个键。
+        765 弃权的 discovery 原本不带前缀 ⇒ 深度页把 Oracle 数成一张中性票（扫描本身没数它）、也不标出错。
+        这里走真实 Oracle → 真实 Queen → 真实 `deep_report`：投票与「Oracle 根本不在」相同，Oracle 被点名为出错、odds 不进分。
+        变红的变异：discovery 去掉 "Error: " 前缀。"""
+        from alphabot import deep_report as DR
+        oracle, _ = _run(monkeypatch, chain, "observed")
+        with_abstain = _distill(_peers() + [oracle])
+        absent = _distill(_peers())
+        v, v0 = DR._votes(with_abstain), DR._votes(absent)
+        assert (v["counts"], v["voters"]) == (v0["counts"], v0["voters"]), (v, v0)
+        assert v["failed"] == ["OracleBeeEcho"] and v0["failed"] == []
+        ag = {a["name"]: a for a in DR._agents(with_abstain)}["OracleBeeEcho"]
+        assert ag["failed"] is True and ag["votes"] is False and ag["in_score"] is False
+        # 网站价格回退 1 从 Oracle discovery 抠 `$数字`：前缀不能挡住它
+        import re
+        assert re.search(r'\$(\d+(?:\.\d+)?)', with_abstain["agent_details"]["OracleBeeEcho"]["discovery"]).group(1) == "100.0"
+
     def test_fixture_bites_a_scoring_oracle_moves_the_final_score(self, monkeypatch):
         """夹具自证：链在时 Oracle 的分确实进综合分（否则上一条「相同」证明不了什么）。"""
         oracle, _ = _run(monkeypatch, "chain_ok", "observed")

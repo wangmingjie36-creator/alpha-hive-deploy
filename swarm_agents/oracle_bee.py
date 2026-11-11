@@ -444,11 +444,14 @@ class OracleBeeEcho(BeeAgent):
             # 方向投票、`agent_votes`（日报快照）都按 error 键排除。**不上信息素板**——板上一条中性条目会被 Guard 普查当成一张同伴票，
             # BearBee 读不到 Oracle 条目时自己取一次 OptionsAgent（同 Oracle 抛异常那天的既有路径）。不调 LLM（没有期权数据可解读）。
             # details 照留（取数状态、OptionsAgent 自己的 data_quality、覆盖率闸要读的字段都在里面）。
+            # v0.45.767：discovery 以 "Error: " 开头，同 `utils.make_error_result`——Alpha Bot 深度页（`deep_report._failed`）
+            # 只认这个前缀判「出错的蜂」（老记录没有 error 键），765 原文不带前缀 ⇒ 那页把弃权的 Oracle 数成一张中性票、不标出错。
+            # 结尾的 `| $价` 留着：网站缺 Scout 价时从 Oracle discovery 里抠 `$数字`（`dashboard_renderer` 价格回退 1）
             if not _opts_ok:
                 _log.warning("OracleBeeEcho %s：期权链不可用（%s），本蜂弃权、odds 维缺席", ticker, _options_dq)
                 return AgentResult(
                     score=5.0, direction="neutral", confidence=0.0,   # 占位，同 make_error_result；error 键在 ⇒ 下游都不读它
-                    discovery=f"期权链不可用（{_options_dq}），本蜂弃权、不打分 | ${current_price:.1f}",
+                    discovery=f"Error: 期权链不可用（{_options_dq}），本蜂弃权、不打分 | ${current_price:.1f}",
                     source="OracleBeeEcho", dimension="odds",
                     data_quality={"options": _options_dq},
                     details=_details,
