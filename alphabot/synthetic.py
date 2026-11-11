@@ -326,6 +326,29 @@ def demo_bars(ticker: str, as_of: Optional[str] = None, days: int = 120) -> List
     return list(reversed(out))
 
 
+def demo_minutes(ticker: str, day: str) -> List[Dict[str, float]]:
+    """合成的 1 分钟线（09:30–15:59，390 根）：现价沿盘中快照演示用的同一条小路径走（`service._demo_intraday` 的 shift），加一点逐分钟抖动。"""
+    t = str(ticker).upper()
+    seed = _seed(t) + sum(ord(ch) for ch in str(day))
+    base = spot_for(t)
+
+    def px(m: float) -> float:
+        i = m / 10.0
+        return base * (1.0 + 0.012 * math.sin(i / 6.0 + (_seed(t) % 7)) + 0.0006 * i)
+    out, prev = [], px(0)
+    for m in range(390):
+        c = px(m + 1) * (1.0 + 0.0012 * (_rand(seed, 70000 + m) - 0.5))
+        o = prev
+        hi = max(o, c) * (1.0 + 0.0008 * _rand(seed, 80000 + m))
+        lo = min(o, c) * (1.0 - 0.0008 * _rand(seed, 90000 + m))
+        hh, mm = divmod(9 * 60 + 30 + m, 60)
+        out.append({"t": f"{hh:02d}:{mm:02d}", "open": round(o, 2), "high": round(max(hi, o, c), 2),
+                    "low": round(min(lo, o, c), 2), "close": round(c, 2),
+                    "volume": round(40000 * (0.4 + _rand(seed, 95000 + m)) * (2.2 if m < 30 or m > 360 else 1.0))})
+        prev = c
+    return out
+
+
 #: 演示用的「60 日 β / 长窗口 β」：能源（XOM）两套符号相反，其余同号——演示里能直接看到「对照」的意义
 _DEMO_BETA_BASE = {"XOM": -1.05, "NVDA": 2.0, "AMZN": 1.6}
 _DEMO_BETA_LONG = {"XOM": 0.2, "NVDA": 1.85, "AMZN": 1.4}

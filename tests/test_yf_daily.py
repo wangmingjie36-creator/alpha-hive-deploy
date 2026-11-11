@@ -723,6 +723,7 @@ POLICY = {
     ("vix_term_structure.py", "_get_spot_vix"): "refuse",
     ("alphabot/beta_long.py", "_fetch_closes"): "ignore",                          # 按日期对齐、只用 as_of 以前的收益；缺最近一根只是样本少一天
     ("alphabot/wheel_prices.py", "_fetch"): "ignore",                              # 只展示的统计；缺最近一根只是少一天，按已有收盘算
+    ("alphabot/price_intraday.py", "_fetch"): "ignore",                            # 1 分钟线、一次一个美东日；没收完的那根由 `price_intraday.drop_forming` 自己丢
     ("alphabot/price_ohlc.py", "_fetch"): "ignore",                                # 只给价格页 K 线拼开高低；只取主干（Twelve Data）有的日期，缺的那根退回无影线柱
     ("sell_put_wheel.py", "_default_rv"): "refuse",                                # 30 日 RV：最近一场缺 ⇒ closes_lag、不算（v0.45.744；不把窗口悄悄往前挪）
     # ── history：带日期窗口、按日期用（v0.45.658 迁入）──

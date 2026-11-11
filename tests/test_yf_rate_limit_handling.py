@@ -648,7 +648,7 @@ class TestDocsAndScope:
             if re.search(r"\b(is_rate_limited|retry_after_sec)\b", src) and rel.as_posix() != "yf_gate.py":
                 users.add(rel.as_posix())
         assert users == {"alphabot/yf_chain.py", "alphabot/beta_long.py", "alphabot/service.py", "alphabot/hedge.py",
-                         "alphabot/wheel_prices.py", "alphabot/price_ohlc.py", "alpha_hive_mcp.py"}, users
+                         "alphabot/wheel_prices.py", "alphabot/price_ohlc.py", "alphabot/price_intraday.py", "alpha_hive_mcp.py"}, users
 
     def test_the_gate_still_has_one_cooldown_and_no_retry_loop(self):
         """闸门的原则是「429 = 现在就停，不是再试试」：代码里（不看 docstring 的字眼）没有 sleep 调用、没有 while 循环。"""

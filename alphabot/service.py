@@ -38,6 +38,7 @@ from alphabot import intraday_heat as IH
 from alphabot import macos_app as MA
 from alphabot import options_compare as OC
 from alphabot import premium as PM
+from alphabot import price_intraday as PI
 from alphabot import straddle as SD
 from alphabot import strangle_compare as SC
 from alphabot import tail_hedge as TH
@@ -50,6 +51,9 @@ _log = get_logger("alphabot")
 
 ET = ZoneInfo("America/New_York")
 LIVE_TTL_SEC = 60.0
+#: 盘中分钟线（v0.45.763）同一只票多久内不重取：盘中略短于页面的刷新间隔（开两个窗口也只发一次）；不在盘中时没有新线可取
+MINUTE_TTL_LIVE_SEC = 55.0
+MINUTE_TTL_IDLE_SEC = 1800.0
 #: 失败结果也短暂缓存：CBOE 不可达时别让每次切页都再排 15 秒 × 3 次重试
 FAIL_TTL_SEC = 15.0
 MAX_FOCUS = 5
@@ -267,7 +271,7 @@ class AlphaBotService:
                  straddle_root=None, straddle_quote_fn=None, now_fn: Optional[Callable[[], datetime]] = None,
                  premium_root=None, beta_long_fn=None, wheel_prices_fn=None,
                  completed_session_fn: Optional[Callable[[], Optional[str]]] = None, compare_root=None,
-                 ohlc_fn=None):
+                 ohlc_fn=None, minute_fn=None):
         self.fetch_fn = fetch_fn
         self.bars_fn = bars_fn or _default_bars
         # 价格页 K 线的开高低（v0.45.762）：`ohlc_fn(标的) -> ({日期: {open, high, low, close}}, {n, reason, …})`。
@@ -276,6 +280,11 @@ class AlphaBotService:
         self.ohlc_fn = ohlc_fn
         self._ohlc_default = ohlc_fn is None and bars_fn is None and not demo
         self._ohlc_cache: Dict[tuple, dict] = {}
+        # 价格页盘中 1 分钟 K 线（v0.45.763）：`minute_fn(标的, 日期, 美东此刻) -> (分钟线, {n, reason, …})`。缺省接线规则同 `ohlc_fn`
+        # （注入了日线而没给它 ⇒ 不取，免得测试出网；演示 ⇒ 合成）。`{(标的, 日期): (取到的时刻, 分钟线, 是否已定)}`
+        self.minute_fn = minute_fn
+        self._minute_default = minute_fn is None and bars_fn is None and not demo
+        self._minute_cache: Dict[tuple, tuple] = {}
         self.clock = clock
         self.demo = demo
         self.ledger_dir = ledger_dir          # None ⇒ 账本自己解析（生产数据根）；只读
@@ -320,7 +329,8 @@ class AlphaBotService:
                       "premium_computed": 0, "premium_cache_hits": 0, "premium_failures": 0,
                       "howto_failures": 0, "yf_fallback_used": 0, "yf_fallback_failed": 0,
                       "beta_sens_computed": 0, "beta_sens_failures": 0, "yf_rate_limited": 0,
-                      "activity_failures": 0, "ohlc_failures": 0}
+                      "activity_failures": 0, "ohlc_failures": 0,
+                      "minute_fetches": 0, "minute_cache_hits": 0, "minute_failures": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -1303,6 +1313,56 @@ class AlphaBotService:
         return {**res, "bars": merged,
                 "ohlc": {"available": ok, "source": PO.SOURCE, "close_tol": PO.CLOSE_TOL, **n,
                          **({} if ok else {"reason": "no_bar_matched"})}}
+
+    def minute_bars(self, ticker, date_et: Optional[str] = None) -> dict:
+        """某票某个美东日的 1 分钟 K 线 + 同一天盘中快照里的水平路径（**只给单日**，理由同 `intraday`）。
+
+        取数失败不入缓存；手里有上一次取到的 ⇒ 照旧给出并写明 `refresh_failed`（图不清空），没有 ⇒ `available=False` + 原因。
+        过去的日子取到一次就定了；今天的按 `MINUTE_TTL_*` 限频——页面刷得再勤，发出去的请求也不会比这更密。"""
+        t = norm_ticker(ticker)
+        now = self.now_fn()
+        today = now.date().isoformat()
+        d = norm_date(date_et) if date_et else today
+        live_now = d == today and market_session(now)["live"]
+        out = {"ticker": t, "date": d, "is_today": d == today, "source": PI.SOURCE, "interval": PI.INTERVAL,
+               "session_live": live_now, "refresh_sec": PI.REFRESH_SEC if live_now else None,
+               "level_path": PI.level_path(self.intraday(t, d).get("snapshots") or [], d),
+               "reason_labels": PI.REASONS, "max_age_days": PI.MAX_AGE_DAYS}
+        fn = self.minute_fn
+        if fn is None:
+            if self.demo:
+                from alphabot import synthetic as syn
+
+                def fn(tk, day, when):
+                    rows, dropped = PI.drop_forming(syn.demo_minutes(tk, day), day, when)
+                    return rows, {"n": len(rows), "reason": None if rows else "unavailable", "dropped_forming": dropped}
+                out["source"] = "demo"
+            elif self._minute_default:
+                def fn(tk, day, when):
+                    return PI.fetch_minutes(tk, day, now=when)
+            else:
+                return clean_json({**out, "available": False, "reason": "not_wired", "bars": []})
+        key = (t, d)
+        with self._lock_for("minute:" + t):
+            hit = self._minute_cache.get(key)
+            ttl = MINUTE_TTL_LIVE_SEC if live_now else MINUTE_TTL_IDLE_SEC
+            if hit and (hit[2] or self.clock() - hit[0] < ttl):
+                self.stats["minute_cache_hits"] += 1
+                return clean_json({**out, "available": True, "reason": None, "bars": hit[1]})
+            self.stats["minute_fetches"] += 1
+            try:
+                rows, info = fn(t, d, now)
+            except Exception as exc:  # noqa: BLE001 - 注入的函数抛了也要带原因返回
+                rows, info = [], {"n": 0, "reason": "exception", "detail": type(exc).__name__}
+            if rows:
+                self._minute_cache[key] = (self.clock(), rows, d < today)
+                return clean_json({**out, "available": True, "reason": None, "bars": rows,
+                                   "dropped_forming": info.get("dropped_forming", 0)})    # 成交量异常的根数页面自己数（缓存命中时也要有）
+            self.stats["minute_failures"] += 1
+            fail = {k: info[k] for k in ("reason", "retry_after_sec", "detail") if info.get(k) is not None}
+            if hit:      # 刷新失败：上一次取到的照旧画，页面写明它停在哪
+                return clean_json({**out, "available": True, "reason": None, "bars": hit[1], "refresh_failed": fail})
+            return clean_json({**out, "available": False, "bars": [], **fail})
 
     # ── 设置（自选 / 盘中关注列表）
     def _settings_path(self) -> Path:

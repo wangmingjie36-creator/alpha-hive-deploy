@@ -135,6 +135,10 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         return svc.bars(request.path_params["ticker"])
 
     @api
+    def minute_bars(request):
+        return svc.minute_bars(request.path_params["ticker"], _q(request, "date"))
+
+    @api
     def premium(request):
         return svc.premium(request.path_params["ticker"], dict(request.query_params))
 
@@ -265,6 +269,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/assess", assess),
         Route("/api/history/{ticker}", history),
         Route("/api/bars/{ticker}", bars),
+        Route("/api/minute-bars/{ticker}", minute_bars),
         Route("/api/premium/{ticker}", premium),
         Route("/api/method", method),
         Route("/api/intraday/{ticker}", intraday),

@@ -47,6 +47,18 @@
         "8791"
       ],
       "port": 8791
+    },
+    {
+      "name": "alphabot-real",
+      "runtimeExecutable": "/usr/local/bin/python3",
+      "runtimeArgs": [
+        "-m",
+        "alphabot",
+        "--no-poll",
+        "--port",
+        "8792"
+      ],
+      "port": 8792
     }
   ]
 }

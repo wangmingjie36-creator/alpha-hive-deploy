@@ -204,10 +204,37 @@ export function scatter(el, { points, xName, yName, vlines = [], hlines = [], xF
 // 日线涨跌柱（标的页「价格」）：每根的实体 = 前一日收盘 → 当日收盘，涨绿跌红；下方成交量按同一涨跌上色。
 // ⚠️ 这不是完整 K 线：共享日线入口只有收盘与成交量，没有开 / 高 / 低 ⇒ 不画影线、不拿别的数冒充开盘价。
 // 第一根没有「前一日」⇒ 画成一条平线（开 = 收）、成交量用中性色。水平线 / ±1σ 带与旧折线图同一套参数。
-export function candles(el, { bars, hmarks = [], bands = [], yFmt = (v) => num(v) }) {
+// 行可以是日线（`date`）也可以是分钟线（`t` = "HH:MM"，`day` 给提示用）。`paths`：随时间变的水平（盘中快照里的 Zero Gamma 等），
+// 每条 `{name, color, type, points: [{t, value}]}`——点落在「时刻不晚于它的最后一根线」上，阶梯连接，**不往最后一个点之后延伸**
+// （之后的水平还不知道）。`zoom`：`{start, end}`，定时重画时把缩放状态带过来。
+// `fit`："all"（缺省）= 纵轴把水平线 / 带 / 路径都包进来；"price" = 纵轴只贴着价格（盘中一天的波动远小于水平之间的距离，
+// 都包进来 K 线会被压成一条线）——图外的水平由调用方用文字写出来（`priceRange` 给出判据）。
+export function priceRange(bars) {
+  const v = bars.filter((r) => isNum(r.close)).flatMap((r) => (isNum(r.high) && isNum(r.low) ? [r.low, r.high] : [r.close]));
+  if (!v.length) return null;
+  const lo = Math.min(...v), hi = Math.max(...v), pad = Math.max((hi - lo) * 0.12, hi * 0.0008);
+  return { lo: lo - pad, hi: hi + pad };
+}
+export function candles(el, { bars, hmarks = [], bands = [], paths = [], day = "", zoom, fit = "all", yFmt = (v) => num(v) }) {
   const c = C();
   const rows = bars.filter((r) => isNum(r.close));
-  const x = rows.map((r) => r.date.slice(5));
+  const x = rows.map((r) => r.t || r.date.slice(5));
+  const pr = fit === "price" ? priceRange(rows) : null;
+  if (pr) hmarks = hmarks.filter((m) => m.value >= pr.lo && m.value <= pr.hi);     // 图外的横线不画（否则标签会贴在边上冒充在图内）
+  const volFmt = (v, dp = 2) => (Math.abs(v) >= 1e6 ? `${num(v / 1e6, dp)}M` : `${num(v / 1e3, dp ? 1 : 0)}K`);
+  const pathSeries = paths.map((p) => {
+    const data = new Array(rows.length).fill(null);
+    let n = 0;
+    for (const pt of p.points || []) {
+      if (!isNum(pt.value) || !rows.length || pt.t < rows[0].t || pt.t > rows[rows.length - 1].t) continue;
+      let i = rows.length - 1;
+      while (i > 0 && rows[i].t > pt.t) i -= 1;
+      data[i] = pt.value; n += 1;
+    }
+    return n ? { name: p.name, type: "line", step: "end", connectNulls: true, data, z: 3, symbol: "circle", symbolSize: 3,
+      showSymbol: n === 1, lineStyle: { color: p.color || c.ink3, type: p.type || "dashed", width: p.width || 1.3 },
+      itemStyle: { color: p.color || c.ink3 }, endLabel: { show: true, formatter: p.name, color: p.color || c.ink3, fontSize: 11 } } : null;
+  }).filter(Boolean);
   // 这根有开高低 ⇒ 真 K 线（实体 = 开 → 收，影线 = 低 ~ 高，颜色按收对开）；
   // 没有 ⇒ 退回「前收 → 收盘」的无影线柱（颜色按收对前收）。逐根判，两种可以混在一张图里
   const full = (r) => isNum(r.open) && isNum(r.high) && isNum(r.low);
@@ -229,8 +256,8 @@ export function candles(el, { bars, hmarks = [], bands = [], yFmt = (v) => num(v
   const area = bands.map((b) => [{ yAxis: b.lo, itemStyle: { color: b.color || c.sunk, opacity: 0.55 },
     label: { show: !!b.label, formatter: b.label, color: c.ink3, fontSize: 11, position: "insideTopLeft" } }, { yAxis: b.hi }]);
   // 水平线与 ±1σ 带可能在价格区间之外：把它们包进纵轴范围，否则被裁掉（看不到 ≠ 没有）
-  const ys = [...rows.flatMap((r) => (full(r) ? [r.low, r.high] : [r.close])), ...hmarks.map((m) => m.value), ...bands.flatMap((b) => [b.lo, b.hi])].filter(isNum);
-  const y0 = Math.min(...ys), y1 = Math.max(...ys), pad = (y1 - y0) * 0.04 || 1;
+  const ys = [...rows.flatMap((r) => (full(r) ? [r.low, r.high] : [r.close])), ...pathSeries.flatMap((s) => s.data), ...hmarks.map((m) => m.value), ...bands.flatMap((b) => [b.lo, b.hi])].filter(isNum);
+  const y0 = pr ? pr.lo : Math.min(...ys), y1 = pr ? pr.hi : Math.max(...ys), pad = pr ? 0 : (y1 - y0) * 0.04 || 1;
   const right = el.clientWidth < 520 ? 60 : 104;
   const tip = (ps) => {
     const i = ps[0].dataIndex, r = rows[i];
@@ -238,11 +265,13 @@ export function candles(el, { bars, hmarks = [], bands = [], yFmt = (v) => num(v
     const chg = i > 0 ? (r.close / rows[i - 1].close - 1) * 100 : null;
     const d = chg === null ? 0 : Math.sign(chg);
     const sign = d > 0 ? "+" : d < 0 ? "−" : "";
-    return `${r.date}<br>收盘 <b>${yFmt(r.close)}</b>`
-      + (chg === null ? "" : ` <span style="color:${colorOf(d)}">${sign}${num(Math.abs(chg), 2)}%</span>`)
+    return `${r.t ? `${day} ${r.t}` : r.date}<br>收盘 <b>${yFmt(r.close)}</b>`
+      + (chg === null ? "" : ` <span class="${d > 0 ? "up" : d < 0 ? "down" : ""}">${sign}${num(Math.abs(chg), 2)}%</span>`)
       + (full(r) ? `<br>开 ${yFmt(r.open)}　高 ${yFmt(r.high)}　低 ${yFmt(r.low)}` : "<br>这根没有开高低")
-      + (chg === null ? "" : `<br>前收 ${yFmt(rows[i - 1].close)}`)
-      + (isNum(r.volume) ? `<br>成交量 ${num(r.volume / 1e6, 2)}M` : "");
+      + (chg === null ? "" : `<br>${r.t ? "上一根收" : "前收"} ${yFmt(rows[i - 1].close)}`)
+      + (isNum(r.volume) ? `<br>成交量 ${volFmt(r.volume)}` : "")
+      + pathSeries.map((s) => { let j = i; while (j >= 0 && s.data[j] === null) j -= 1;
+        return j >= 0 ? `<br>${s.name} ${yFmt(s.data[j])}` : ""; }).join("");
   };
   return mount(el, {
     animation: false,
@@ -252,17 +281,18 @@ export function candles(el, { bars, hmarks = [], bands = [], yFmt = (v) => num(v
       lineStyle: { color: c.lineStrong }, crossStyle: { color: c.lineStrong },
       label: { backgroundColor: c.sunk, color: c.ink, borderColor: c.lineStrong, borderWidth: 1 } } },
     axisPointer: { link: [{ xAxisIndex: "all" }] },
-    dataZoom: [{ type: "inside", xAxisIndex: hasVol ? [0, 1] : [0], start: 0, end: 100 }],
+    dataZoom: [{ type: "inside", xAxisIndex: hasVol ? [0, 1] : [0], start: zoom?.start ?? 0, end: zoom?.end ?? 100 }],
     xAxis: [{ type: "category", data: x, boundaryGap: true, gridIndex: 0, axisLabel: { show: !hasVol } },
       ...(hasVol ? [{ type: "category", data: x, boundaryGap: true, gridIndex: 1 }] : [])],
     yAxis: [{ type: "value", min: y0 - pad, max: y1 + pad, gridIndex: 0, axisLabel: { formatter: yFmt, showMinLabel: false, showMaxLabel: false } },
       ...(hasVol ? [{ type: "value", gridIndex: 1, splitNumber: 2, splitLine: { show: false },
-        axisLabel: { formatter: (v) => (v === 0 ? "" : `${num(v / 1e6, 0)}M`) } }] : [])],
+        axisLabel: { formatter: (v) => (v === 0 ? "" : volFmt(v, 0)) } }] : [])],
     series: [
       { name: "日线", type: "candlestick", data: k, barMaxWidth: 14,
         itemStyle: { color: c.pos, color0: c.neg, borderColor: c.pos, borderColor0: c.neg, borderColorDoji: c.neutral },
         markLine: marks.length ? { symbol: "none", silent: true, animation: false, data: marks } : undefined,
         markArea: area.length ? { silent: true, data: area } : undefined },
+      ...pathSeries,
       ...(hasVol ? [{ name: "成交量", type: "bar", xAxisIndex: 1, yAxisIndex: 1, barMaxWidth: 14,
         data: rows.map((r, i) => ({ value: isNum(r.volume) ? r.volume : null, itemStyle: { color: colorOf(dir(i)), opacity: 0.55 } })) }] : []),
     ],

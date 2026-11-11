@@ -3,6 +3,7 @@ import { api, h, helpLink, num, money, pct, pctPts, usdShort, signedPct, distPct
   downloadCSV, pref, setPref, timeAgo, SIGN_LABEL, CURVE_LABEL, ROUTE_LABEL, STRUCT_LABEL, TENOR_LABEL,
   EARN_LABEL, SOURCE_LABEL, fill, plain, reasonInfo, fetchReasonText } from "../lib.js";
 import { strikeBars, gammaCurve, lines, columns, payoff, candles, C } from "../charts.js";
+import { minutePrice } from "./price_minute.js";
 import { premium } from "./premium.js";
 import { howtoPanel } from "./howto.js";
 import { state, tickers, refreshMeta } from "../app.js";
@@ -352,12 +353,22 @@ function sell(body, d) {
 }
 
 // ─────────────────────────────── 价格
+const PRICE_MODE_KEY = "alphabot.price.mode";
+function priceMode() { try { return localStorage.getItem(PRICE_MODE_KEY) === "minute" ? "minute" : "daily"; } catch { return "daily"; } }
+function priceSwitch(body, d, t, alive, mode) {
+  return seg([["daily", "日线"], ["minute", "盘中"]], mode, (v) => {
+    try { localStorage.setItem(PRICE_MODE_KEY, v); } catch { /* 存不了只是下次不记得 */ }
+    price(body, d, t, alive);
+  }, "价格图周期");
+}
+
 async function price(body, d, t, alive) {
+  if (priceMode() === "minute") return minutePrice(body, d, t, alive, () => priceSwitch(body, d, t, alive, "minute"));
   fill(body, h("div", { class: "empty" }, "加载日线…"));
   const b = await api(`/api/bars/${encodeURIComponent(t)}`);
   if (!alive()) return;
   if (!b.available) {
-    fill(body, panel(null, {}, h("div", { class: "empty" }, "日线不可得。"),
+    fill(body, panel("日 K 线与今日水平", { right: priceSwitch(body, d, t, alive, "daily") }, h("div", { class: "empty" }, "日线不可得。"),
       h("p", { class: "callout warn" }, `原因：${b.reason || "—"}（价格页只走 Twelve Data 共享入口，没配 key 就不画，不换源）`)));
     return;
   }
@@ -389,7 +400,7 @@ async function price(body, d, t, alive) {
     notes.push(h("p", { class: "note" }, `${(o.close_mismatch || 0) + (o.missing || 0)} 根没拼上开高低：`
       + `${o.missing || 0} 根 ${o.source} 没有这一天，${o.close_mismatch || 0} 根两个源的收盘相差超过 ${num((o.close_tol || 0) * 100, 1)}%（口径不同，不硬拼）。`));
   }
-  fill(body, panel("日 K 线与今日水平", {
+  fill(body, panel("日 K 线与今日水平", { right: priceSwitch(body, d, t, alive, "daily"),
     sub: `最近 ${bars.length} 个交易日（${src}）；${kind}；滚轮可缩放。水平与 ±1σ 带只是今天的，历史水平叠其后价格的图在检验冻结前不提供（见口径页）` }, el, ...notes));
   candles(el, { bars, hmarks, bands, yFmt: (x) => num(x, 2) });
 }
