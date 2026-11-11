@@ -35,13 +35,59 @@ export function mount(el, option) {
   theme();
   const chart = window.echarts.init(el, "alphabot", { renderer: "canvas" });
   chart.setOption(option);
+  declutterHLabels(chart);
   live.add(chart);
   if (!resizeBound) {
     resizeBound = true;
     let t = null;
-    window.addEventListener("resize", () => { clearTimeout(t); t = setTimeout(() => live.forEach((ch) => ch.resize()), 120); });
+    window.addEventListener("resize", () => { clearTimeout(t); t = setTimeout(() => live.forEach((ch) => { ch.resize(); declutterHLabels(ch); }), 120); });
   }
   return chart;
+}
+
+// 横线标签避让：现价与 Major+ 之类离得近的水平线，标签缺省都贴在同一侧的线上方，会叠成一团。
+// 渲染后按像素位置从上到下逐个放：先试自己的位置，再试同侧翻到线下方，再试另一侧（左 / 右）；
+// 都放不下才留原位。只动 inside* 位置的横线标签（position: "end" 之类在图外的不碰）。
+// 原位置记在图实例上，缩放后按原位置重排（否则一次避让后的位置会被当成「原位置」）。
+const LABEL_H = 15;
+const SLOTS = ["insideEndTop", "insideEndBottom", "insideStartTop", "insideStartBottom"];
+function slotOrder(pref) {
+  const side = pref.includes("Start") ? "Start" : "End", other = side === "Start" ? "End" : "Start";
+  const v = pref.endsWith("Bottom") ? "Bottom" : "Top", flip = v === "Top" ? "Bottom" : "Top";
+  return [`inside${side}${v}`, `inside${side}${flip}`, `inside${other}${v}`, `inside${other}${flip}`];
+}
+export function declutterHLabels(chart) {
+  let opt;
+  try { opt = chart.getOption(); } catch { return; }
+  const series = opt.series || [];
+  if (!chart.__hlPref) {
+    chart.__hlPref = series.map((s) => (s.markLine?.data || []).map((d) => {
+      const p = d && !Array.isArray(d) && isNum(d.yAxis) && d.label?.show !== false ? (d.label?.position || "insideEndTop") : null;
+      return p && SLOTS.includes(p) ? p : null;
+    }));
+  }
+  const items = [];
+  series.forEach((s, si) => (s.markLine?.data || []).forEach((d, di) => {
+    const pref = chart.__hlPref[si]?.[di];
+    if (!pref) return;
+    let y;
+    try { y = chart.convertToPixel({ yAxisIndex: s.yAxisIndex || 0 }, d.yAxis); } catch { return; }
+    if (isNum(y)) items.push({ si, di, y, pref });
+  }));
+  if (items.length < 2) return;
+  items.sort((a, b) => a.y - b.y);
+  const placed = [];
+  const box = (y, pos) => ({ side: pos.includes("Start") ? "S" : "E",
+    y0: pos.endsWith("Top") ? y - LABEL_H - 1 : y + 1, y1: pos.endsWith("Top") ? y - 1 : y + LABEL_H + 1 });
+  const clash = (b) => placed.some((q) => q.side === b.side && b.y0 < q.y1 && q.y0 < b.y1);
+  let changed = false;
+  for (const it of items) {
+    const pos = slotOrder(it.pref).find((p) => !clash(box(it.y, p))) || it.pref;
+    placed.push(box(it.y, pos));
+    const lab = series[it.si].markLine.data[it.di].label || {};
+    if (lab.position !== pos) { series[it.si].markLine.data[it.di].label = { ...lab, position: pos }; changed = true; }
+  }
+  if (changed) chart.setOption({ series: series.map((s) => (s.markLine ? { markLine: { data: s.markLine.data } } : {})) });
 }
 export function disposeAll() { live.forEach((ch) => ch.dispose()); live.clear(); }
 // 单张图换掉时释放（同页重建子视图时用）：不释放的话旧实例留在 live 里，每次窗口缩放都要白白 resize 一个已脱离页面的图
