@@ -37,20 +37,22 @@ function pickers(d, ticker, onDate) {
 }
 
 function summary(d) {
-  const s = d.summary, v = s.votes, rs = s.resonance, rk = s.rank;
+  const s = d.summary, v = s.votes, vc = v.counts, rs = s.resonance, rk = s.rank;
+  const short = (n) => n.replace(/Bee.*/, "");
   const failed = d.agents.filter((a) => a.failed);
   const conflict = rs.conflict_level && rs.conflict_level !== "none"
     ? `各蜂之间有${zh(WORD, rs.conflict_level)}分歧` + (rs.arbitration_triggered ? (rs.arbitration_flipped ? "，仲裁后方向被翻转" : "，触发过仲裁、方向没变") : "")
     : "各蜂之间没有明显分歧";
   return sec("summary", "摘要",
     h("div", { class: "kpis" },
-      kpi("方向", dirChip(s.direction), `${num(v.bullish, 0)} 只看多 · ${num(v.bearish, 0)} 只看空 · ${num(v.neutral, 0)} 只中性`),
+      kpi("方向", dirChip(s.direction), `${v.voters} 只蜂投票：${vc.bullish} 多 · ${vc.bearish} 空 · ${vc.neutral} 中性`),
       kpi("综合分", num(s.score, 2), s.confidence_band ? `区间 ${num(s.confidence_band[0], 1)}～${num(s.confidence_band[1], 1)}` : null),
       kpi("当天排名", isNum(rk.rank) ? `第 ${rk.rank}` : "—", isNum(rk.of) ? `名单共 ${rk.of} 只` : null),
       kpi("现价", num(s.spot, 2))),
-    line(rs.detected ? `共振已触发：${num(rs.supporting_agents, 0)} 只蜂同向${zh(DIR, rs.direction)}。` : "共振没有触发。",
+    line(rs.detected ? `共振已触发：${num(rs.supporting_agents, 0)} 只蜂同向${zh(DIR, rs.direction)}` + (isNum(rs.boost_pct) ? `，综合分加成 ${num(rs.boost_pct, 0)}%` : "") + "。" : "共振没有触发。",
       ` ${conflict}。`,
-      isNum(s.total_penalty) && s.total_penalty > 0 ? ` 综合分里扣了 ${num(s.total_penalty, 2)} 分。` : ""),
+      isNum(s.total_penalty) && s.total_penalty > 0 ? ` 综合分里扣了 ${num(s.total_penalty, 2)} 分。` : "",
+      v.non_voting.length ? ` ${v.non_voting.map(short).join("、")} 不参与投票。` : ""),
     isNum(s.data_real_pct) && s.data_real_pct < 90 ? h("p", { class: "callout warn" }, `扫描给这一天的数据真实度打了 ${pctOf(s.data_real_pct)}，偏低，读数要打折看。`) : null,
     s.coverage_warning ? h("p", { class: "callout warn" }, s.coverage_warning) : null,
     failed.length ? h("p", { class: "callout warn" }, `这一天有 ${failed.length} 只蜂运行出错（${failed.map((a) => a.label.split(" · ")[0]).join("、")}），它们的分数和方向不是正常算出来的；报错原文在「各蜂明细」里。`) : null);
@@ -163,25 +165,39 @@ function levels(d) {
 }
 
 function swarm(d) {
+  const routed = d.dimensions.some((x) => isNum(x.base_weight) && isNum(x.weight) && Math.abs(x.base_weight - x.weight) >= 0.005);
   const dimCols = [
     { label: "维度", render: (r) => h("b", {}, r.label) },
     { label: "分数", cls: "r", render: (r) => num(r.score, 2) },
-    { label: "权重", cls: "r", render: (r) => (r.in_score ? pctOf(r.weight * 100) : h("span", { class: "sub" }, "不计分")) },
+    ...(routed ? [{ label: "基础权重", cls: "r", render: (r) => (isNum(r.base_weight) ? pctOf(r.base_weight * 100) : "—") }] : []),
+    { label: routed ? "当天权重" : "权重", cls: "r", render: (r) => (r.in_score ? pctOf(r.weight * 100) : h("span", { class: "sub" }, "0，不计分")) },
     { label: "数据质量", cls: "r", render: (r) => pctOf(r.data_quality) },
   ];
+  const yesNo = (ok) => (ok ? "是" : h("span", { class: "sub" }, "否"));
   const agCols = [
-    { label: "蜂", render: (r) => h("span", {}, h("b", {}, r.label), r.votes ? null : h("span", { class: "sub" }, " 不投票"),
-      r.failed ? h("span", { class: "chip neg" }, "出错") : null) },
+    { label: "蜂", render: (r) => h("span", {}, h("b", {}, r.label), r.failed ? h("span", { class: "chip neg" }, "出错") : null) },
     { label: "方向", render: (r) => dirChip(r.direction) },
     { label: "分数", cls: "r", render: (r) => num(r.score, 2) },
-    { label: "扫描时记下的要点", render: (r) => (r.findings.length ? r.findings.join(" · ") : "—") },
+    { label: "投票", render: (r) => yesNo(r.votes) },
+    { label: "进综合分", render: (r) => (r.in_score ? `是，${pctOf(r.weight * 100)}` : yesNo(false)) },
   ];
-  const out = d.dimensions.filter((x) => !x.in_score).map((x) => x.label);
+  const noteCols = [{ label: "蜂", render: (r) => h("b", {}, r.label) },
+    { label: "扫描时记下的要点", render: (r) => (r.findings.length ? r.findings.join(" · ") : "—") }];
+  // 综合分各步：只显示第一步、最后一步，和中间真变了的步
+  const steps = d.pipeline.filter((x, i) => i === 0 || i === d.pipeline.length - 1 || x.change);
+  const stepCols = [{ label: "步骤", render: (r) => h("b", {}, r.label) }, { label: "分数", cls: "r", render: (r) => num(r.score, 2) },
+    { label: "变化", cls: "r", render: (r) => (isNum(r.change) && r.change !== 0 ? h("span", { class: tone(r.change) }, `${r.change > 0 ? "+" : "−"}${num(Math.abs(r.change), 2)}`) : "") }];
+  const off = d.side_effects.filter((x) => !x.applied && (x.key === "ml_auxiliary" || x.key === "gex_direct")).map((x) => x.label);
+  const on = d.side_effects.filter((x) => x.applied).map((x) => x.label.split("（")[0]);
+  const inScore = d.agents.filter((a) => a.in_score).map((a) => a.label.split(" · ")[0]);
   return sec("swarm", "各蜂明细",
-    table(dimCols, d.dimensions),
-    out.length ? note(`${out.join("、")}当天权重为 0，分数只供参考，不进综合分。`) : null,
-    d.agents.length ? h("details", { class: "sd-why" }, h("summary", {}, `展开 ${d.agents.length} 只蜂各自的记录`), table(agCols, d.agents))
-      : line("这一天没有各蜂的明细记录。"));
+    d.agents.length ? table(agCols, d.agents) : line("这一天没有各蜂的记录。"),
+    d.agents.length ? note(inScore.length ? `当天进综合分的只有 ${inScore.join("、")}；其余的蜂有分数，但权重为 0 或不在五个维度里。` : "当天没有任何一只蜂的权重大于 0。",
+      on.length ? ` 另外动了综合分的：${on.join("、")}。` : "",
+      off.length ? ` 算了但没用进综合分的：${off.join("、")}。` : "") : null,
+    h("h3", {}, "五个维度"), table(dimCols, d.dimensions),
+    steps.length >= 2 ? h("div", {}, h("h3", {}, "综合分是怎么来的"), table(stepCols, steps)) : null,
+    d.agents.length ? h("details", { class: "sd-why" }, h("summary", {}, `展开 ${d.agents.length} 只蜂各自记下的要点`), table(noteCols, d.agents)) : null);
 }
 
 export async function renderDeep(root, ticker, alive) {

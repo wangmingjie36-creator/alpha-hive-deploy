@@ -40,6 +40,8 @@ DIMENSIONS = (("signal", "信号（聪明钱）"), ("catalyst", "催化剂"), ("
 AGENTS = (("ScoutBeeNova", "Scout · 聪明钱侦察"), ("OracleBeeEcho", "Oracle · 期权市场"), ("ChronosBeeHorizon", "Chronos · 催化剂"),
           ("BuzzBeeWhisper", "Buzz · 情绪与叙事"), ("RivalBeeVanguard", "Rival · 模型与技术面"),
           ("GuardBeeSentinel", "Guard · 交叉验证"), ("BearBeeContrarian", "Bear · 看空对冲"))
+#: 已退役、但老日子的记录里还在的蜂（展示名带「已退役」）。CodeExecutorAgent：v0.45.750 退役，记录里出现到 2026-10 下旬
+RETIRED_AGENTS = {"CodeExecutorAgent": "CodeExecutor（已退役）"}
 BEAR_PARTS = (("insider_bear", "内幕交易"), ("options_bear", "期权"), ("momentum_bear", "动量"), ("news_bear", "新闻"),
               ("overval_bear", "估值"), ("short_int_bear", "做空"))
 RULES = {"insider_trades_shown": 5, "peers_shown": 6, "min_bear_points": 3, "flows_shown": 5}
@@ -141,15 +143,55 @@ def _dist(level: Optional[float], spot: Optional[float]) -> Optional[float]:
     return round((level / spot - 1) * 100, 2) if level is not None and spot else None
 
 
+def _directions(r: dict) -> dict:
+    """各蜂当天的方向 `{蜂: 方向}`：先取 `agent_directions`，没有就取各蜂自己记的。"""
+    out = {}
+    for name, a in (r.get("agent_details") if isinstance(r.get("agent_details"), dict) else {}).items():
+        d = _dig(r, "agent_directions", name) or (a.get("direction") if isinstance(a, dict) else None)
+        if d:
+            out[name] = d
+    return out
+
+
+def _votes(r: dict) -> dict:
+    """方向票——**只数真投票的蜂**。扫描记的 `agent_breakdown` 是「全体」口径（`queen_distiller` 为了历史可比保留的展示数），
+    把不投票的蜂也数在里面：NVDA 2026-11-10 记「6 只看空、1 只中性」，其中 Bear 与 Guard 自 2026-09-14 起不投票，真投票的是 4 空 1 中性。
+    不投票的名单取**那一天记录里**的 `vote_excluded_agents`（没有这个键的老记录 = 当时全体都投）。"""
+    excluded = set(_texts(r.get("vote_excluded_agents")))
+    dirs = _directions(r)
+    voting = {n: d for n, d in dirs.items() if n not in excluded}
+    return {"counts": {k: sum(1 for d in voting.values() if d == k) for k in ("bullish", "bearish", "neutral")},
+            "voters": len(voting),
+            "non_voting": sorted(n for n in (r.get("agent_details") if isinstance(r.get("agent_details"), dict) else {}) if n in excluded),
+            "weights": {k: _num(_dig(r, "direction_vote_weights", k)) for k in ("bullish", "bearish", "neutral")}}
+
+
+def _pipeline(r: dict) -> List[dict]:
+    """综合分是怎么一步步来的——扫描记下的各步分数，照记录排（`queen_distiller`：五维加权 → 共振加成 → 数据质量压缩 →
+    Guard 扣分 → Bear 封顶 → 其后还有别的调整 → 最终）。只列记录里有的步；每步带与上一步的差，差为 0 的步页面可以不显示。
+    ⚠️ 不给「其后的调整」起名字：Bear 封顶之后到最终分之间还有若干步（2026-10 / 11 有 171 份在这一段变了），记录里没有逐步的名字。"""
+    steps = [("五个维度加权", "base_score_before_resonance"), ("共振加成后", "pre_penalty_score"),
+             ("数据质量压缩后", "score_after_dq"), ("Guard 扣分后", "score_after_guard"),
+             ("Bear 封顶后", "score_after_bear"), ("最终综合分", "final_score")]
+    out, prev = [], None
+    for label, key in steps:
+        v = _num(r.get(key))
+        if v is None:
+            continue
+        out.append({"label": label, "key": key, "score": v, "change": round(v - prev, 2) if prev is not None else None})
+        prev = v
+    if out and out[-1]["key"] == "final_score" and len(out) >= 2 and out[-2]["key"] == "score_after_bear":
+        out[-1]["label"] = "其后的调整，得最终综合分" if out[-1]["change"] else "最终综合分"
+    return out
+
+
 def _summary(r: dict, opt: dict) -> dict:
     band = _dig(r, "confidence_calibration", "confidence_band")
     band = [_num(x) for x in band] if isinstance(band, list) and len(band) == 2 else None
-    votes = r.get("agent_breakdown") if isinstance(r.get("agent_breakdown"), dict) else {}
     return {
         "score": _num(r.get("final_score")), "direction": r.get("direction"), "spot": opt["spot"],
         "confidence_band": band if band and None not in band else None,
-        "votes": {k: _num(votes.get(k)) for k in ("bullish", "bearish", "neutral")},
-        "vote_excluded": _texts(r.get("vote_excluded_agents")),
+        "votes": _votes(r),
         "data_real_pct": _num(r.get("data_real_pct")), "coverage_pct": _num(r.get("dimension_coverage_pct")),
         "data_quality_grade": r.get("data_quality_grade"), "distill_mode": r.get("distill_mode"),
         "macro_regime": r.get("macro_regime"),
@@ -159,26 +201,60 @@ def _summary(r: dict, opt: dict) -> dict:
 
 
 def _dimensions(r: dict) -> List[dict]:
+    """五个维度。`weight` 是当天实际用的权重（政体路由之后），`base_weight` 是路由之前的；权重为 0 ⇒ 不进综合分。"""
     return [{"key": k, "label": zh, "score": _num(_dig(r, "dimension_scores", k)),
-             "weight": _num(_dig(r, "dimension_weights", k)), "confidence": _num(_dig(r, "dimension_confidence", k)),
+             "weight": _num(_dig(r, "dimension_weights", k)), "base_weight": _num(_dig(r, "dimension_weights_base", k)),
+             "confidence": _num(_dig(r, "dimension_confidence", k)),
              "status": _dig(r, "dimension_status", k), "data_quality": _num(_dig(r, "dim_data_quality", k)),
              "in_score": (_num(_dig(r, "dimension_weights", k)) or 0.0) > 0} for k, zh in DIMENSIONS]
 
 
 def _agents(r: dict) -> List[dict]:
+    """当天记录里的每只蜂——**名单跟着记录走**，不写死：评分改过几次，老日子里有后来退役的蜂（CodeExecutorAgent 记到 2026-10 下旬），
+    以后加了新蜂也会自己出现。已知的蜂按固定顺序在前，其余按名字排在后面、用记录里的原名。
+    `weight` = 这只蜂所在维度当天的权重（它的维度不在五维里 ⇒ None）；`in_score` = 权重 > 0。"""
     excluded = set(_texts(r.get("vote_excluded_agents")))
+    recorded = r.get("agent_details") if isinstance(r.get("agent_details"), dict) else {}
+    known = dict(AGENTS)
+    order = [n for n, _ in AGENTS if n in recorded] + sorted(n for n in recorded if n not in known)
+    dims = dict(DIMENSIONS)
     out = []
-    for name, zh in AGENTS:
-        a = _dig(r, "agent_details", name)
+    for name in order:
+        a = recorded.get(name)
         if not isinstance(a, dict):
             continue
-        out.append({"name": name, "label": zh, "dimension": a.get("dimension"), "score": _num(a.get("score")),
+        dim = a.get("dimension")
+        weight = _num(_dig(r, "dimension_weights", dim)) if dim in dims else None
+        disc = str(a.get("discovery") or "").lstrip()
+        out.append({"name": name, "label": known.get(name) or RETIRED_AGENTS.get(name, name), "known": name in known,
+                    "dimension": dim, "dimension_label": dims.get(dim), "weight": weight, "in_score": bool(weight and weight > 0),
+                    "score": _num(a.get("score")),
                     "direction": a.get("direction") or _dig(r, "agent_directions", name),
                     "confidence": _num(a.get("confidence")), "findings": findings(a.get("discovery")),
-                    # 这只蜂当天出错了（扫描把报错原文记进「发现」：2721 份里 Chronos 123 次、Scout 39 次、Buzz 6 次）——
-                    # 它的分数与方向是兜底值，页面要在摘要里点名，不能只躺在收起的明细里
-                    "failed": str(a.get("discovery") or "").lstrip().startswith("Error"),
+                    # 这只蜂当天出错了（扫描把报错原文记进「发现」，以 Error 或 ❌ 开头）——它的分数与方向不是正常算出来的，
+                    # 页面要在摘要里点名，不能只躺在收起的明细里
+                    "failed": disc.startswith("Error") or disc.startswith("\u274c"),
                     "votes": name not in excluded})
+    return out
+
+
+def _side_effects(r: dict) -> List[dict]:
+    """不靠权重、但当天确实动了综合分的通道，和算了却没用的诊断量——都取记录里的开关，不靠猜。"""
+    gex = r.get("gex_regime_mod") if isinstance(r.get("gex_regime_mod"), dict) else {}
+    out = [
+        {"key": "guard_penalty", "label": "Guard 扣分（它的分数低于 4 才扣）", "applied": bool(r.get("guard_penalty_applied")),
+         "value": _num(r.get("guard_penalty"))},
+        {"key": "bear_cap", "label": "Bear 封顶（看空强度高时给综合分设上限）", "applied": bool(r.get("bear_cap_applied")),
+         "value": _num(r.get("bear_strength"))},
+        {"key": "dq", "label": "数据质量压缩", "applied": bool(r.get("dq_penalty_applied")), "value": _num(r.get("dq_quality_factor"))},
+        {"key": "combo_cap", "label": "扣分合计封顶", "applied": bool(r.get("combo_cap_applied")), "value": _num(r.get("total_penalty"))},
+    ]
+    if "ml_auxiliary_in_score" in r:
+        out.append({"key": "ml_auxiliary", "label": "Rival 的模型分", "applied": bool(r.get("ml_auxiliary_in_score")), "value": None})
+    if gex:
+        # 只读「用没用」这个开关，**不读那个加减分的数值**：`tests/test_gex_modifier_disconnected.py` 把读那个键的生产文件
+        # 名单钉死（防它换个名字接回评分），展示层用不着数值，就不去当它的读者
+        out.append({"key": "gex_direct", "label": "GEX 直接加减分", "applied": bool(gex.get("applied")), "value": None})
     return out
 
 
@@ -186,10 +262,9 @@ def _resonance(r: dict) -> dict:
     res = r.get("resonance") if isinstance(r.get("resonance"), dict) else {}
     return {"detected": bool(res.get("resonance_detected")), "direction": res.get("direction"),
             "supporting_agents": _num(res.get("supporting_agents")), "consistency": _num(res.get("consistency")),
-            "dimensions": _texts(res.get("resonant_dimensions")), "confidence_boost": _num(res.get("confidence_boost")),
+            "dimensions": _texts(res.get("resonant_dimensions")), "boost_pct": _num(res.get("confidence_boost")),
             "conflict_level": r.get("conflict_level"), "arbitration_triggered": bool(r.get("arbitration_triggered")),
-            "arbitration_flipped": bool(r.get("arbitration_flipped")),
-            "vote_weights": {k: _num(_dig(r, "direction_vote_weights", k)) for k in ("bullish", "bearish", "neutral")}}
+            "arbitration_flipped": bool(r.get("arbitration_flipped"))}
 
 
 def _catalysts(r: dict, spot: Optional[float]) -> dict:
@@ -318,4 +393,5 @@ def build(ticker: str, date: str, result, rank: Optional[dict] = None) -> dict:
     return base | {"available": True, "reason": None, "reason_zh": None,
                    "summary": _summary(result, opt) | {"rank": rank or {"rank": None, "of": None}},
                    "risks": _risks(result), "catalysts": cat, "options": optx, "macro": _macro(result),
-                   "levels": _levels(result, opt, cat, optx), "dimensions": _dimensions(result), "agents": _agents(result)}
+                   "levels": _levels(result, opt, cat, optx), "dimensions": _dimensions(result), "agents": _agents(result),
+                   "pipeline": _pipeline(result), "side_effects": _side_effects(result)}
