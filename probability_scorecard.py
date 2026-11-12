@@ -316,6 +316,11 @@ _ML_ESTIMATOR_GENERATIONS = [
      "【v0.45.770】（同日零代价，同上只换标签）：OracleBee 弃权时 BearBee 照抄它的判定、不再自取期权链 ⇒ 只在 Oracle 弃权行"
      "改 Bear 分（经 bear_cap 进 `final_score`）与 Bear 的期权标签；弃权是 765 代码才有的分支，11-09 / 11-10 一行都没有 ⇒ 等价判据全部成立"
      "（见 `ic_rerun_readiness` 同版条目）。**没有重放 Δprobability**。"),
+    ("2026-11-12", "v0.45.773",
+     "`yf.download` 串行化（评分冻结期真 bug 例外，用户 2026-11-12 点头）。`_prepare_ml_input` 一行没动；`final_score` 这个特征的**上游输入**变了："
+     "此前并发调用互相串数据，Guard 市场政体均线与 Scout 供应链 5 日涨跌可能拿到别家的帧（后者无身份校验，静默进 Scout 分）。"
+     "只在「那一路恰好被串」的输入上改 `final_score`；11-11 一行（COST 供应链信号 positive → neutral，Scout 分约 -0.3）。"
+     "训练集里 10-13 ~ 11-11 的历史行仍是旧口径，`predictions` 表不改写。**没有重放 Δprobability**。详见 `ic_rerun_readiness` 同版条目。"),
 ]
 
 

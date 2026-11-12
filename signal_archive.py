@@ -2485,6 +2485,11 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     "v0.45.765": ("agent.OracleBeeEcho.*", "bear.options_bear"),
     # Oracle 弃权时 Bear 照抄、不再自取 ⇒ 只在弃权行改 options_bear（765 已把它的起点挪到 11-09，本条同日不再挪）
     "v0.45.770": ("bear.options_bear",),
+    # 11-12（v0.45.773，评分冻结期**真 bug 例外**，用户 2026-11-12 点头）：`yf.download` 串行化——此前并发调用互相串数据（请求 A 拿到 B 的帧），
+    # 直接改的是两处输入：Guard 的市场政体均线（`_get_ma`，→ `market_regime` → Guard 分）与 Scout 的供应链 5 日涨跌
+    # （`get_supply_chain_signals` → supply_chain_signal → Scout 分）。⇒ `agent.GuardBeeSentinel.*` / `agent.ScoutBeeNova.*` 点名；
+    # 下游（final_score、Guard 普查等）由 _scope_closure 带出。
+    "v0.45.773": ("agent.GuardBeeSentinel.*", "agent.ScoutBeeNova.*"),
 }
 
 

@@ -81,11 +81,26 @@ _installed = False
 _orig_download = None
 _orig_ticker = None
 
+# ── `yf.download` 串行锁（v0.45.773，根因修复）──────────────────────────────────
+# yfinance 1.2.0 的 `download()` 把中间结果放在**模块级全局** `yfinance.shared._DFS`（每次调用开头 `shared._DFS = {}` 重建；
+# 工作线程往里写 `_DFS[ticker]`；调用方轮询 `len(_DFS) < len(tickers)` 后 concat 整个字典）。两个线程同时调 ⇒ 互相清空 / 互相写进
+# 对方的字典 ⇒ 请求 VZ 拿到 SOXX 的帧（或整份抛 `dictionary changed size during iteration`）。扫描的 30 只票并行线程每只票
+# 约 9 次单票 `download`（政体均线 4 + 供应链 5），上面的竞态每天都在发生，与限流无关（10-29 串 25 次、429×0）。
+# 闸门原来只限**速率**（令牌桶）、不限**同时在途个数**，所以管不到。这把锁让进程里任何时刻最多一个 `yf.download` 在飞。
+# 锁只包真正的下载调用：限流令牌在锁外取（别让令牌等待占着锁）；拿到锁后复查冷却（排队期间可能已有别人踩了 429）。
+# 只锁 `download`：`Ticker.history` 等是每个 Ticker 自己的状态，没有这个问题，仍然并行。
+# 等锁有上限：持锁者卡死（网络挂死）时，排队的线程到点抛 `YFDownloadLockTimeout`（⊂ `YFRateLimited` ⊂ `ConnectionError`，
+# 调用方当「该源不可用」走降级），不会把整轮扫描一起挂住。
+DOWNLOAD_LOCK_TIMEOUT = 300.0
+_download_lock = threading.Lock()
+
 # 观测计数：供覆盖率闸/日志核对「跑完了吗」，永远不看退出标语。
 # ok / consecutive_429 / last_ok_at 只给日志与排查用（v0.45.675：谁、第几次连续 429、距上次成功多久），不参与任何决定。
 _stats = {"calls": 0, "rate_limited": 0, "blocked_by_cooldown": 0, "ok": 0, "consecutive_429": 0,
           # v0.45.716：`yf_cooldown_wait.CooldownWaitBudget` 的结局——等过几次冷却、墙钟共等了几秒、因预算 / 单次上限没等几次
-          "cooldown_waits": 0, "cooldown_wait_s": 0.0, "cooldown_wait_refused": 0}
+          "cooldown_waits": 0, "cooldown_wait_s": 0.0, "cooldown_wait_refused": 0,
+          # v0.45.773：`yf.download` 串行锁——串行跑了几次、排队共等了几秒（扫描变慢多少看这个）、等锁超时几次（≠0 ⇒ 有 download 被当成不可用）
+          "download_serialized": 0, "download_lock_wait_s": 0.0, "download_lock_timeouts": 0}
 _cooldown_until = 0.0
 _last_ok_at = 0.0          # time.monotonic()；0 = 本进程还没成功过
 
@@ -103,6 +118,13 @@ class YFRateLimited(ConnectionError):
     原本能优雅降级的路径会直接崩。
     `ConnectionError ⊂ OSError ⊂ NETWORK_ERRORS`，全线自动接住。
     """
+
+
+class YFDownloadLockTimeout(YFRateLimited):
+    """等 `yf.download` 串行锁超过 `DOWNLOAD_LOCK_TIMEOUT` —— 持锁的那次下载卡住了。
+
+    继承 `YFRateLimited`：调用方已经会把它当「该数据源不可用」降级（且仍是 `ConnectionError`，`NETWORK_ERRORS` 接得住）；
+    单独成类是为了计数与告警能把它和真 429 分开（`stats()["download_lock_timeouts"]`）。"""
 
 
 def _limiter():
@@ -214,27 +236,55 @@ def _note_ok() -> None:
         _last_ok_at = time.monotonic()
 
 
-def _gated(fn, what: str):
-    """把一次 yfinance 调用套上「冷却检查 → 限流令牌 → 429 识别」。"""
+def _acquire_download_lock(what: str) -> None:
+    """拿 `yf.download` 串行锁（见模块顶部说明）。超时 ⇒ 抛 `YFDownloadLockTimeout`，不执行下载。"""
+    t0 = time.monotonic()
+    got = _download_lock.acquire(timeout=DOWNLOAD_LOCK_TIMEOUT)
+    waited = time.monotonic() - t0
+    with _lock:
+        _stats["download_lock_wait_s"] = round(_stats["download_lock_wait_s"] + waited, 3)
+        if not got:
+            _stats["download_lock_timeouts"] += 1
+    if not got:
+        _log.error("等 yf.download 串行锁超过 %.0fs（%s）——持锁的那次下载卡住了，本次当作 yfinance 不可用", DOWNLOAD_LOCK_TIMEOUT, what)
+        raise YFDownloadLockTimeout(f"等待 yf.download 串行锁超过 {DOWNLOAD_LOCK_TIMEOUT:.0f}s（{what}）")
+
+
+def _gated(fn, what: str, serialize: bool = False):
+    """把一次 yfinance 调用套上「冷却检查 → 限流令牌 → 429 识别」。
+
+    `serialize=True`（只给 `yf.download`）：再套一把进程级串行锁，让同一时刻最多一个在飞——yfinance 的 `download`
+    用模块级全局字典攒结果，并发调用会互相串数据（见模块顶部 `DOWNLOAD_LOCK_TIMEOUT` 上方的说明）。"""
     def wrapper(*args, **kwargs):
         _check_cooldown()
         rl = _limiter()
         if rl is not None and not rl.acquire(timeout=60.0):
             raise YFRateLimited(f"等待 yfinance 限流令牌超过 60s（{what}）")
-        with _lock:
-            _stats["calls"] += 1
+        if serialize:
+            _acquire_download_lock(what)
         try:
-            result = fn(*args, **kwargs)
-        except BaseException as e:
-            if is_rate_limit_error(e):
-                _enter_cooldown(f"{what}: {e}")
-                raise YFRateLimited(str(e)) from e
-            raise
-        _note_ok()
-        return result
+            if serialize:
+                _check_cooldown()                # 排队期间别的线程可能已踩了 429：冷却中就别再发
+                with _lock:
+                    _stats["download_serialized"] += 1
+            with _lock:
+                _stats["calls"] += 1
+            try:
+                result = fn(*args, **kwargs)
+            except BaseException as e:
+                if is_rate_limit_error(e):
+                    _enter_cooldown(f"{what}: {e}")
+                    raise YFRateLimited(str(e)) from e
+                raise
+            _note_ok()
+            return result
+        finally:
+            if serialize:
+                _download_lock.release()
     wrapper.__name__ = getattr(fn, "__name__", what)
     wrapper.__doc__ = getattr(fn, "__doc__", None)
     wrapper._yf_gate_wrapped = True          # 供测试断言「确实接上了」
+    wrapper._yf_gate_serialized = bool(serialize)
     return wrapper
 
 
@@ -304,7 +354,7 @@ def install() -> bool:
 
     _orig_download = yf.download
     _orig_ticker = yf.Ticker
-    yf.download = _gated(_orig_download, "yf.download")
+    yf.download = _gated(_orig_download, "yf.download", serialize=True)     # v0.45.773：download 串行（见 DOWNLOAD_LOCK_TIMEOUT 说明）
 
     # Ticker 的网络发生在**属性/方法访问**时，不是构造时，所以不能只包 __init__。
     # 且两种形态都要治：`history()` 是方法，`calendar` / `info` 是 property。

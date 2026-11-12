@@ -368,6 +368,9 @@ def summary_line(snap: dict) -> str:
     td = c.get("twelve_data")
     cb = c.get("cboe")
     yf_s = "—" if yf is None else f"{yf.get('calls', '?')}次(429×{yf.get('rate_limited', '?')})"
+    if yf is not None and yf.get("download_serialized"):                # v0.45.773：串行 download 的排队成本（扫描变慢多少看这个）
+        yf_s += f"[download串行{yf['download_serialized']}次/排队{float(yf.get('download_lock_wait_s') or 0):.0f}s" + (
+            f"/超时{yf['download_lock_timeouts']}" if yf.get("download_lock_timeouts") else "") + "]"
     td_s = "—" if td is None else f"请求{td.get('fetches', '?')}/命中{td.get('hits', '?')}"
     adj = (td or {}).get("adjusted") or {}
     if adj.get("fetches"):                                              # v0.45.562：复权日线（波动率回落）另一份缓存
