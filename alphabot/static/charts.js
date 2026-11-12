@@ -35,9 +35,10 @@ function theme() {
 //   · 色点的颜色放在 `data-c` 里，由 `mount` 里的观察器经 CSSOM 涂上（脚本设 style 属性不受 CSP 的行内样式限制）。
 const dot = (color) => `<i class="tip-dot" data-c="${typeof color === "string" ? color.replace(/[^#\w(),.% -]/g, "") : ""}"></i>`;
 const tipValue = (p) => (Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value);
-// 轴触发的提示：第一行是横轴上的位置，其后每个系列一行（色点 + 名字 + 数值）
+// 轴触发的提示：第一行是横轴上的位置，其后每个系列一行（色点 + 名字 + 数值）。
+// 没起名字的系列 ECharts 给的缺省名是 "series" + 空字符 + 序号，不是给人看的 ⇒ 不显示
 const axisTip = (fmt) => (ps) => `${ps[0].axisValueLabel ?? ps[0].name ?? ""}`
-  + ps.map((p) => `<br>${dot(p.color)}${p.seriesName && !/^series\d+$/.test(p.seriesName) ? `<span class="tip-name">${p.seriesName}</span>` : ""}<b>${fmt(tipValue(p))}</b>`).join("");
+  + ps.map((p) => `<br>${dot(p.color)}${p.seriesName && !/^series\0?\d+$/.test(p.seriesName) ? `<span class="tip-name">${p.seriesName}</span>` : ""}<b>${fmt(tipValue(p))}</b>`).join("");
 function paintDots(el) {
   const paint = () => el.querySelectorAll("i.tip-dot[data-c]").forEach((n) => { if (n.dataset.c) n.style.backgroundColor = n.dataset.c; });
   const obs = new MutationObserver(paint);

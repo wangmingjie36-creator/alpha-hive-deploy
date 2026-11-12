@@ -210,12 +210,15 @@ function positioning(d) {
       kpi("Call 侧集中位", num(dl.call_wall, 0), isNum(dl.call_wall_dist_pct) ? `距现价 ${signedPct(dl.call_wall_dist_pct, 1)}` : null),
       kpi("Put 侧集中位", num(dl.put_wall, 0), isNum(dl.put_wall_dist_pct) ? `距现价 ${signedPct(dl.put_wall_dist_pct, 1)}` : null)),
     facts(dl.facts),
-    (dl.expiries || []).length ? table(expCols, dl.expiries) : null]
+    (dl.expiries || []).length ? table(expCols, dl.expiries) : null,
+    note("这里的净 gamma 是每日扫描收盘后按全部到期日算的；", h("a", { href: `#/t/${encodeURIComponent(d.ticker)}/levels` }, "标的页"),
+      "的净 GEX 是盘中现算、默认看 45 天内到期，单位是每 1%。两处口径不同，数值乃至正负不一样都是正常的（现价贴近翻转位时尤其如此）。")]
     : [line(`这一天扫描没有可用的 gamma 读数（${dl.reason_zh || dl.reason || "原因不明"}），做市商一侧不做推算。`)];
   const fo = bg.follow || {};
   // 未平仓隔夜才更新：某次扫描记的是它前一个交易日收盘时的持仓 ⇒ 两次扫描之差 = 上一次扫描那天（含）到这一次前一天的开平仓
-  const when = fo.prev_date ? `这些增减发生在 ${fo.prev_date}（含）到 ${d.date}（不含）之间的交易日里；两次扫描是相邻交易日时，就是 ${fo.prev_date} 那一天。`
-    + `${d.date} 当天的开平仓要到下一次扫描才看得到。` : "";
+  const when = !fo.prev_date ? "" : (fo.sessions_covered === 1 ? `这些增减发生在 ${fo.prev_date} 那个交易日。`
+    : `这些增减发生在 ${fo.prev_date}（含）到 ${d.date}（不含）之间的 ${isNum(fo.sessions_covered) ? `${num(fo.sessions_covered, 0)} 个工作日` : "交易日"}里。`)
+    + `${d.date} 当天的开平仓要到下一次扫描才看得到。`;
   return sec("positioning", "做市商与大额成交",
     h("h3", {}, "做市商对冲"), note(dl.assumption), ...dealer,
     h("h3", {}, "大额成交", h("span", { class: "sub" }, ` 当天成交权利金 ≥ ${usd(bg.threshold_usd)} 的合约`)), note(bg.caveat),

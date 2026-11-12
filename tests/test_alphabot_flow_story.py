@@ -121,6 +121,14 @@ class TestReadings:
         assert all(x["now"] is None and x["change"] is None for x in r.values())
         assert all(x["read"] for x in r.values()), "「怎么读」是固定说明，没数据也在"
 
+    def test_iv_rank_window_is_not_hard_coded_to_a_year(self):
+        # 现在是已实现波动率的排名（窗口一年）；真 IV 历史攒够后自动切换，那时窗口是已攒下的天数，不能再写「过去一年」
+        real = {**TODAY, "iv_rank_source": "real_iv_63d"}
+        now = self._by_key(real, {**PREV, "iv_rank_source": "real_iv_63d"})["iv_rank"]["now"]
+        assert now == "100：等于所用历史窗口的最高值" and "一年" not in now
+        low = self._by_key({**TODAY, "iv_rank": 0.0})["iv_rank"]["now"]
+        assert low == "0（已实现波动率的排名）：等于过去一年的最低值"
+
     def test_incomparable_iv_rank_says_so(self):
         r = self._by_key(TODAY, {**PREV, "iv_rank_source": "real_iv_63d"})
         assert r["iv_rank"]["change"] == "两次的口径不同，不比"
@@ -183,6 +191,11 @@ class TestPages:
         tips = re.findall(r"tooltip: \{[^\n]*", code)
         assert len(tips) >= 8 and all("formatter" in t or "backgroundColor" in t or t.rstrip().endswith("{") for t in tips), \
             [t for t in tips if "formatter" not in t]
+        # 没起名字的系列，ECharts 的缺省名是 "series" + 空字符 + 序号——过滤规则要认得那个空字符，否则提示里多出「series0」
+        import subprocess
+        probe = ('const re=' + re.search(r"!(/\^series[^/]*/)\.test", code).group(1)
+                 + ';console.log(re.test("series\\u00000"),re.test("series3"),re.test("全链"),re.test("series A"))')
+        assert subprocess.run(["node", "-e", probe], capture_output=True, text=True, timeout=30).stdout.split() == ["true", "true", "false", "false"]
         assert 'n.style.backgroundColor = n.dataset.c' in code and "MutationObserver" in code and "__tipObs?.disconnect()" in code
         css = (REPO / "alphabot" / "static" / "alphabot.css").read_text(encoding="utf-8")
         assert ".tip-dot {" in css and ".tip-name {" in css

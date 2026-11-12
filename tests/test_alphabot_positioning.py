@@ -139,6 +139,44 @@ class TestBigTrades:
             ("call", 195.0, "2027-02-19", 54982.0), ("call", 210.0, "2027-02-19", -47287.0), ("put", 140.0, "2027-01-15", 47031.0)]
         # 没变的（195 / 11-20）不列；只有一边有的（999）不当成「从 0 涨上来」
 
+    def test_weekday_count_matches_the_standard_library(self):
+        import datetime as dt
+        d0 = dt.date(2026, 1, 1)
+        for i in range(0, 400, 7):
+            for j in range(0, 12):
+                a = d0 + dt.timedelta(days=i + j % 3)
+                b = a + dt.timedelta(days=j)
+                ref = sum(1 for k in range(j) if (a + dt.timedelta(days=k)).weekday() < 5)
+                assert OC.weekdays_between(a.isoformat(), b.isoformat()) == ref, (a, b)
+        assert OC.weekdays_between("bad", "2026-11-10") is None and OC.weekdays_between("2026-11-10", "2026-11-09") is None
+
+    def test_previous_scan_on_a_non_trading_day_is_not_compared(self):
+        """二次检查查出：上一次扫描在周六、这一次在周一 ⇒ 两次记的是同一份未平仓（都是周五收盘），差值恒 0。
+        照比的话每个合约都会被判成「基本没留下」。历史上有过周末扫描（2026-05-17）。"""
+        same = _res(flows=TODAY["agent_details"]["OracleBeeEcho"]["details"]["unusual_activity"],
+                    call_oi=PREV["agent_details"]["OracleBeeEcho"]["details"]["full_chain_oi"]["call_exp_oi"],
+                    put_oi=PREV["agent_details"]["OracleBeeEcho"]["details"]["full_chain_oi"]["put_exp_oi"])
+        b = OC.big_trades(same, PREV, "2026-11-09", "2026-11-07")           # 周六 → 周一
+        f = b["follow"]
+        assert f["available"] is False and f["reason"] == "no_session_between" and f["sessions_covered"] == 0
+        assert f["rows"] == [] and sum(f["tally"].values()) == 0 and b["oi_movers"] == []
+        assert any("之间没有交易日" in x and "同一份未平仓" in x for x in b["facts"])
+        # 正对照：周五 → 周日是有效的（周日那次的未平仓已经是周五收盘后的）
+        assert OC.big_trades(TODAY, PREV, "2026-11-08", "2026-11-06")["follow"]["available"] is True
+
+    def test_a_gap_of_several_sessions_is_called_out(self):
+        near = OC.big_trades(TODAY, PREV, "2026-11-10", "2026-11-09")
+        assert near["follow"]["sessions_covered"] == 1 and not any(x.startswith("注意：") for x in near["facts"])
+        far = OC.big_trades(TODAY, PREV, "2026-11-10", "2026-11-05")          # 周四 → 下周二：3 个工作日
+        assert far["follow"]["available"] and far["follow"]["sessions_covered"] == 3
+        warn = next(x for x in far["facts"] if x.startswith("注意："))
+        assert "隔了 3 个工作日" in warn and "只能粗看" in warn
+
+    def test_missing_oi_detail_has_its_own_reason(self):
+        f = OC.big_trades(TODAY, {"agent_details": {"OracleBeeEcho": {"details": {"unusual_activity": PREV_FLOWS}}}},
+                          "2026-11-10", "2026-11-09")["follow"]
+        assert f["available"] is False and f["reason"] == "no_oi_detail"
+
     def test_caveat_is_always_there_and_says_what_cannot_be_seen(self):
         for args in ((TODAY, PREV), (TODAY, None), ({}, None)):
             assert OC.big_trades(*args, "2026-11-10", "2026-11-09")["caveat"] == OC.BIG_TRADE_CAVEAT
@@ -171,8 +209,10 @@ class TestDeepPage:
         body = js.split("function positioning(d) {")[1].split("\nfunction ")[0]
         assert "note(dl.assumption)" in body and "note(bg.caveat)" in body, "前提与限制用服务端的原文，页面不另写一份"
         assert "不是某一方没走" in body and "对不出是不是同一批人" in body
+        assert "两处口径不同" in body and "标的页" in body, "深度页与标的页是两套 GEX 口径，要写明"
         # 未平仓隔夜才更新：两次扫描之差说的是上一次扫描那天的开平仓，不是这一次当天的——两张表下面都要写明
-        assert body.count("note(when, ") == 2 and "（含）到 ${d.date}（不含）之间的交易日里" in body and "要到下一次扫描才看得到" in body
+        assert body.count("note(when, ") == 2 and "fo.sessions_covered === 1" in body and "那个交易日。" in body
+        assert "（含）到 ${d.date}（不含）之间的" in body and "个工作日" in body and "要到下一次扫描才看得到" in body
         assert not [w for w in BANNED if w in body] and "style=" not in js
 
     def test_service_passes_the_previous_scan_of_the_same_ticker(self, tmp_path):

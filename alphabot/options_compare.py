@@ -83,6 +83,8 @@ REASONS = {
     "no_options_details": "这一天这只标的没有期权分析记录",
     "no_prev": "之前没有这只标的的扫描记录，没东西可比",
     "no_gex_state": "这一天的扫描没有记 gamma 读数",
+    "no_oi_detail": "这一次或上一次扫描没有逐合约的未平仓明细",
+    "no_session_between": "上一次扫描到这一次之间没有交易日，两次记的是同一份未平仓",
 }
 
 
@@ -275,6 +277,31 @@ KEPT_ZH = {"kept": "大部分留下了", "partly": "留下一部分", "gone": "�
            "closing": "未平仓反而减少（以平仓为主）", "expired": "已到期", "unknown": "对不上"}
 
 
+def _day_number(iso: str) -> Optional[int]:
+    """`YYYY-MM-DD` → 自 1970-01-01 起的天数（纯算术；本模块不 import datetime，见纯度守卫）。格式不对 ⇒ None。"""
+    try:
+        y, m, d = (int(x) for x in str(iso)[:10].split("-"))
+    except (TypeError, ValueError):
+        return None
+    if not (1 <= m <= 12 and 1 <= d <= 31):
+        return None
+    y -= m <= 2
+    era = (y if y >= 0 else y - 399) // 400
+    yoe = y - era * 400
+    doy = (153 * (m + (-3 if m > 2 else 9)) + 2) // 5 + d - 1
+    return era * 146097 + yoe * 365 + yoe // 4 - yoe // 100 + doy - 719468
+
+
+def weekdays_between(start: Optional[str], end: Optional[str]) -> Optional[int]:
+    """`[start, end)` 里有几个工作日（周一到周五；**不认假日**，所以遇到假日会多数一天——只会让提醒偏多，不会漏）。
+    用途：未平仓隔夜才更新 ⇒ 某次扫描记的是它之前最后一个交易日收盘的持仓，两次扫描之差覆盖的正是这段里的交易日。
+    0 ⇒ 上一次扫描不在交易日、两次记的是同一份未平仓；1 ⇒ 正好是上一次扫描那一天；> 1 ⇒ 中间隔了几天。日期读不了 ⇒ None。"""
+    a, b = _day_number(start) if start else None, _day_number(end) if end else None
+    if a is None or b is None or b < a:
+        return None
+    return sum(1 for n in range(a, b) if (n + 3) % 7 < 5)          # 1970-01-01 是周四 ⇒ (n + 3) % 7：0 = 周一 … 6 = 周日
+
+
 def _oi_at(o: dict, side: str, strike: float, expiry: str) -> Optional[float]:
     """扫描记的「某侧、某行权价、某到期日」的未平仓量。键是字符串形式的行权价；找不到 ⇒ None（不当 0）。"""
     table = _dig(o, "full_chain_oi", f"{side}_exp_oi")
@@ -419,9 +446,14 @@ def big_trades(result, prev_result=None, date: Optional[str] = None, prev_date: 
     else:
         facts.append(f"今天没有成交权利金过 {cut / 1e6:g} 百万美元的合约。")
 
-    # ② 上一次的大单留没留下
+    # ② 上一次的大额成交留没留下
     follow, tally = [], {"kept": 0, "partly": 0, "gone": 0, "closing": 0, "expired": 0, "unknown": 0}
-    has_prev = bool(po) and isinstance(_dig(o, "full_chain_oi", "call_exp_oi"), dict)
+    covered = weekdays_between(prev_date, date)
+    has_detail = bool(po) and isinstance(_dig(o, "full_chain_oi", "call_exp_oi"), dict) \
+        and isinstance(_dig(po, "full_chain_oi", "call_exp_oi"), dict)
+    # 两次扫描之间一个工作日都没有（上一次是周末 / 假日重扫）⇒ 两边是同一份未平仓，差值恒 0：不比，否则全判成「没留下」
+    has_prev = has_detail and covered != 0
+    why_not = None if has_prev else ("no_session_between" if has_detail else "no_oi_detail")
     for r in bigs(po) if has_prev else []:
         row = dict(r)
         if date and r["expiry"] < date:
@@ -440,7 +472,8 @@ def big_trades(result, prev_result=None, date: Optional[str] = None, prev_date: 
                     "kept_ratio": round(d_oi / r["volume"], 2) if d_oi is not None and r["volume"] else None})
         tally[verdict] += 1
         follow.append(row)
-    out["follow"] = {"available": has_prev, "prev_date": prev_date, "tally": tally, "count": len(follow),
+    out["follow"] = {"available": has_prev, "reason": why_not, "reason_zh": REASONS.get(why_not), "sessions_covered": covered,
+                     "prev_date": prev_date, "tally": tally, "count": len(follow),
                      "rows": follow[: int(RULES["big_shown"])], "n_more": max(0, len(follow) - int(RULES["big_shown"]))}
     if has_prev and follow:
         j = tally["kept"] + tally["partly"] + tally["gone"] + tally["closing"]
@@ -449,8 +482,13 @@ def big_trades(result, prev_result=None, date: Optional[str] = None, prev_date: 
                      + (f"，{tally['expired']} 个已到期" if tally["expired"] else "")
                      + (f"，{tally['unknown']} 个对不上" if tally["unknown"] else "") + "。"
                      + (f"留下的占判得了的 {(tally['kept'] + tally['partly']) / j * 100:.0f}%。" if j else ""))
+    elif why_not == "no_session_between":
+        facts.append(f"上一次扫描（{prev_date}）到这一次之间没有交易日，两次记的是同一份未平仓，隔日验证与未平仓增减都不做。")
     elif not has_prev:
-        facts.append("没有上一次扫描的未平仓明细，隔日验证做不了。")
+        facts.append("这一次或上一次扫描没有逐合约的未平仓明细，隔日验证做不了。")
+    if has_prev and covered is not None and covered > 1:
+        facts.append(f"注意：两次扫描之间隔了 {covered} 个工作日（{prev_date} 起，不认假日）。未平仓的变化包含这几天的全部开平仓，"
+                     "而成交量只是上一次扫描那一天的，「留没留下」只能粗看。")
 
     # ③ 未平仓逐日增减最多的合约
     movers = []
@@ -484,7 +522,7 @@ METRIC_READS = {
     "spot": "现价取自期权快照那一刻；涨跌幅是对上一次扫描的。",
     "full_pc_ratio": "全链 P/C = 全部到期日的 Put 未平仓 ÷ Call 未平仓。大于 1 是 Put 更多。Put 多可能是买保护，也可能是卖 Put 收权利金，单看这个数分不出方向。",
     "full_oi": "全链 OI = 全部到期日的未平仓合约数。增加是新开的仓多于平掉的；月度到期日当天会因合约到期而明显减少。",
-    "iv_rank": "IV Rank = 当前波动率在过去一年最低到最高之间的位置（0–100）。标着「HV 代」时用的是已实现波动率的排名，真 IV 历史攒够 63 个交易日后自动切换。",
+    "iv_rank": "IV Rank = 当前波动率在历史最低到最高之间的位置（0–100）。标着「HV 代」时用的是过去一年已实现波动率的排名；真 IV 历史攒够 63 个交易日后自动切换，那时窗口是已攒下的天数。",
     "iv_rv": "IV 是期权隐含的年化波动率，RV30 是过去 30 天实际走出来的。IV 高于 RV 是期权定价比近期实际波动贵，差得越多越贵。",
     "skew": "IV Skew = 虚值 Put 的隐含波动率 ÷ 虚值 Call 的。大于 1 是下行保护比上行期权贵，是多数股票的常态；数值升高是这个差距在拉大。",
     "max_pain": "Max Pain = 让近 7 天到期的期权买方合计亏得最多的那个价位。它没有可靠的预测力，只当作未平仓集中在哪里的一个参照。",
@@ -520,7 +558,8 @@ def readings(today: dict, prev: Optional[dict], d: dict) -> List[dict]:
         chg(d.get("full_oi_pct"), "{:.1f}%", "比上一次多 {}", "比上一次少 {}"))
     ivr = today.get("iv_rank")
     src = "（已实现波动率的排名）" if today.get("iv_rank_source") == "hv_proxy" else ""
-    ivr_now = None if ivr is None else (f"{ivr:.0f}{src}" + ("：等于过去一年的最高值" if ivr >= 100 else "：等于过去一年的最低值" if ivr <= 0 else ""))
+    win = "过去一年" if today.get("iv_rank_source") == "hv_proxy" else "所用历史窗口"      # 真 IV 历史的窗口是自攒的天数，不是一年
+    ivr_now = None if ivr is None else (f"{ivr:.0f}{src}" + (f"：等于{win}的最高值" if ivr >= 100 else f"：等于{win}的最低值" if ivr <= 0 else ""))
     add("iv_rank", "IV Rank", ivr_now,
         "两次的口径不同，不比" if ok and d.get("iv_rank_comparable") is False
         else chg(d.get("iv_rank"), "{:.0f} 点", "比上一次高 {}", "比上一次低 {}"))
