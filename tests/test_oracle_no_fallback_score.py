@@ -400,8 +400,11 @@ class TestBoundaryRegistered:
         import ic_rerun_readiness as rr
         import signal_archive as sa
         sigs = set(sa.SIGNAL_EXTRACTORS)
-        before = sa.generation_boundaries(sigs, history=[e for e in rr._COHORT_HISTORY if e[1] != _V])
-        after = sa.generation_boundaries(sigs)
+        # 比「765 登上那一刻」的表：表里 765 之前的条目 vs 再加上 765。不用「全表去掉 765」——之后同日并入的条目
+        # （v0.45.770 也点名 bear.options_bear）会把它在 before 里挪回 11-09，看起来像 765 没动它。
+        idx = [e[1] for e in rr._COHORT_HISTORY].index(_V)
+        before = sa.generation_boundaries(sigs, history=rr._COHORT_HISTORY[:idx])
+        after = sa.generation_boundaries(sigs, history=rr._COHORT_HISTORY[:idx + 1])
         moved = {s for s in after if (before.get(s) or {}).get("date") != after[s]["date"]}
         assert moved == {"agent.OracleBeeEcho.score", "agent.OracleBeeEcho.direction", "bear.options_bear"}, moved
         assert {after[s]["date"] for s in moved} == {"2026-11-09"}

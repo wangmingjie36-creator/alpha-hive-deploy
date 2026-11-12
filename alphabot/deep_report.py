@@ -57,6 +57,14 @@ _ACCURACY = re.compile(r"准确率|历史\s*\d+\s*条")
 #: 模型预期收益的片段（「预期 7d -12.49%」「30d -18.73%」「ML预测7日回报-12.5%」）：未证实有预测力，不上页面
 _MODEL = re.compile(r"ML\s*预测|^\s*预期\s*\d+d|^\s*\d+d\s*[-+−]")
 
+#: VIX 期限结构标签 → (展示名, 这个标签是什么意思)（v0.45.769）。扫描只记标签、不记两个月份的点位，所以页面不写点位与价差；
+#: 说明只讲这个形态是什么，不讲「卖方策略有利」之类的操作结论。不认识的标签原样显示、不配说明
+VIX_TERM_READS = {
+    "contango": ("正价差", "远月的 VIX 期货比近月贵。这是平时的常态：市场给更远的将来留的不确定性更多。"),
+    "backwardation": ("倒挂", "近月的 VIX 期货比远月贵。市场给眼前的波动定价高于以后，通常出现在正在承压的时候。"),
+    "flat": ("持平", "近月与远月的 VIX 期货差不多，没有明显的正价差或倒挂。"),
+}
+
 REASONS = {
     "demo": "演示模式不读扫描结果",
     "no_scan_files": "数据根下没有任何扫描结果文件",
@@ -329,6 +337,9 @@ def _macro(r: dict) -> dict:
         "vix": _num(vix.get("vix")), "vix_source": vix.get("vix_source"), "vix_as_of": vix.get("vix_as_of"),
         "vix_stale": vix.get("vix_stale") if isinstance(vix.get("vix_stale"), bool) else None,
         "vix_term": vix.get("vix_term"), "yield_curve": vix.get("yield_curve"),
+        "vix_term_source": vix.get("vix_term_source"),
+        "vix_term_zh": VIX_TERM_READS.get(vix.get("vix_term"), (None, None))[0],
+        "vix_term_read": VIX_TERM_READS.get(vix.get("vix_term"), (None, None))[1],
         # 依据只取第一个逗号之前的事实（「SPX $7521 高于 200MA $7331 (+2.6%)」），后半句是模板给的结论
         "layers": [{"label": zh, "regime": mr.get(f"{k}_regime"),
                     "detail": _text((_text(mr.get(f"{k}_detail")) or "").split("，")[0])}
@@ -401,8 +412,9 @@ def _risks(r: dict) -> dict:
     }
 
 
-def build(ticker: str, date: str, result, rank: Optional[dict] = None) -> dict:
-    """一只票某天的扫描结果 → 各板块。`result` 不是对象 ⇒ `ticker_not_scanned`。`rank` = `rank_of(那天全部结果, ticker)`。"""
+def build(ticker: str, date: str, result, rank: Optional[dict] = None, prev=None, prev_date: Optional[str] = None) -> dict:
+    """一只票某天的扫描结果 → 各板块。`result` 不是对象 ⇒ `ticker_not_scanned`。`rank` = `rank_of(那天全部结果, ticker)`。
+    `prev` / `prev_date`（v0.45.771）：这只票上一次有记录的扫描结果与日期，只给「做市商与大额成交」板块做隔日对比；没有 ⇒ 那部分写明做不了。"""
     base = {"available": False, "ticker": ticker, "date": date, "rules": public_rules()}
     opt = OC.day_view(result)
     if opt is None:
@@ -412,5 +424,8 @@ def build(ticker: str, date: str, result, rank: Optional[dict] = None) -> dict:
     return base | {"available": True, "reason": None, "reason_zh": None,
                    "summary": _summary(result, opt) | {"rank": rank or {"rank": None, "of": None}},
                    "risks": _risks(result), "catalysts": cat, "options": optx, "macro": _macro(result),
+                   "positioning": {"prev_date": prev_date if isinstance(prev, dict) else None,
+                                   "dealer": OC.dealer_view(result, prev),
+                                   "big": OC.big_trades(result, prev, date, prev_date)},
                    "levels": _levels(result, opt, cat, optx), "dimensions": _dimensions(result), "agents": _agents(result),
                    "pipeline": _pipeline(result), "side_effects": _side_effects(result)}

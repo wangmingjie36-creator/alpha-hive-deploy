@@ -386,11 +386,13 @@ class TestFrontend:
         txt = self.PAGE.read_text(encoding="utf-8")
         d = DR.build("NVDA", D3, _res(), {"rank": 1, "of": 2})
         fn = {n: b for n, b in re.findall(r"\nfunction (\w+)\(d\) \{\n(.*?)\n\}\n", txt, re.S)}
-        assert set(fn) == {"summary", "risks", "catalysts", "options", "macro", "levels", "swarm"}
+        assert set(fn) == {"summary", "risks", "catalysts", "options", "positioning", "macro", "levels", "swarm"}
         checks = [("summary", "s", d["summary"]), ("summary", "rs", d["summary"]["resonance"]), ("summary", "rk", d["summary"]["rank"]),
                   ("catalysts", "c", d["catalysts"]), ("options", "r", d["options"]["read"]), ("options", "g", d["options"]["gex"]),
                   ("macro", "m", d["macro"]), ("macro", "sc", d["macro"]["sector"]), ("levels", "s", d["levels"]),
-                  ("levels", "im", d["levels"]["implied"]), ("risks", "r", d["risks"]), ("risks", "ins", d["risks"]["insider"])]
+                  ("levels", "im", d["levels"]["implied"]), ("risks", "r", d["risks"]), ("risks", "ins", d["risks"]["insider"]),
+                  ("positioning", "p", d["positioning"]), ("positioning", "dl", d["positioning"]["dealer"]),
+                  ("positioning", "bg", d["positioning"]["big"]), ("positioning", "fo", d["positioning"]["big"]["follow"])]
         for name, var, obj in checks:
             used = set(re.findall(rf"(?<![\w.]){var}\.(\w+)", fn[name])) - {"length", "map", "filter", "join", "slice", "split"}
             assert used and used <= set(obj), (name, var, used - set(obj))

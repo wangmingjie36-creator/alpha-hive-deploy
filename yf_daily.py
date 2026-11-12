@@ -46,6 +46,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import price_metrics
 
+try:
+    from hive_logger import get_logger
+    _log = get_logger("yf_daily")
+except Exception:  # pragma: no cover - 叶子模块降级
+    import logging
+    _log = logging.getLogger("alpha_hive.yf_daily")
+
 #: 公司行动空行的事件列（H1 那组 + 资本利得）
 EVENT_COLUMNS: Tuple[str, ...] = ("Dividends", "Stock Splits", "Capital Gains")
 
@@ -101,7 +108,9 @@ _stats: Dict[str, Any] = {}
 
 def _zero() -> Dict[str, Any]:
     return {"calls": 0, "frames": 0, "dropped": 0, "first_row": 0, "last_row": 0, "last_row_pending": 0, "middle": 0,
-            "calendar_unavailable": 0, "uninspectable": 0, "items_total": 0, "items": [], "by_source": {}}
+            "calendar_unavailable": 0, "uninspectable": 0, "items_total": 0, "items": [], "by_source": {},
+            # v0.45.773：download 返回里混进了没请求的票（并发串数据）——几次、共几只外来票、前 20 条明细
+            "identity_mismatch": 0, "identity_foreign": 0, "identity_items": []}
 
 
 _stats.update(_zero())
@@ -201,7 +210,11 @@ def download(yf_module, *args, source: str, **request) -> Tuple[Any, Dict[str, b
     if not _is_frame(raw):
         _count_uninspectable()
         return raw, {}
-    return _strip_download(source, raw, tickers, _is_daily(request))
+    raw, absent, emptied = _enforce_identity(source, raw, tickers)    # v0.45.773：返回里混进了没请求的票 ⇒ 丢掉、计数（见 _enforce_identity）
+    if emptied:
+        return raw, absent
+    out, flags = _strip_download(source, raw, tickers, _is_daily(request))
+    return out, ({**flags, **absent} if absent else flags)
 
 
 # ── 内部 ────────────────────────────────────────────────────────────────────
@@ -279,6 +292,63 @@ def _strip_download(source: str, raw, tickers, daily: bool):
     return _drop_action_columns(out, price_level), flags
 
 
+def _requested_symbols(tickers) -> List[str]:
+    """请求里的票（大写；yfinance 自己按逗号 / 空格拆字符串、并把票名转大写）。认不出（None / 不可迭代）⇒ 空列表。"""
+    try:
+        names = [tickers] if isinstance(tickers, str) else list(tickers or [])
+    except TypeError:
+        return []
+    out: List[str] = []
+    for n in names:
+        out.extend(str(n).replace(",", " ").split())
+    return [s.upper() for s in out]
+
+
+def _enforce_identity(source: str, raw, tickers):
+    """返回里混进了**没请求的票** ⇒ 丢掉那些列、计数、把请求了却没拿到的票标成「缺了」（v0.45.773）。
+
+    成因（根因修复在 `yf_gate`，这里是第二层 + 观测点）：yfinance 的 `download` 用模块级全局字典攒结果，并发调用互相串数据——
+    请求 VZ 拿到 SOXX 的帧。串了的帧是**完整的别家数据**，长度、列、新鲜度全部合格，下游无从分辨；此前只有
+    `market_intelligence._get_ma` 一处校验，`supply_chain`（每次扫描 150 次）把别家的 5 日涨跌当成自己的一路写进评分。
+    装了串行锁后这里应恒为 0；非 0 = 锁被绕过（闸门没装 / 直调了没被补丁的引用）或 yfinance 的行为变了，要红（`alert_manager`）。
+
+    只在两层列（票 × 价格）的帧上判：单层列的单票帧没有票名可对。校验的是「多出来的」而不是「缺的」——
+    多票请求里个别票取失败时 yfinance 仍给一列全空的占位，不算串；真串数据一定带着别人的列。
+    返回 `(帧, {请求了却不在返回里的票: True}, 是否已清空)`；没发现串数据时 `(原帧, {}, False)`，正常路径不动帧。"""
+    cols = raw.columns
+    if getattr(cols, "nlevels", 1) != 2:
+        return raw, {}, False
+    price_level = _price_level(cols)
+    asked = _requested_symbols(tickers)
+    if price_level is None or not asked:
+        return raw, {}, False
+    tick_level = 1 - price_level
+    got = {str(x).upper() for x in cols.get_level_values(tick_level)}
+    foreign = got - set(asked)
+    if not foreign:
+        return raw, {}, False
+    absent = {s: True for s in dict.fromkeys(asked) if s not in got}
+    _record_identity(source, asked, got, foreign)
+    keep = [c for c in cols if str(c[tick_level]).upper() not in foreign]
+    if not keep:
+        return raw.iloc[0:0, 0:0], absent, True
+    out = raw.loc[:, keep]
+    out.columns = out.columns.remove_unused_levels()
+    return out, absent, False
+
+
+def _record_identity(source: str, asked: Sequence[str], got, foreign) -> None:
+    with _lock:
+        _stats["identity_mismatch"] += 1
+        _stats["identity_foreign"] += len(foreign)
+        by = _by(source)
+        by["identity_mismatch"] = by.get("identity_mismatch", 0) + 1
+        if len(_stats["identity_items"]) < _MAX_ITEMS:
+            _stats["identity_items"].append({"source": source, "asked": sorted(set(asked))[:5], "got": sorted(got)[:5]})
+    _log.warning("yfinance 请求 %s 却返回了 %s 的数据 —— 丢掉没请求的票（source=%s）",
+                 ",".join(sorted(set(asked))[:5]), ",".join(sorted(got)[:5]), source)
+
+
 def _price_level(cols) -> Optional[int]:
     for i in range(getattr(cols, "nlevels", 1)):
         if "Close" in set(cols.get_level_values(i)):
@@ -338,6 +408,7 @@ def stats() -> Dict[str, Any]:
     ``uninspectable`` = 返回的不是 DataFrame / 认不出的多层列；``by_source`` 逐调用点。"""
     with _lock:
         return {**_stats, "items": [dict(x) for x in _stats["items"]],
+                "identity_items": [dict(x) for x in _stats["identity_items"]],
                 "by_source": {k: dict(v) for k, v in _stats["by_source"].items()}}
 
 

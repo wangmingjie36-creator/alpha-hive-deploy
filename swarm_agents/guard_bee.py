@@ -19,7 +19,7 @@ FOMC_VOTE_WINDOW_DAYS = 3
 #: 守卫：成功路径字面量里值为字面量 `True` 的键与本表双向一致（`tests/test_yf_daily.py::TestGuardGenerationMarks`）。
 GENERATION_MARKS = ("macro_event_rows_checked", "macro_quote_dates_checked", "macro_fred_vintage_checked",
                     "macro_fred_series_isolated", "yf_daily_download_checked", "macro_bars_dated_checked",
-                    "macro_single_path_checked", "macro_scan_snapshot_checked")
+                    "macro_single_path_checked", "macro_scan_snapshot_checked", "yf_download_serialized")
 
 
 def _with_generation_marks(result: Dict) -> Dict:
@@ -304,6 +304,10 @@ class GuardBeeSentinel(BeeAgent):
                     # v0.45.674 世代印记（同上，无条件写）：宏观读本轮扫描的快照（`_scan_macro()`，扫描开头取一次），不再自己调
                     # `get_macro_context()`——此前 4 个并行线程各取一次、首批几只标的可能拿到不同的一份。判别器 `ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.674"]`
                     "macro_scan_snapshot_checked": True,
+                    # v0.45.773 世代印记（同上，无条件写）：`yf.download` 串行化——此前并发调用互相串数据，Guard 的政体均线（`_get_ma`）与 Scout 的供应链
+                    # 5 日涨跌（`get_supply_chain_signals`）可能拿到别家的帧。评分冻结期的真 bug 例外（`ic_rerun_readiness._FREEZE_EXCEPTIONS`）。
+                    # 判别器 `ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.773"]`
+                    "yf_download_serialized": True,
                     # ③ 时间周期
                     "cycle_context": cycle_ctx,
                     # ④ 市场政体

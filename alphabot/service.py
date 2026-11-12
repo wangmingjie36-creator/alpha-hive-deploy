@@ -699,7 +699,15 @@ class AlphaBotService:
         raw, err = self._scan_raw_day(target)
         if err:
             return unavailable(err, date=target, dates=dates[-90:])
-        return clean_json(DR.build(t, target, raw.get(t), DR.rank_of(raw, t)) | {"dates": dates[-90:], "tickers": sorted(raw)})
+        # 这只票上一次有记录的扫描（v0.45.771，给「做市商与大额成交」做隔日对比）：往回最多找 3 个扫描日，找不到就不比
+        cur, rank, names = raw.get(t), DR.rank_of(raw, t), sorted(raw)
+        prev, prev_date = None, None
+        for d in reversed(dates[: dates.index(target)][-3:]):
+            praw, perr = self._scan_raw_day(d)
+            if not perr and isinstance(praw.get(t), dict):
+                prev, prev_date = praw[t], d
+                break
+        return clean_json(DR.build(t, target, cur, rank, prev=prev, prev_date=prev_date) | {"dates": dates[-90:], "tickers": names})
 
     # ── 接货 · 筛选（v0.45.722，只读）：我们手工做过的那张表——30 只标的里「卖 put 好不好做」的客观事实
     WHEEL_CLOSES_TTL = 6 * 3600.0

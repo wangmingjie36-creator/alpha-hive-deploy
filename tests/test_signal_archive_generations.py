@@ -460,6 +460,13 @@ _CENSUS_SITES = {
     ),
     # v0.45.441 起 Scout 传 `peer_census=False`：不读板（登记成空表，翻回 True 就会多出读点而红）
     ("scout_bee", "_analyze", "get_real_crowding_metrics"): ((), {}, None),
+    # v0.45.770：Oracle 的弃权登记（不是条目）——只有一个字符串：它这一轮判期权链取不到的标签（样本链 / 抛异常）。
+    # 外部数据源的状态，不是系统输出 ⇒ 同 `details.pc_ratio` 一类登成原始观测、不成边；它让 Bear 不再自取、options_bear 留 0。
+    ("bear_bee", "_assess_options_puts", "get_abstention"): (
+        ("OracleBeeEcho",),
+        {"abstention": "raw: Oracle 判的期权链可用性标签（unavailable / fallback）——外部数据源状态，Bear 照抄进 data_quality.options"},
+        None,
+    ),
 }
 
 _BOARD_FUNCS = frozenset({"get_real_crowding_metrics", "get_bullish_agents_count",
@@ -822,7 +829,8 @@ class TestPeerReadEdgesMatchCode:
             for f, spec in fields.items():
                 assert (isinstance(spec, tuple) or (isinstance(spec, str) and spec)), (key, f, spec)
                 if isinstance(spec, str):
-                    assert f in ("discovery", "agent_id") or f.startswith("details."), (
+                    # `abstention`（v0.45.770）：弃权登记只有一个标签字符串，没有分 / 方向可读
+                    assert f in ("discovery", "agent_id", "abstention") or f.startswith("details."), (
                         f"{key}.{f}：方向 / 分是系统输出，不能登成「不成边」")
 
     def test_table_peer_edges_equal_code_reads(self):

@@ -123,6 +123,9 @@ class PheromoneBoard:
         # 供 `get_agent_entry` / `BeeAgent._read_peer` 做「上游蜂这轮说了什么」的定点
         # 查询。理由见 `get_agent_entry` docstring。天然有界：|标的| × |蜂|。
         self._latest_by_agent: Dict[tuple, PheromoneEntry] = {}
+        # v0.45.770：(ticker, agent_id) → (弃权理由, 登记时刻)。**不是条目**：不进 _entries / 排行榜 / 共振 / 普查 / 快照 / 落库，
+        # 只有 `get_abstention` 定点读得到。见 `record_abstention`。天然有界：|标的| × |蜂|。
+        self._abstentions: Dict[tuple, tuple] = {}
         # publish 快路径的索引（只是加速结构，作废即走全量扫描；见 `_survives_publish` 上方说明）
         self._idx_list = None                    # 索引对应的 _entries 列表对象；None = 作废
         self._idx_len = 0
@@ -492,6 +495,35 @@ class PheromoneBoard:
                 return None
             return e
 
+    def record_abstention(self, ticker: str, agent_id: str, reason) -> None:
+        """登记（`reason` 为字符串）或清除（`reason` 为 None）某只蜂这一轮对某只标的的弃权结论（v0.45.770）。
+
+        为什么不发一条条目：弃权的蜂没有分、没有方向（v0.45.765 起 OracleBee 期权链取不到就弃权、**不上板**）——
+        板上一条中性条目会被 Guard 普查当成一张同伴票、进共振 / 快照。可下游有一件事需要知道「它试过、取不到」：
+        BearBee 读不到 Oracle 条目时会自己再取一次同一条期权链，而 Oracle 刚判过这条链这一轮取不到 ⇒ 那次多半是白取
+        （用户 11-11：沿用 Oracle 的结论，不再重试）。所以登在条目之外，只有 `get_abstention` 定点读得到。
+
+        生命周期由登记方负责：OracleBee 每次开跑先清掉自己对这只票的旧结论（同一只票重试时整套蜂重跑），弃权时再登；
+        另外照条目的墙钟过期（`ENTRY_MAX_AGE_S`）兜底——判的同样是「这是不是上一轮的陈货」。
+        """
+        with self._lock:
+            if reason is None:
+                self._abstentions.pop((ticker, agent_id), None)
+            else:
+                self._abstentions[(ticker, agent_id)] = (str(reason), datetime.now())
+
+    def get_abstention(self, ticker: str, agent_id: str):
+        """某只蜂这一轮对某只标的登记的弃权理由（字符串）；没登记 / 已清除 / 过期 ⇒ None。见 `record_abstention`。"""
+        with self._lock:
+            rec = self._abstentions.get((ticker, agent_id))
+            if rec is None:
+                return None
+            reason, at = rec
+            if (datetime.now() - at).total_seconds() >= self._AGENT_ENTRY_MAX_AGE_S:
+                del self._abstentions[(ticker, agent_id)]
+                return None
+            return reason
+
     def _live_agent_entries(self, ticker: str) -> List[PheromoneEntry]:
         """该标的本轮「每只蜂最新一条」的存活视图，**不受 MAX_ENTRIES 溢出淘汰影响**。
 
@@ -801,5 +833,6 @@ class PheromoneBoard:
         with self._lock:
             self._entries.clear()
             self._latest_by_agent.clear()
+            self._abstentions.clear()            # v0.45.770：弃权登记同属「这块板上这一轮的东西」
             self._idx_list = None
             self._idx_groups, self._idx_ids = {}, set()

@@ -172,7 +172,22 @@ class BearBeeContrarian(BeeAgent):
 
             options_data = {"pc_ratio": pc_ratio, "iv_rank": iv_rank, "iv_skew": iv_skew, "gex": gex}
 
+        # v0.45.770：Oracle 这一轮判过期权链取不到（弃权、不上板，见 v0.45.765）⇒ 照抄它的判定，**不再自己重取同一条链**
+        # （用户 11-11「沿用」）。代价：丢掉「隔几秒再取碰巧成功」的机会；收益：链整天取不到的日子每只票少一次白取（约 2~47 秒）。
+        # 标签照抄同 v0.45.639 的读板路径（OptionsAgent 抛异常 / 返回空 ⇒ fallback，样本链早退 ⇒ unavailable）；options_bear 留 0、不产 options_data
+        # ——与 765~769 自取也取不到时的结果相同。只认 Oracle 弃权分支写的两个取值：替身板 / 认不出的值 ⇒ 当没登记，照旧自取。
+        # Oracle 每次开跑先清掉旧结论 ⇒ 本轮 Oracle 在别处出错（没走到弃权分支）时这里读不到，照旧自取。
+        _oracle_abstain = None
         if not options_data:
+            _get_abstention = getattr(self.board, "get_abstention", None)
+            if callable(_get_abstention):
+                _v = _get_abstention(ticker, "OracleBeeEcho")
+                if _v in ("unavailable", "fallback"):
+                    _oracle_abstain = _v
+        if _oracle_abstain is not None:
+            data_sources["options"] = "fallback" if _oracle_abstain == "fallback" else "unavailable"
+            _log.info("BearBeeContrarian %s：Oracle 本轮判期权链取不到（%s），照抄、不再自取", ticker, _oracle_abstain)
+        elif not options_data:
             try:
                 from options_analyzer import OptionsAgent
                 opt = OptionsAgent()
@@ -198,6 +213,7 @@ class BearBeeContrarian(BeeAgent):
             # v0.45.767：补 OSError，与 Oracle 取同一个 OptionsAgent 时的 except 元组一致（URLError / SSLError / socket 超时都是它的子类，
             # 不是 ConnectionError）。v0.45.765 起 Oracle 吞下这类异常后弃权、不上板 ⇒ Bear 必走到这里、多半再撞同一个异常；
             # 此前它从这里漏出去 ⇒ `Bear.analyze`（AGENT_ERRORS）与扫描的逐蜂 except 都不接 ⇒ 整只票这一轮丢掉、按重试重跑全部蜂。
+            # v0.45.770 起 Oracle 弃权时 Bear 照抄、不走到这里；仍走到这里的是 Oracle 在别处出错 / 不在 / 替身板，元组照留。
             # 守卫 tests/test_bear_options_dq_from_oracle.py::TestBearSurvivesWhatOracleSurvives
             except (ImportError, ConnectionError, ValueError, KeyError, TypeError, OSError, AttributeError) as e:
                 _log.warning("BearBeeContrarian options fallback failed for %s: %s", ticker, e)
@@ -690,6 +706,9 @@ class BearBeeContrarian(BeeAgent):
                     # v0.45.639：世代边界印记（字面量 True）——data_sources.options 自本版起照抄 Oracle 板上的判定。
                     # 读者 = `ic_rerun_readiness._marker_bear_options_dq_from_oracle`；此前的 details 没有这个键。勿改成 False / 勿删
                     "options_dq_from_oracle": True,
+                    # v0.45.770：世代边界印记（字面量 True）——Oracle 弃权时照抄它的判定、不再自取期权链。
+                    # 读者 = `ic_rerun_readiness._marker_bear_no_refetch_on_oracle_abstain`；此前的 details 没有这个键。勿改成 False / 勿删
+                    "options_no_refetch_on_oracle_abstain": True,
                 },
                 extras={
                     "llm_thesis": llm_thesis,

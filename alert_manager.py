@@ -330,7 +330,8 @@ class AlertAnalyzer:
         self._check_stock_fetch_legacy(status)   # v0.45.639：P1 行情改走 cache.py 旧回落
         self._check_event_rows(status)           # v0.45.645：P2 日线公司行动空行不在首行（某个交易日的价格缺了）
         self._check_yf_daily_event_rows(status)  # v0.45.652：P2 其他日线读者（yf_daily 入口）最近一场缺了 / 中间的公司行动空行
-        self._check_price_nonfinite(status)      # v0.45.653：P2 行情三字段算出非有限数、已改缺失（真 K 线缺收盘 / 缺量）
+        self._check_yf_download_integrity(status)  # v0.45.773：P2 yf.download 串数据被丢弃 / 等串行锁超时
+        self._check_price_nonfinite(status)     # v0.45.653：P2 行情三字段算出非有限数、已改缺失（真 K 线缺收盘 / 缺量）
         self._check_macro_snapshot_calls(status)  # v0.45.674：P2 一轮扫描的宏观快照没有恰好取一次（读者绕过快照自己取）
         self._check_cboe_content_encoding(status)  # v0.45.690：P2 CBOE 响应的 Content-Encoding 不认识（那几只期权链没取到）
 
@@ -1555,6 +1556,59 @@ class AlertAnalyzer:
             },
             ["yf_daily", "data_quality"]
         ))
+
+    def _check_yf_download_integrity(self, status: Dict) -> None:
+        """`yf.download` 的两个完整性信号（v0.45.773；`yf_daily.stats()` / `yf_gate.stats()` 经 scan_timing 进来）。
+
+        ① `yf_daily.identity_mismatch`：download 返回里混进了没请求的票（请求 VZ 拿到 SOXX）。根因是 yfinance 的 `download` 把结果攒在
+        模块级全局字典、并发调用互相串数据（10-13 起每个扫描日都有，10-29 一天 25 次、429×0）；修复是 `yf_gate` 给 `yf.download` 套的
+        串行锁，所以**装了锁之后这里应恒为 0**——非 0 = 锁被绕过（闸门没装 / 拿着补丁前的 `download` 引用直调）或 yfinance 行为变了。
+        被串的帧已被入口丢弃（那一路当取不到），没有进评分；但丢了就是缺了一路数据，要看是谁。
+        ② `yfinance.download_lock_timeouts`：等串行锁超时（持锁的那次下载卡住了），那几次 download 被当成 yfinance 不可用。
+        计数缺失 ⇒ checks_skipped（别把「没统计」渲染成「没问题」）。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        counters = st.get("counters") or {}
+        yd = counters.get("yf_daily")
+        if not isinstance(yd, dict) or "identity_mismatch" not in yd:
+            self.checks_skipped.append("yf.download 身份校验（scan_timing 无 identity_mismatch 计数）")
+        else:
+            n = int(yd.get("identity_mismatch") or 0)
+            if n:
+                items = list(yd.get("identity_items") or [])
+                shown = "；".join(f"{x.get('source')} · 请求 {','.join(x.get('asked') or [])} 却返回 {','.join(x.get('got') or [])}"
+                                 for x in items[:10])
+                if n > min(len(items), 10):
+                    shown += f" 等共 {n} 次"
+                by = {k: int(v.get("identity_mismatch") or 0) for k, v in (yd.get("by_source") or {}).items()
+                      if isinstance(v, dict) and v.get("identity_mismatch")}
+                self.alerts.append(Alert(
+                    AlertLevel.MEDIUM,
+                    f"📊 【P2 中】yf.download 返回了没请求的票的数据 {n} 次（已丢弃，那几路当取不到）——串行锁没起作用",
+                    {
+                        "明细": shown,
+                        "按调用点": ", ".join(f"{k}×{v}" for k, v in sorted(by.items())) or "（无）",
+                        "影响": "被串的帧已在 yf_daily 入口丢弃（请求的票标成缺了），没有拿别家数据冒充；但那几路（政体均线 / 供应链 5 日涨跌 / …）这一轮缺数据",
+                        "建议": "先看 scan_timing.counters.yfinance.download_serialized 是否为 0（0 ⇒ 闸门没装，download 没被串行）；"
+                                "非 0 ⇒ 有调用点拿着补丁前的 yfinance.download 引用；再不然是 yfinance 升级改了内部实现（tests/test_yf_download_serialized.py 的正对照会先红）",
+                    },
+                    ["yf_daily", "data_quality"]
+                ))
+        yg = counters.get("yfinance")
+        if isinstance(yg, dict) and int(yg.get("download_lock_timeouts") or 0):
+            k = int(yg["download_lock_timeouts"])
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】等 yf.download 串行锁超时 {k} 次（持锁的那次下载卡住了；超时的 download 已当 yfinance 不可用）",
+                {
+                    "累计排队": f"{float(yg.get('download_lock_wait_s') or 0):.0f}s / 串行 {int(yg.get('download_serialized') or 0)} 次",
+                    "影响": "超时的那几次 download 抛 YFDownloadLockTimeout（⊂ YFRateLimited ⊂ ConnectionError），调用方走降级——那几路这一轮缺数据",
+                    "建议": "看日志里「等 yf.download 串行锁超过」之前最早的一条 yfinance 请求是哪个调用点、卡了多久（网络挂死 / 代理断流）；"
+                            "超时上限 yf_gate.DOWNLOAD_LOCK_TIMEOUT",
+                },
+                ["yfinance", "data_quality"]
+            ))
 
     def _check_price_nonfinite(self, status: Dict) -> None:
         """动量 / 量比算出非有限数、已改成缺失（v0.45.653；`price_metrics.nonfinite_stats()` 经 scan_timing 进来）。

@@ -80,17 +80,14 @@ class TestBearCopiesOracleEndToEnd:
         """真实 Oracle 写板 → 真实 Bear 读板：两只蜂对同一份期权数据的标签一致。
         变红的变异：Bear 改回「读到条目就记 real」。
 
-        v0.45.765 起两种降级情形 Oracle 弃权、不上板 ⇒ Bear 走自己的回落分支（同一个 OptionsAgent 桩）——
-        不变式收成「Oracle 没取到链，Bear 绝不报 real」：样本链早退两边都是 unavailable；OptionsAgent 抛异常时
-        Oracle 记 fallback、Bear 的回落分支照它既有的写法记 unavailable（同为降级，Queen 两个都不算 real 源）。"""
+        v0.45.765 起两种降级情形 Oracle 弃权、不上板；765~769 Bear 因此走自己的回落分支，抛异常那种记成 unavailable（与 Oracle 的
+        fallback 不一致）。v0.45.770 起 Oracle 把弃权判定登在板上（不是条目），Bear 照抄 ⇒ 三种情形逐个相等。
+        变红的变异：Bear 不读弃权登记（抛异常那种回到 unavailable）。"""
         stub, expect = _SCENARIOS[case]
         out, board = _run_oracle(monkeypatch, stub())
         bear = _bear_options_label(board, monkeypatch)
         assert out["data_quality"]["options"] == expect
-        if expect == "real":
-            assert bear == "real"
-        else:
-            assert bear == "unavailable", bear
+        assert bear == expect, bear
 
     def test_bear_confidence_counts_real_only_when_oracle_had_the_chain(self, monkeypatch):
         """Bear confidence 的「real 源数」项随之如实：Oracle 降级那天少数一个 real。"""
@@ -114,10 +111,13 @@ class TestBearSurvivesWhatOracleSurvives:
         __import__("ssl").SSLError("EOF occurred in violation of protocol"),      # 09-24 全网直连失败那天的真实报错
     ], ids=lambda e: type(e).__name__)
     def test_oracle_abstains_and_bear_still_answers(self, monkeypatch, exc):
+        """v0.45.770 起同一块板上 Bear 照抄 Oracle 的弃权判定、不再自取 ⇒ 元组要在「没有 Oracle 结论」的板上测
+        （Oracle 在别处出错 / 不在本行 / 替身板时 Bear 照旧自取，同一个 OptionsAgent 桩仍在 monkeypatch 里）。"""
         out, board = _run_oracle(monkeypatch, _options_stub(None, raise_exc=exc))
         assert out.get("error") and out["data_quality"]["options"] == "fallback", "前提：Oracle 吞下了它并弃权"
-        assert BearBeeContrarian(board)._read_peer(TICKER, "OracleBeeEcho") is None, "前提：Bear 读不到条目、必走回落"
-        assert _bear_options_label(board, monkeypatch) == "unavailable"
+        assert BearBeeContrarian(board)._read_peer(TICKER, "OracleBeeEcho") is None, "前提：弃权不上板"
+        assert _bear_options_label(board, monkeypatch) == "fallback", "同一块板：照抄 Oracle（v0.45.770）"
+        assert _bear_options_label(PheromoneBoard(), monkeypatch) == "unavailable", "没有 Oracle 结论的板：自取也得吞得下"
 
 
 class TestBearWhenBoardCannotTell:

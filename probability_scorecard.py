@@ -301,7 +301,7 @@ _ML_ESTIMATOR_GENERATIONS = [
      "【v0.45.674】（同日零代价，归属不变——仍是同一代，只换标签）：一轮扫描的宏观快照只取一次、注入 Guard（此前 4 个并行线程各取一次，"
      "首批标的可能拿到不同的一份）⇒ 只在几次并发取数结果不同的日子改首批标的的宏观票；10-19 起旧代码扫描日全部 Guard 行都是同一份 ⇒ "
      "等价判据全部成立（见 `ic_rerun_readiness` 同版条目）。同样**没有重放 Δprobability**。"),
-    ("2026-11-09", "v0.45.750+v0.45.765+v0.45.768",
+    ("2026-11-09", "v0.45.750+v0.45.765+v0.45.768+v0.45.770",
      "CodeExecutorAgent 退役。`_prepare_ml_input` 一行没动；`final_score` 这个特征的**上游定义**变了：方向投票少一票"
      "（离线按记录方向重算 09-10 → 11-06 共 1200 行，拿掉这一票 `rule_direction` 约 13.9% 改变）、Guard 普查少一只同伴、"
      "兜底分支的 data_quality 不再进 data_real_pct。**没有重放 Δprobability**。详见 `ic_rerun_readiness` 同版条目。"
@@ -312,7 +312,15 @@ _ML_ESTIMATOR_GENERATIONS = [
      " `agent_agreement`——训练端（`predictions.agent_directions`）与服务端读同一个键，两端一起变；11-09 起生产 60 行"
      "没有出错的蜂 ⇒ 逐位不变。训练集里 11-09 之前的历史行仍是旧口径（`.swarm_results` 归档 2721 份里 469 份有出错蜂，"
      "多为已退役的 CodeExecutorAgent），"
-     "`predictions` 表不改写。不进 `final_score`，没有 `_COHORT_HISTORY` 条目。"),
+     "`predictions` 表不改写。不进 `final_score`，没有 `_COHORT_HISTORY` 条目。"
+     "【v0.45.770】（同日零代价，同上只换标签）：OracleBee 弃权时 BearBee 照抄它的判定、不再自取期权链 ⇒ 只在 Oracle 弃权行"
+     "改 Bear 分（经 bear_cap 进 `final_score`）与 Bear 的期权标签；弃权是 765 代码才有的分支，11-09 / 11-10 一行都没有 ⇒ 等价判据全部成立"
+     "（见 `ic_rerun_readiness` 同版条目）。**没有重放 Δprobability**。"),
+    ("2026-11-12", "v0.45.773",
+     "`yf.download` 串行化（评分冻结期真 bug 例外，用户 2026-11-12 点头）。`_prepare_ml_input` 一行没动；`final_score` 这个特征的**上游输入**变了："
+     "此前并发调用互相串数据，Guard 市场政体均线与 Scout 供应链 5 日涨跌可能拿到别家的帧（后者无身份校验，静默进 Scout 分）。"
+     "只在「那一路恰好被串」的输入上改 `final_score`；11-11 一行（COST 供应链信号 positive → neutral，Scout 分约 -0.3）。"
+     "训练集里 10-13 ~ 11-11 的历史行仍是旧口径，`predictions` 表不改写。**没有重放 Δprobability**。详见 `ic_rerun_readiness` 同版条目。"),
 ]
 
 

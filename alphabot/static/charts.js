@@ -29,6 +29,23 @@ function theme() {
   registered = true;
 }
 
+// 悬停提示（v0.45.771）。本站 CSP 不许行内样式属性，而 ECharts 自带的提示排版（缺省 formatter / `valueFormatter` / `p.marker`）
+// 整段都是行内样式——被拦掉后色点没了、名字和数值挤在一起，每悬停一次控制台报一串错。所以：
+//   · 提示一律自己排版，只用样式类（`tip-dot` / `tip-name`）；
+//   · 色点的颜色放在 `data-c` 里，由 `mount` 里的观察器经 CSSOM 涂上（脚本设 style 属性不受 CSP 的行内样式限制）。
+const dot = (color) => `<i class="tip-dot" data-c="${typeof color === "string" ? color.replace(/[^#\w(),.% -]/g, "") : ""}"></i>`;
+const tipValue = (p) => (Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value);
+// 轴触发的提示：第一行是横轴上的位置，其后每个系列一行（色点 + 名字 + 数值）。
+// 没起名字的系列 ECharts 给的缺省名是 "series" + 空字符 + 序号，不是给人看的 ⇒ 不显示
+const axisTip = (fmt) => (ps) => `${ps[0].axisValueLabel ?? ps[0].name ?? ""}`
+  + ps.map((p) => `<br>${dot(p.color)}${p.seriesName && !/^series\0?\d+$/.test(p.seriesName) ? `<span class="tip-name">${p.seriesName}</span>` : ""}<b>${fmt(tipValue(p))}</b>`).join("");
+function paintDots(el) {
+  const paint = () => el.querySelectorAll("i.tip-dot[data-c]").forEach((n) => { if (n.dataset.c) n.style.backgroundColor = n.dataset.c; });
+  const obs = new MutationObserver(paint);
+  obs.observe(el, { childList: true, subtree: true });
+  return obs;
+}
+
 const live = new Set();
 let resizeBound = false;
 export function mount(el, option) {
@@ -36,6 +53,7 @@ export function mount(el, option) {
   const chart = window.echarts.init(el, "alphabot", { renderer: "canvas" });
   chart.setOption(option);
   declutterHLabels(chart);
+  chart.__tipObs = paintDots(el);     // 图释放时一起断开（见 disposeAll / release）
   live.add(chart);
   if (!resizeBound) {
     resizeBound = true;
@@ -89,9 +107,9 @@ export function declutterHLabels(chart) {
   }
   if (changed) chart.setOption({ series: series.map((s) => (s.markLine ? { markLine: { data: s.markLine.data } } : {})) });
 }
-export function disposeAll() { live.forEach((ch) => ch.dispose()); live.clear(); }
+export function disposeAll() { live.forEach((ch) => { ch.__tipObs?.disconnect(); ch.dispose(); }); live.clear(); }
 // 单张图换掉时释放（同页重建子视图时用）：不释放的话旧实例留在 live 里，每次窗口缩放都要白白 resize 一个已脱离页面的图
-export function release(ch) { if (ch) { live.delete(ch); try { ch.dispose(); } catch { /* 已释放 */ } } }
+export function release(ch) { if (ch) { live.delete(ch); ch.__tipObs?.disconnect(); try { ch.dispose(); } catch { /* 已释放 */ } } }
 
 function hline(value, label, color, type = "dashed", width = 1, position = "insideEndTop") {
   return { yAxis: value, lineStyle: { color, type, width },
@@ -202,7 +220,7 @@ export function lines(el, { x, series, xType = "category", yFmt = (v) => num(v),
   return mount(el, {
     grid: { left: 60, right: el.clientWidth < 520 ? 56 : 96, top: series.length > 1 ? 36 : 20, bottom: 40 },
     legend: series.length > 1 ? { top: 0, left: 0 } : undefined,
-    tooltip: { trigger: "axis", valueFormatter: (v) => (isNum(v) ? yFmt(v) : "—"), axisPointer: { lineStyle: { color: c.lineStrong } } },
+    tooltip: { trigger: "axis", formatter: axisTip((v) => (isNum(v) ? yFmt(v) : "—")), axisPointer: { lineStyle: { color: c.lineStrong } } },
     xAxis: xType === "category" ? { type: "category", data: x, boundaryGap: false }
       : { type: "value", min: "dataMin", max: "dataMax", axisLabel: { formatter: xFmt || ((v) => num(v, 0)) } },
     yAxis: { type: "value", scale: yMin === undefined && yMax === undefined, min: yMin, max: yMax, axisLabel: { formatter: yFmt } },
@@ -349,7 +367,7 @@ export function columns(el, { x, values, fmt = usdShort, diverging = true, color
   const c = C();
   return mount(el, {
     grid: { left: 72, right: 20, top: 16, bottom: 56 },
-    tooltip: { trigger: "axis", valueFormatter: (v) => fmt(v), axisPointer: { type: "shadow", shadowStyle: { color: c.sunk, opacity: 0.6 } } },
+    tooltip: { trigger: "axis", formatter: axisTip((v) => fmt(v)), axisPointer: { type: "shadow", shadowStyle: { color: c.sunk, opacity: 0.6 } } },
     xAxis: { type: "category", data: x, axisLabel: { rotate: x.length > 8 ? 35 : 0 } },
     yAxis: { type: "value", axisLabel: { formatter: (v) => fmt(v) } },
     series: [{ type: "bar", data: values, barMaxWidth: 28,
@@ -414,7 +432,7 @@ export function payoff(el, { grid, series, spot, band }) {
     grid: { left: 64, right: 28, top: 34, bottom: 40 },
     legend: { top: 0, left: 0 },
     tooltip: { trigger: "axis", formatter: (ps) => `到期价 <b>${num(ps[0].value[0])}</b><br>` +
-      ps.map((p) => `${p.marker}${p.seriesName}：${money(p.value[1])} / 股`).join("<br>") },
+      ps.map((p) => `${dot(p.color)}${p.seriesName}：${money(p.value[1])} / 股`).join("<br>") },
     xAxis: { type: "value", min: "dataMin", max: "dataMax", axisLabel: { formatter: (v) => num(v, 0) } },
     yAxis: { type: "value", axisLabel: { formatter: (v) => money(v, 0) } },
     series: series.map((s, i) => ({

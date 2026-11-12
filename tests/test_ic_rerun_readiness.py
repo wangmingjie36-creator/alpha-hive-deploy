@@ -570,8 +570,12 @@ class TestEtaIsSelfConsistent:
 
     def test_partly_due_unripe_week_is_pipeline_not_overdue(self, db):
         """逾期按该周**最晚**一条的 T+7 判：周一那条到期没熟、周五那条还没到期 ⇒ 仍在路上，不报逾期。"""
+        import datetime as dt
         from is_trading_day import add_trading_days
-        w2 = add_trading_days(_date(_after_cohort(2)), 0)
+        # 世代第 2 周的第一个交易日。⚠️ 不能直接用「起点 + 2 周」：起点若不是周一（v0.45.773 的起点 11-12 是周四），
+        # 那一天已是该周中段，下面「周一那条 / 周五那条」的算术就错位了。周以起点所在的 ISO 周的周一为 0 号（同 `_daily_rows`）。
+        b0 = _date(_COHORT_START)
+        w2 = add_trading_days(b0 - dt.timedelta(days=b0.weekday()) + dt.timedelta(weeks=2), 0)
         day = add_trading_days(w2, 8)                 # 周一那条的 T+7 已过一天，周五那条还没到
         res = rr.assess(db_path=db(_daily_rows(_COHORT_START, day, stale_weeks={2})), today=day.isoformat())
         assert res["weeks_overdue"] == 0, "按最早一条判逾期了：回填晚一天的周会被提前踢出预计"

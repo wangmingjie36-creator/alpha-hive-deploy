@@ -1242,6 +1242,43 @@ _COHORT_HISTORY = [
      "Oracle 分与方向变；Bear 的 options_bear 读 Oracle 方向与板上条目）⇒ 这几个探索信号的分信号世代起点 09-28 → 11-09（下游由依赖边带出）。"
      "维度 IC 协议 H1（buzz_v1 观测层重算）结构上碰不到；H2 是描述项。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 11-09 一代扩标签。"
      "未改：出错蜂的 5.0 占位分仍会进 `signal_archive` 的 `agent.*.score`（`_agent_score` 不看 error，存量行为，另议）。"),
+    ("2026-11-09", "v0.45.770",
+     "BearBee 在 OracleBee 弃权时照抄它的判定、不再自己重取期权链（用户 2026-11-11「沿用」）。v0.45.765 起 Oracle 期权链取不到就弃权、"
+     "不上板 ⇒ 765~769 的 Bear 读不到条目、自己再取一次同一条链（多半白取，每只票约 2~47 秒）。现在 Oracle 把弃权判定登在板上"
+     "（`PheromoneBoard.record_abstention`，不是条目：不进普查 / 共振 / 快照），Bear 读到就记 Oracle 的标签（样本链 ⇒ unavailable，"
+     "抛异常 / 返回空 ⇒ fallback）、options_bear 留 0、不产 options_data。**改了什么**：只在「Oracle 本行弃权」的输入上——Bear 的 "
+     "`data_quality.options`（旧：自取得 options_api / unavailable）⇒ Queen 的 data_real_pct 与 Bear confidence；"
+     "options_bear（旧：自取碰巧成功时可到 6~8）⇒ bear 分 ⇒ bear_strength ⇒ bear_cap ⇒ final_score。"
+     "**并进 11-09、作废 0 条**：弃权分支是 765 代码才有的，生产首次跑到 765+ 代码是 11-11 的扫描；11-09 / 11-10 两天 60 行是旧代码、"
+     "Oracle 不会弃权 ⇒ 本版改动是空操作（全史 `.swarm_results_*.json` 里 Oracle 弃权 0 行，只读实测）。"
+     "等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.770\"]`（Bear 出错 / 不在本行；或 Oracle 没弃权；或 Oracle 弃权为 unavailable 且 Bear "
+     "记 unavailable、options_bear 为 0——旧代码自取也取不到，输出相同）。印记 `_BOUNDARY_MARKERS[\"v0.45.770\"]`：Bear "
+     "`details.options_no_refetch_on_oracle_abstain` 字面量 True（成功路径 + 日报合成回退），实时行。11-11 那一轮跑的是 768 代码：Oracle 以 "
+     "fallback 弃权的行**一律**判不等价（新代码记 fallback，旧代码自取失败记 unavailable / 返回空不记——两者同在 PROXY_SOURCES、final_score 逐位相同，但标签不同），以 unavailable 弃权而 Bear 自取取到了的行也不等价 ⇒ 判别器报 boundary_too_early，须用户点头登 `_FREEZE_EXCEPTIONS` 或把日期挪到首跑日，"
+     "**不许**改判据让它变绿。`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.770\"]` = `bear.options_bear`（765 已把它的起点挪到 11-09，"
+     "本条不再挪）。维度 IC 协议 H1 / H2 都不读 Bear ⇒ 不截断。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 11-09 一代扩标签。"),
+    ("2026-11-12", "v0.45.773",
+     "`yf.download` 串行化（真 bug 例外，用户 2026-11-12「开工并登记例外」）。yfinance 1.2.0 的 `download()` 把结果攒在模块级全局 "
+     "`shared._DFS`、每次调用开头重建它；扫描的 30 只票并行线程各发约 9 次单票 download ⇒ 互相清空 / 写进对方的字典 ⇒ 请求 A 拿到 B 的"
+     "完整帧（长度、列、新鲜度都合格，下游无从分辨）。与限流无关（10-29 一天 25 次、429×0；原归因「限流返回缓存帧」不对）。离线复现：2 个并发线程 "
+     "32.5% 串数据、8 个 62.9%，加进程级锁后 480 次 0 次。修复在 `yf_gate`：`yf.download` 套串行锁（只锁 download，`Ticker.history` 仍并行）；"
+     "`yf_daily.download` 对所有调用点统一做身份校验（丢外来票、计数、告警）。"
+     "**改了什么（直接输入）**：① Guard 市场政体均线 `_get_ma`（→ `market_regime` → Guard 分；旧代码只有这一处有身份校验，串了就当「个股政体数据不可用」，"
+     "编排器日志可数的 10-13 起 9 个扫描日共 60 次：10-29 25、10-30 15、其余 1~5）；② Scout 供应链 5 日涨跌 `get_supply_chain_signals`（→ supply_chain_signal "
+     "positive / negative / neutral → Scout 分 7 / 3 / 5 的 0.15 权重；**没有任何身份校验**，串了就静默把别家的涨跌当自己的一路）。"
+     "②的实测（只读，同一标的在不同票里的 5 日涨跌应当相同，不同 = 串了）：每个扫描日 120 格（30 票 × 4 个同行）里不一致的格数 "
+     "10-29 59/111、10-30 9、11-09 7、11-11 9、10-13 4、10-27 2、11-06 2、10-28 与 11-05 为 0；按「同一标的取众数」重算信号翻转的票 "
+     "10-29 3 只、10-30 2 只、11-09 0 只、11-11 1 只（COST positive → neutral，Scout 分约 -0.3）。目标票自己那一路被串无法这样检出，下限。"
+     "**为什么不能并进 11-09、作废 0 条**：11-11 就有 1 只票的供应链信号被串翻了；旧代码在未来任何一个扫描日都可能再串 ⇒ 证明不了旧代码输出与新代码逐项相同。"
+     "**代价**：当前世代 11-09 起已攒 0/25 个不重叠周（0 条已回填样本）⇒ 重置后仍是 0/25；起点 11-09 → 11-12，闸门到期日 ≈2027-05-05 "
+     "待 11-12 首跑后 Step 11 重算（世代内没有扫描产出时不给预计日；估计至多顺延约 1 个不重叠周，待验证）。这是此刻做的理由：越晚做、重置越贵。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.773\"]`：Guard `details.yf_download_serialized` 字面量 True（成功与出错路径都写，`guard_bee.GENERATION_MARKS`），"
+     "实时行。预期判定：新代码首跑（11-12 的扫描）之前 `no_evidence_yet`；首跑后 `matches`。未赶上 11-12 的扫描（production_sync 在 15:00 前没快进）"
+     "⇒ 判别器报 boundary_too_early，追加更正条目把日期顺延到首跑日（`_CORRECTS`），**不许**改判据让它变绿。"
+     "没有登 `_BOUNDARY_EQUIVALENCE`：旧代码输出与新代码相同与否取决于当天有没有串数据，无法在事后从归档判。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.773\"]` = `agent.GuardBeeSentinel.*` + `agent.ScoutBeeNova.*`（下游经 `_scope_closure` 带出）。"
+     "维度 IC 协议 H1（buzz_v1 观测层重算）不读这两处 ⇒ 不截断；H2 是描述项。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 11-12 新开一代（final_score 是 ML 特征）。"
+     "已写进归档的受污染行（10-13 ~ 11-11）不改写——边界划在修复日，旧世代的样本不与新世代池化。"),
 ]
 
 # ── 评分冻结期（v0.45.757，用户 2026-11-10 定） ────────────────────────────
@@ -1273,7 +1310,17 @@ _SCORING_FREEZE = {
 #   kind      —— "data_bug"（当前数据是错的）或 "user_override"（用户明知是设计改动也要现在做）
 #   why       —— 为什么不能等到解冻
 #   cost      —— 重置代价，形如「X/25 周 → 0/25，到期日 A → B」
-_FREEZE_EXCEPTIONS: Dict[str, Dict[str, str]] = {}
+_FREEZE_EXCEPTIONS: Dict[str, Dict[str, str]] = {
+    "v0.45.773": {
+        "approved": "2026-11-12 用户：「开工并登记例外」（回答「按这个方案开工，并按真 bug 例外登记吗？」）",
+        "kind": "data_bug",
+        "why": ("`yf.download` 并发调用互相串数据：请求 A 拿到 B 的完整帧，Guard 市场政体均线与 Scout 供应链 5 日涨跌（后者没有任何身份校验）"
+                "据此给分——当前写进归档的数据是错的（11-11 有 1 只票的供应链信号被串翻，11-09 / 11-11 各 7 / 9 格不一致），不是可推迟的设计选择；"
+                "每个旧代码扫描日都可能再串，不能等到解冻。"),
+        "cost": ("0/25 周 → 0/25（当前世代 11-09 起尚未攒到一个不重叠周），世代起点 11-09 → 11-12；闸门到期日 ≈2027-05-05 → 待 11-12 首跑后 "
+                 "Step 11 重算（起点后移 3 天，估计至多顺延约 1 个不重叠周，待验证）"),
+    },
+}
 
 _FREEZE_EXCEPTION_KINDS = frozenset({"data_bug", "user_override"})
 
@@ -2192,6 +2239,19 @@ def _marker_guard_scan_snapshot(d: dict) -> bool:
     return _guard_row_has_scan_snapshot_marker(d) and not _is_backfill_row(d)
 
 
+def _guard_row_has_download_serialized_marker(d: dict) -> bool:
+    """这行是 v0.45.773 之后的代码写的吗：GuardBeeSentinel `details.yf_download_serialized` 为字面量 `True`
+    （成功与出错路径都写，`guard_bee.GENERATION_MARKS`）。只认 `is True`：此前的记录没有这个键。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    return isinstance(det, dict) and det.get("yf_download_serialized") is True
+
+
+def _marker_guard_download_serialized(d: dict) -> bool:
+    """v0.45.773 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383）。"""
+    return _guard_row_has_download_serialized_marker(d) and not _is_backfill_row(d)
+
+
 #: Guard 归档宏观细节（键名 `vix_term_structure`）里**出自宏观快照**的键——同一份快照 ⇒ 这些值逐个相同。
 #: 不含 `vix_term` / `vix_term_source`（另一次独立取数，有自己的锁与文件缓存）、`fomc_days`（日历）。
 _MACRO_SNAPSHOT_SIG_KEYS = ("macro_as_of_mode", "macro_ref_date", "macro_data_source", "vix_source", "vix_feed",
@@ -2272,6 +2332,51 @@ def _equiv_oracle_no_fallback_score(d: dict) -> bool:
     return isinstance(st, dict) and st.get("data_source") != "fallback"
 
 
+#: OracleBee 弃权结果 `error` 的前缀 = `swarm_agents.oracle_bee.OPTIONS_UNAVAILABLE_ERROR`（error 全文是「前缀：标签」）。
+#: 抄成字面量而不 import：本模块不依赖 swarm_agents（`tests/test_ic_rerun_fg_budget.py::tree` 只拷少数文件）；
+#: 两边相等由 `tests/test_bear_reuses_oracle_abstain.py` 钉住。
+_ORACLE_ABSTAIN_ERROR_PREFIX = "期权链不可用，OracleBee 弃权（odds 维缺席，不拿兜底分进综合分）"
+
+
+def _bear_row_has_no_refetch_marker(d: dict) -> bool:
+    """这行是 v0.45.770 之后的代码写的吗：BearBee `details.options_no_refetch_on_oracle_abstain` 为字面量 `True`
+    （成功路径与日报合成回退都写；Bear 走异常兜底时 details 是 `{}`，等价判据接住）。只认 `is True`：此前的记录没有这个键。"""
+    b = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("BearBeeContrarian")
+    det = b.get("details") if isinstance(b, dict) else None
+    return isinstance(det, dict) and det.get("options_no_refetch_on_oracle_abstain") is True
+
+
+def _marker_bear_no_refetch_on_oracle_abstain(d: dict) -> bool:
+    """v0.45.770 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.639）。"""
+    return _bear_row_has_no_refetch_marker(d) and not _is_backfill_row(d)
+
+
+def _equiv_bear_no_refetch_on_oracle_abstain(d: dict) -> bool:
+    """v0.45.770 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？逐行判，不需要冻结证据。
+
+    本版只在一种输入上改输出：OracleBee 本行弃权（`agent_details.OracleBeeEcho.error` 以弃权前缀开头）⇒ 旧代码 Bear 自取期权链，
+    新代码照抄 Oracle 的标签、options_bear 留 0。
+      · Bear 带 `error` / 不在本行 ⇒ 两版同一条异常路径 ⇒ True（认 error，不认「没有 details」——v0.45.567 的教训）；
+      · Oracle 不在本行 / 没带弃权 error（取到链上板，或在别处出错 ⇒ 不登弃权、Bear 两版都自取）⇒ True。765 之前的代码不会弃权 ⇒ 全真；
+      · Oracle 弃权为 unavailable（样本链）且 Bear 记 `data_quality.options == "unavailable"`、`details.options_bear == 0`
+        ⇒ 旧代码自取也没取到（样本链 / 抛异常两条路都记 unavailable、不产信号、不产 options_data）⇒ 与照抄相同 ⇒ True；
+      · 其余（Oracle 弃权为 fallback ⇒ 新代码记 fallback、旧代码不会；Bear 自取取到了；缺字段证不出）⇒ False（举证责任在放宽一侧）。"""
+    sr = d.get("swarm_results") or {}
+    ad = sr.get("agent_details") or {}
+    b = ad.get("BearBeeContrarian")
+    if not isinstance(b, dict) or b.get("error"):
+        return True
+    o = ad.get("OracleBeeEcho")
+    err = o.get("error") if isinstance(o, dict) else None
+    if not (isinstance(err, str) and err.startswith(_ORACLE_ABSTAIN_ERROR_PREFIX)):
+        return True
+    if err != f"{_ORACLE_ABSTAIN_ERROR_PREFIX}：unavailable":
+        return False
+    bear_dq = ((sr.get("data_quality") or {}).get("BearBeeContrarian") or {}).get("options")
+    ob = (b.get("details") or {}).get("options_bear")
+    return bear_dq == "unavailable" and isinstance(ob, (int, float)) and not isinstance(ob, bool) and ob == 0
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -2329,6 +2434,10 @@ _BOUNDARY_MARKERS = {
                   _marker_code_executor_retired),
     "v0.45.765": ("agent_details.OracleBeeEcho.details.fallback_not_scored is True（实时行）",
                   _marker_oracle_fallback_not_scored),
+    "v0.45.770": ("agent_details.BearBeeContrarian.details.options_no_refetch_on_oracle_abstain is True（实时行）",
+                  _marker_bear_no_refetch_on_oracle_abstain),
+    "v0.45.773": ("agent_details.GuardBeeSentinel.details.yf_download_serialized is True（实时行）",
+                  _marker_guard_download_serialized),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -2383,6 +2492,9 @@ _BOUNDARY_EQUIVALENCE = {
     "v0.45.765": ("Oracle 出错 / 不在本行，或 data_quality.options 是 real 且异常流不是兜底（unusual_flow_status.data_source != "
                   "\"fallback\"）⇒ 本版改动是空操作",
                   _equiv_oracle_no_fallback_score, _oracle_row_has_no_fallback_marker),
+    "v0.45.770": ("Bear 出错 / 不在本行，或 Oracle 没弃权，或 Oracle 弃权为 unavailable 且 Bear 记 unavailable、options_bear 为 0"
+                  "（旧代码自取也没取到）⇒ 本版改动是空操作",
+                  _equiv_bear_no_refetch_on_oracle_abstain, _bear_row_has_no_refetch_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。

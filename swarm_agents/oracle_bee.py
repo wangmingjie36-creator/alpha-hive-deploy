@@ -357,6 +357,9 @@ class OracleBeeEcho(BeeAgent):
         return "neutral"
 
     def analyze(self, ticker: str) -> Dict:
+        # v0.45.770：先清掉本蜂对这只票的旧弃权结论（同一只票重试时整套蜂重跑；本轮若在别处出错、没走到弃权分支，
+        # BearBee 不该读到上一次的「取不到」）。放在一切早退之前。弃权分支在下面重新登记。
+        self._record_abstention(ticker, None)
         _err = self._validate_ticker(ticker)
         if _err:
             return _mark_gex_out_of_score(_err)
@@ -442,14 +445,15 @@ class OracleBeeEcho(BeeAgent):
             # 此前照样出分：options_score 停在 5.0（深度调整也取不到 ⇒ 0），再混异常流 ⇒ 一个由兜底常量撑起来的 odds 分进综合分，
             # 方向票也照投（分数带 / 异常流）。现在走 error 形状：蜂后 `_prepare_dimension_data` 把它当缺席、其余四维重新归一；
             # 方向投票、`agent_votes`（日报快照）都按 error 键排除。**不上信息素板**——板上一条中性条目会被 Guard 普查当成一张同伴票，
-            # BearBee 读不到 Oracle 条目时自己取一次 OptionsAgent（同 Oracle 抛异常那天的既有路径）。不调 LLM（没有期权数据可解读）。
+            # BearBee 读不到 Oracle 条目时照抄下面登记的弃权判定、不再自取（v0.45.770；765~769 是自己再取一次 OptionsAgent）。
+            # 不调 LLM（没有期权数据可解读）。
             # details 照留（取数状态、OptionsAgent 自己的 data_quality、覆盖率闸要读的字段都在里面）。
             # v0.45.767：discovery 以 "Error: " 开头，同 `utils.make_error_result`——Alpha Bot 深度页（`deep_report._failed`）
             # 只认这个前缀判「出错的蜂」（老记录没有 error 键），765 原文不带前缀 ⇒ 那页把弃权的 Oracle 数成一张中性票、不标出错。
             # 结尾的 `| $价` 留着：网站缺 Scout 价时从 Oracle discovery 里抠 `$数字`（`dashboard_renderer` 价格回退 1）
             if not _opts_ok:
                 _log.warning("OracleBeeEcho %s：期权链不可用（%s），本蜂弃权、odds 维缺席", ticker, _options_dq)
-                return AgentResult(
+                _abstain = AgentResult(
                     score=5.0, direction="neutral", confidence=0.0,   # 占位，同 make_error_result；error 键在 ⇒ 下游都不读它
                     discovery=f"Error: 期权链不可用（{_options_dq}），本蜂弃权、不打分 | ${current_price:.1f}",
                     source="OracleBeeEcho", dimension="odds",
@@ -457,6 +461,12 @@ class OracleBeeEcho(BeeAgent):
                     details=_details,
                     error=f"{OPTIONS_UNAVAILABLE_ERROR}：{_options_dq}",
                 ).to_dict()
+                # v0.45.770：把「这一轮取不到」登在板上（不是条目）⇒ BearBee 照抄这个判定、不再自己重取同一条链（用户 11-11「沿用」）。
+                # **结果造好之后、返回之前才登**：造结果时抛异常（例如现价是 None ⇒ `:.1f` 抛 TypeError）会落进下面的 AGENT_ERRORS
+                # 变成普通出错结果、error 不带弃权前缀——此时板上不能留着弃权判定，否则 Bear 照抄、不自取，
+                # 而等价判据按「Oracle 没弃权」判等价（770 二次检查复现）。守卫 tests/test_bear_reuses_oracle_abstain.py
+                self._record_abstention(ticker, _options_dq)
+                return _abstain
 
             # ---- 融合评分（期权 + 异常流）----
             # v0.45.315：原「无 Polymarket」分支原样保留为唯一路径（生产自 v0.45.30

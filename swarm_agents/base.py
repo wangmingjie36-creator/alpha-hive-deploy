@@ -54,6 +54,17 @@ class BeeAgent(ABC):
         )
         self.board.publish(entry)
 
+    def _record_abstention(self, ticker: str, reason) -> None:
+        """登记（字符串）/ 清除（None）本蜂这一轮对 ticker 的弃权结论——不是条目，见 `PheromoneBoard.record_abstention`（v0.45.770）。
+
+        同 `_publish`：写板的机制放在基类，蜂模块里只调它（`tests/test_signal_archive_generations.py` 的读板扫描把
+        `self.board.<非 publish 属性>` 一律当读点）。板替身 / 旧版 board 没有这个方法 ⇒ 什么都不登：读的一侧
+        （BearBee）同样读不到 ⇒ 照旧自己取一次，与本版之前的行为相同。
+        """
+        _rec = getattr(self.board, "record_abstention", None)
+        if callable(_rec):
+            _rec(ticker, self.__class__.__name__, reason)
+
     # 一轮里 Phase-1 有 5~6 只蜂发布，`get_top_signals` 的默认 n=5 会截断。
     # 取 24 条（80 条上限的 30%）足够覆盖单标的一轮的全部条目。
     _PEER_LOOKUP_N = 24

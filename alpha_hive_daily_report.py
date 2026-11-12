@@ -2345,7 +2345,9 @@ class AlphaHiveDailyReporter:
                         "discovery": "",
                         # v0.45.639 世代印记（与 BearBee 成功路径同一字面量）：本回退不贴 data_quality 标签，
                         # 但缺键会被判别器读成旧代码 ⇒ 同 v0.45.559 的 Buzz 印记，无条件写
-                        "details": {"options_dq_from_oracle": True},
+                        # v0.45.770 印记同理（与 BearBee 成功路径同一字面量）
+                        "details": {"options_dq_from_oracle": True,
+                                    "options_no_refetch_on_oracle_abstain": True},
                     },
                 },
                 "data_real_pct": 0,
