@@ -90,7 +90,7 @@ def _two_overlapping_downloads(yf):
 @pytest.fixture
 def _hold_ticker(monkeypatch):
     monkeypatch.setattr("yfinance.multi.Ticker", _HoldTicker)
-    monkeypatch.setattr(_HoldTicker, "HOLD", {"AAA": 0.4})
+    monkeypatch.setattr(_HoldTicker, "HOLD", {"AAA": 0.6})      # 比 B 的启动延迟（0.15s）长得多：负载高时线程启动抖动也不会让 B 晚于 A 结束
     monkeypatch.setattr(_HoldTicker, "JITTER", 0.0)
     return _HoldTicker
 
@@ -111,7 +111,7 @@ class TestDownloadSerialized:
         finally:
             # 没锁时 A 的工作线程在 A 返回之后（0.4s）还会往 yfinance 的全局字典里写——不等它写完，会污染下一条测试的 download
             # （这正是竞态的另一副面孔：迟到的写入落进下一次调用的字典）。有锁时调用返回前所有工作线程都已写完，没有这个问题。
-            time.sleep(0.5)
+            time.sleep(0.7)
         assert not errs, errs
         assert b == {"BBB"}
         assert a == {"BBB"}, f"A 请求的是 AAA，实际拿到 {a}——竞态没复现（yfinance 升级改了内部实现？）"
@@ -213,6 +213,65 @@ class TestDownloadSerialized:
         assert isinstance(res.get("r"), yf_gate.YFRateLimited), res
         assert calls["n"] == 0, "冷却期内仍然发出了请求"
         assert not yf_gate._download_lock.locked()
+
+    def test_double_wrapped_call_does_not_deadlock_on_itself(self):
+        """v0.45.774（二次检查探针）：`install()` 并发 / 重复安装留下双层包装时，同一线程会连取两次锁——不可重入就等满上限再超时。"""
+        calls = {"n": 0}
+        inner = yf_gate._gated(lambda: calls.__setitem__("n", calls["n"] + 1) or "ok", "yf.download", serialize=True)
+        outer = yf_gate._gated(inner, "yf.download", serialize=True)
+        t0 = time.monotonic()
+        assert outer() == "ok"
+        assert time.monotonic() - t0 < 1.0 and calls["n"] == 1
+        assert yf_gate.stats()["download_lock_timeouts"] == 0
+        assert not yf_gate._download_lock.locked() and yf_gate._dl_holder_since == 0.0
+
+    def test_nested_call_in_same_thread_is_reentrant(self):
+        calls = []
+
+        def _outer_fn():
+            calls.append("outer")
+            return inner()                              # 被包装的函数里又调了一个 serialize 包装
+
+        inner = yf_gate._gated(lambda: calls.append("inner") or "ok", "yf.download", serialize=True)
+        outer = yf_gate._gated(_outer_fn, "yf.download", serialize=True)
+        assert outer() == "ok" and calls == ["outer", "inner"]
+        assert not yf_gate._download_lock.locked()
+
+    def test_stuck_holder_fails_fast_after_the_first_waiter_times_out(self, monkeypatch):
+        """v0.45.774（二次检查探针）：持锁者卡死时，只有第一个等锁的线程等满上限；之后到的调用立刻失败，
+        不是每个线程每次调用都再等满（30 线程 × 9 次 × 300s 会把一次挂死放大成整轮扫描超时）。"""
+        monkeypatch.setattr(yf_gate, "DOWNLOAD_LOCK_TIMEOUT", 0.2)
+        stuck = threading.Event()
+        release = threading.Event()
+
+        def _holder():
+            yf_gate._acquire_download_lock("holder")
+            stuck.set()
+            release.wait(10)
+            yf_gate._release_download_lock()
+
+        th = threading.Thread(target=_holder)
+        th.start()
+        assert stuck.wait(2)
+        fn = yf_gate._gated(lambda: "ok", "yf.download", serialize=True)
+        try:
+            t0 = time.monotonic()
+            with pytest.raises(yf_gate.YFDownloadLockTimeout):
+                fn()
+            first = time.monotonic() - t0
+            assert first >= 0.18, "第一个等锁的线程应该等满上限"
+            time.sleep(0.05)                           # 持锁时长已超过上限
+            t1 = time.monotonic()
+            for _ in range(5):
+                with pytest.raises(yf_gate.YFDownloadLockTimeout):
+                    fn()
+            assert time.monotonic() - t1 < 0.15, "后来者仍在逐个等满上限——卡死会被放大成整轮超时"
+            assert yf_gate.stats()["download_lock_timeouts"] == 6
+        finally:
+            release.set()
+            th.join(5)
+        assert fn() == "ok", "持锁者放开后恢复正常（不能留下永久的快速失败状态）"
+        assert yf_gate._dl_holder_since == 0.0
 
     def test_non_download_calls_stay_parallel(self):
         """只锁 download：普通被闸门包装的调用（Ticker.history 等）仍可并行——两个线程必须同时在 fn 里。"""

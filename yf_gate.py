@@ -91,8 +91,13 @@ _orig_ticker = None
 # 只锁 `download`：`Ticker.history` 等是每个 Ticker 自己的状态，没有这个问题，仍然并行。
 # 等锁有上限：持锁者卡死（网络挂死）时，排队的线程到点抛 `YFDownloadLockTimeout`（⊂ `YFRateLimited` ⊂ `ConnectionError`，
 # 调用方当「该源不可用」走降级），不会把整轮扫描一起挂住。
+# 持锁者卡死时只让**第一个**等锁的线程等满上限：之后到的调用看到「锁已被持有超过上限」就直接失败（v0.45.774）——否则每个线程每次调用都再等满
+# 300s，30 个线程 × 约 9 次 ≈ 每线程 45 分钟，把「一次下载挂死」放大成整轮扫描超时（探针实测：上限 1s 时 8 线程 × 3 次 = 3.0s，线性累加）。
+# 同一线程重入不再取锁（v0.45.774）：`install()` 并发/重复安装留下双层包装、或被包装的函数里又调了 `yf.download`，不会自己等自己。
 DOWNLOAD_LOCK_TIMEOUT = 300.0
 _download_lock = threading.Lock()
+_dl_holder_since = 0.0          # 当前持锁者拿到锁的 time.monotonic()；0 = 没人持锁
+_dl_tls = threading.local()     # .depth：本线程是否已持有 _download_lock（重入保护）
 
 # 观测计数：供覆盖率闸/日志核对「跑完了吗」，永远不看退出标语。
 # ok / consecutive_429 / last_ok_at 只给日志与排查用（v0.45.675：谁、第几次连续 429、距上次成功多久），不参与任何决定。
@@ -236,18 +241,39 @@ def _note_ok() -> None:
         _last_ok_at = time.monotonic()
 
 
+def _lock_timed_out(what: str, waited: float, failfast: bool) -> "YFDownloadLockTimeout":
+    """记一次等锁超时（计数 + 日志）并返回要抛的异常。日志只在前 3 次打 ERROR，其后降为 debug（持锁者卡死时会有几百次）。"""
+    with _lock:
+        _stats["download_lock_timeouts"] += 1
+        n = _stats["download_lock_timeouts"]
+    if n <= 3:
+        _log.error("等 yf.download 串行锁%s（%s）——持锁的那次下载卡住了，本次当作 yfinance 不可用",
+                   "：锁已被持有超过上限、直接失败" if failfast else f"超过 {DOWNLOAD_LOCK_TIMEOUT:.0f}s", what)
+    else:
+        _log.debug("等 yf.download 串行锁超时（第 %d 次，%s）", n, what)
+    return YFDownloadLockTimeout(f"等待 yf.download 串行锁超过 {DOWNLOAD_LOCK_TIMEOUT:.0f}s（{what}）")
+
+
 def _acquire_download_lock(what: str) -> None:
-    """拿 `yf.download` 串行锁（见模块顶部说明）。超时 ⇒ 抛 `YFDownloadLockTimeout`，不执行下载。"""
+    """拿 `yf.download` 串行锁（见模块顶部说明）。超时 / 锁已被卡住的持锁者占了超过上限 ⇒ 抛 `YFDownloadLockTimeout`，不执行下载。"""
+    global _dl_holder_since
+    since = _dl_holder_since
+    if since and time.monotonic() - since > DOWNLOAD_LOCK_TIMEOUT and _download_lock.locked():
+        raise _lock_timed_out(what, 0.0, failfast=True)       # 持锁者已卡死：别让每个后来者再等满上限
     t0 = time.monotonic()
     got = _download_lock.acquire(timeout=DOWNLOAD_LOCK_TIMEOUT)
     waited = time.monotonic() - t0
     with _lock:
         _stats["download_lock_wait_s"] = round(_stats["download_lock_wait_s"] + waited, 3)
-        if not got:
-            _stats["download_lock_timeouts"] += 1
     if not got:
-        _log.error("等 yf.download 串行锁超过 %.0fs（%s）——持锁的那次下载卡住了，本次当作 yfinance 不可用", DOWNLOAD_LOCK_TIMEOUT, what)
-        raise YFDownloadLockTimeout(f"等待 yf.download 串行锁超过 {DOWNLOAD_LOCK_TIMEOUT:.0f}s（{what}）")
+        raise _lock_timed_out(what, waited, failfast=False)
+    _dl_holder_since = time.monotonic()
+
+
+def _release_download_lock() -> None:
+    global _dl_holder_since
+    _dl_holder_since = 0.0
+    _download_lock.release()
 
 
 def _gated(fn, what: str, serialize: bool = False):
@@ -260,10 +286,13 @@ def _gated(fn, what: str, serialize: bool = False):
         rl = _limiter()
         if rl is not None and not rl.acquire(timeout=60.0):
             raise YFRateLimited(f"等待 yfinance 限流令牌超过 60s（{what}）")
-        if serialize:
+        held_here = False
+        if serialize and not getattr(_dl_tls, "depth", 0):       # 本线程已持锁（重入 / 双层包装）⇒ 不再取，免得自己等自己
             _acquire_download_lock(what)
+            _dl_tls.depth = 1
+            held_here = True
         try:
-            if serialize:
+            if held_here:
                 _check_cooldown()                # 排队期间别的线程可能已踩了 429：冷却中就别再发
                 with _lock:
                     _stats["download_serialized"] += 1
@@ -279,8 +308,9 @@ def _gated(fn, what: str, serialize: bool = False):
             _note_ok()
             return result
         finally:
-            if serialize:
-                _download_lock.release()
+            if held_here:
+                _dl_tls.depth = 0
+                _release_download_lock()
     wrapper.__name__ = getattr(fn, "__name__", what)
     wrapper.__doc__ = getattr(fn, "__doc__", None)
     wrapper._yf_gate_wrapped = True          # 供测试断言「确实接上了」
