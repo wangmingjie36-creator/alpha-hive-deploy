@@ -64,7 +64,7 @@ class TestCounters:
         def _imp(name, *a, **k):
             if name in ("yf_gate", "twelve_data", "cboe_options", "options_analyzer", "portfolio_greeks",
                         "paper_portfolio", "ledger_io", "data_pipeline", "straddle_strangle_shadow", "sell_put_wheel",
-                        "swarm_agents", "price_metrics", "yf_daily", "fred_macro"):
+                        "swarm_agents", "price_metrics", "yf_daily", "fred_macro", "market_intelligence"):
                 raise ImportError(name)
             return real_import(name, *a, **k)
 
@@ -86,7 +86,8 @@ class TestCounters:
                      "event_rows": None,           # v0.45.645 日线公司行动空行
                      "yf_daily": None,             # v0.45.652 其他日线读者（唯一入口）的公司行动空行
                      "price_nonfinite": None,      # v0.45.653 行情三字段非有限改缺失
-                     "macro_context": None}        # v0.45.674 一轮扫描调 get_macro_context 的次数
+                     "macro_context": None,        # v0.45.674 一轮扫描调 get_macro_context 的次数
+                     "shared_quotes": None}        # v0.45.775 全局标的一轮只取一次的共享表统计
         line = st.summary_line({"phases": {}, "counters": c})
         assert "—" in line and "0次" not in line
 
@@ -203,7 +204,7 @@ class TestWrite:
                                       "cboe_chain", "gex_view", "cboe_raw", "options_snapshot", "hv_gap",
                                       "portfolio_greeks", "paper_portfolio", "ledger_io", "history_fill",
                                       "strangle_shadow", "stock_fetch_legacy", "event_rows",
-                                      "yf_daily", "price_nonfinite", "macro_context", "sell_put"}
+                                      "yf_daily", "price_nonfinite", "macro_context", "sell_put", "shared_quotes"}
         assert d["extra"] == {"note": "x"}
         assert not (tmp_path / "t.json.tmp").exists(), "临时文件必须被 os.replace 掉"
 

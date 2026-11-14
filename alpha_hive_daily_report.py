@@ -623,6 +623,13 @@ class AlphaHiveDailyReporter:
         # 网站读 report["macro_context"]。此前三个读者各调 `get_macro_context()`：4 个并行线程各取一次（首批标的可能拿到不同的一份），
         # 网站在 30 分钟缓存过期后又取一次（10-22 网站 VIX 16.7、日报与 Guard 19.0）。
         prefetched["macro"] = self._scan_macro = _fetch_scan_macro()
+        # v0.45.775：政体的宏观层（^GSPC）与板块层（SOXX）、供应链的四个同行对所有标的是同一份数据 ⇒ 开一轮的共享表，一轮只取一次
+        # （此前 30 只票各取一遍，每一次都是一次「这一层缺」的机会；11-13 ABBV 的 SOXX 层就是这么缺的）。并行阶段结束后 `end_scan_shared()`。
+        try:
+            import market_intelligence as _mi_shared
+            _mi_shared.begin_scan_shared()
+        except Exception as _e_sh:  # noqa: BLE001 —— 没开成 ⇒ 各标的照旧自己取（行为等于改动前），WARNING 说明
+            _log.warning("全局标的共享表没开成（各标的照旧自己取）: %s: %s", type(_e_sh).__name__, _e_sh)
         inject_prefetched(all_agents, prefetched)
         # v0.45.625：评分用的那份行情此刻取完（蜂读的就是它）。① 给历史字段回落统计拍快照——告警只按这一刻判
         # 「评分数据缺」，之后的重取不再冒充它；② 留给 ML 报告用同一份价格 / 动量，不在扫描末尾再联网一轮
@@ -1516,6 +1523,16 @@ class AlphaHiveDailyReporter:
                           len(pending_tickers), len(pending_tickers))
 
         _timing.record("parallel", time.monotonic() - _t_parallel)
+        try:
+            import market_intelligence as _mi_shared_end
+            _sh = _mi_shared_end.end_scan_shared()
+            if _sh and _sh.get("unfilled"):
+                _log.warning("全局标的共享表：有 %d 个键整轮没取到（所有标的都缺那一层）：%s", len(_sh["unfilled"]), " ".join(_sh["unfilled"]))
+            elif _sh:
+                _log.info("全局标的共享表：%d 个键、取 %d 次、命中 %d 次、失败重试 %d 次",
+                          _sh["keys"], _sh["fetches"], _sh["hits"], _sh["failed_attempts"])
+        except Exception as _e_she:  # noqa: BLE001 —— 收尾统计失败不影响报告
+            _log.warning("全局标的共享表收尾失败: %s: %s", type(_e_she).__name__, _e_she)
         self._attach_thesis_breaks(swarm_results)
         with _timing.timed("enrichment"):
             elapsed = self._post_scan_enrichment(ctx, swarm_results)

@@ -331,6 +331,7 @@ class AlertAnalyzer:
         self._check_event_rows(status)           # v0.45.645：P2 日线公司行动空行不在首行（某个交易日的价格缺了）
         self._check_yf_daily_event_rows(status)  # v0.45.652：P2 其他日线读者（yf_daily 入口）最近一场缺了 / 中间的公司行动空行
         self._check_yf_download_integrity(status)  # v0.45.773：P2 yf.download 串数据被丢弃 / 等串行锁超时
+        self._check_shared_quotes(status)        # v0.45.775：P2 全局标的（^GSPC / SOXX / 供应链同行）整轮没取到——全体标的都缺那一层
         self._check_price_nonfinite(status)     # v0.45.653：P2 行情三字段算出非有限数、已改缺失（真 K 线缺收盘 / 缺量）
         self._check_macro_snapshot_calls(status)  # v0.45.674：P2 一轮扫描的宏观快照没有恰好取一次（读者绕过快照自己取）
         self._check_cboe_content_encoding(status)  # v0.45.690：P2 CBOE 响应的 Content-Encoding 不认识（那几只期权链没取到）
@@ -1609,6 +1610,37 @@ class AlertAnalyzer:
                 },
                 ["yfinance", "data_quality"]
             ))
+
+    def _check_shared_quotes(self, status: Dict) -> None:
+        """全局标的「一轮只取一次」的共享表（v0.45.775；`market_intelligence.shared_stats()` 经 scan_timing 进来）。
+
+        `unfilled` 非空 = 有一个键（如 `("ma","SOXX",20,40)`）整轮没成功取到过：政体的宏观 / 板块层或供应链的某个同行**全体标的**都缺。
+        这比改动前更要紧——此前一次失败只缺一只票的一层（11-13 ABBV 的 SOXX），现在共享后同一个键整轮取不到就是 30 只票一起缺；而这类缺口
+        原本就没有任何告警（不在 day_health / Step 12 字段里）。只有「失败重试」但最终取到了：不报（已被后来的线程补上）。
+        没有 `shared_quotes` 计数（共享表没开成 / 老 scan_timing）⇒ checks_skipped。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        sq = (st.get("counters") or {}).get("shared_quotes")
+        if not isinstance(sq, dict):
+            self.checks_skipped.append("全局标的共享表检查（scan_timing 无 shared_quotes 计数）")
+            return
+        unfilled = list(sq.get("unfilled") or [])
+        if not unfilled:
+            return
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】全局标的整轮没取到 {len(unfilled)} 个键——所有标的都缺那一层（政体 / 供应链）",
+            {
+                "没取到的键": "；".join(unfilled),
+                "取数统计": f"取到 {int(sq.get('fetches') or 0)} 次、命中 {int(sq.get('hits') or 0)} 次、失败重试 {int(sq.get('failed_attempts') or 0)} 次、"
+                            f"放弃 {len(sq.get('gave_up') or [])} 个键（连续失败 {3} 次后本轮不再试）",
+                "影响": "键 `ma` = 政体层（^GSPC 宏观层 / SOXX 板块层）：该层按「数据不可用」记 neutral，不参与综合政体的投票；键 `sc` = 供应链同行：少这一个同行，"
+                        "供应链信号只用剩下的同行判（可能不到 2 个而判 neutral）。都不拿别家数据冒充",
+                "建议": "先看当时 yfinance / 网络（orchestrator 日志里的 `Failed download` / `HTTP Error 401`）；这一层事后可按当天收盘补取（见 memory alpha-hive-known-issues 11-11 条目）",
+            },
+            ["market_intelligence", "data_quality"]
+        ))
 
     def _check_price_nonfinite(self, status: Dict) -> None:
         """动量 / 量比算出非有限数、已改成缺失（v0.45.653；`price_metrics.nonfinite_stats()` 经 scan_timing 进来）。
