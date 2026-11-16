@@ -75,6 +75,8 @@ SOURCES: Dict[str, str] = {
     "alphabot_beta_long": "alphabot.beta_long._fetch_closes：对冲页「β 窗口对照」的 250 日 β 日线（只展示，按日期对齐）",
     "alphabot_price_minute": "alphabot.price_intraday._fetch：标的「价格」页的盘中 1 分钟 K 线（只展示，一次一个美东日）",
     "alphabot_price_ohlc": "alphabot.price_ohlc._fetch：标的「价格」页 K 线的开 / 高 / 低（只展示，按日期拼到 Twelve Data 日线上）",
+    "alphabot_thesis_tnx": "alphabot.thesis_auto._yf_history：深度页证伪条件「10 年期国债收益率」的 ^TNX 日线（只展示，只用最近一根）",
+    "alphabot_thesis_usdc": "alphabot.thesis_auto._yf_history：深度页证伪条件「USDC 脱钩」的 USDC-USD 小时线（只展示）",
     # ── Ticker.history()：带日期窗口、按日期用（v0.45.658 迁入；此前是「dated_window」例外）──
     "backtester_history": "backtester.Backtester._history：回测缓存未命中时的逐票取价",
     "outcomes": "outcomes_fetcher.OutcomesFetcher._fetch_remote：T+N 结果回填的逐日 OHLC",

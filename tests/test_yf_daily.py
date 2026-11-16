@@ -725,6 +725,8 @@ POLICY = {
     ("alphabot/wheel_prices.py", "_fetch"): "ignore",                              # 只展示的统计；缺最近一根只是少一天，按已有收盘算
     ("alphabot/price_intraday.py", "_fetch"): "ignore",                            # 1 分钟线、一次一个美东日；没收完的那根由 `price_intraday.drop_forming` 自己丢
     ("alphabot/price_ohlc.py", "_fetch"): "ignore",                                # 只给价格页 K 线拼开高低；只取主干（Twelve Data）有的日期，缺的那根退回无影线柱
+    ("alphabot/thesis_auto.py", "_fetch_tnx"): "ignore",                        # 深度页证伪条件：只看最近一根的日期与值，日期由 judge_yield_above 另判新旧
+    ("alphabot/thesis_auto.py", "_fetch_usdc"): "ignore",                       # 深度页证伪条件：USDC 小时线按时刻用，覆盖率由 judge_usdc_depeg 另判
     ("sell_put_wheel.py", "_default_rv"): "refuse",                                # 30 日 RV：最近一场缺 ⇒ closes_lag、不算（v0.45.744；不把窗口悄悄往前挪）
     # ── history：带日期窗口、按日期用（v0.45.658 迁入）──
     ("backtester.py", "Backtester._history"): "ignore",

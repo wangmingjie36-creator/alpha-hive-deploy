@@ -59,19 +59,63 @@ function summary(d) {
     failed.length ? h("p", { class: "callout warn" }, `这一天有 ${failed.length} 只蜂运行出错（${failed.map((a) => a.label.split(" · ")[0]).join("、")}），它们的分数和方向不是正常算出来的；报错原文在「各蜂明细」里。`) : null);
 }
 
-function risks(d) {
-  const r = d.risks, ins = r.insider, tb = r.thesis_breaks;
-  // 没核对有两种：本来就要人判断的（machine = false），和有判据但当天缺数判不了的——分开数、分开写
-  const manual = tb.filter((x) => !x.machine).length;
-  const undecided = tb.filter((x) => x.machine && x.fired === null).length;
-  const tbCols = [
-    { label: "级别", render: (x) => (x.level === 2 ? h("span", { class: "chip neg" }, "止损") : h("span", { class: "chip warn" }, "预警")) },
+// 证伪条件（v0.45.777 起分三块）：扫描能判的机器条件 / Alpha Bot 自动核对的几条人工条件 / 其余需人工判断的（折叠）。
+// 自动核对另走 `/api/thesis-auto`（要去 Yahoo 取季报，首次几秒），先把这一块画成「正在核对」，结果回来再整块重画。
+const AUTO_CHIP = { fired: ["neg", "已触发"], partial: ["warn", "数字部分已满足"] };
+function thesisBlock(d, auto) {
+  const r = d.risks, tb = r.thesis_breaks;
+  const machine = tb.filter((x) => x.machine);
+  // 看的不是最新一天 ⇒ 没核对：这几条照旧归「需人工判断」，只留一句为什么
+  const checks = auto && auto.available && auto.applicable ? auto.checks || [] : [];
+  const autoLabels = new Set(checks.filter((c) => c.label).map((c) => c.label));
+  const manual = tb.filter((x) => !x.machine && !autoLabels.has(x.label));
+  const undecided = machine.filter((x) => x.fired === null).length;
+  const autoFired = checks.filter((c) => c.verdict?.status === "fired").length;
+  const autoPartial = checks.filter((c) => c.verdict?.status === "partial").length;
+  const autoCant = checks.filter((c) => c.verdict?.status === "unjudgeable").length;
+  const lvl = (x) => (x.level === 2 ? h("span", { class: "chip neg" }, "止损") : h("span", { class: "chip warn" }, "预警"));
+  const mCols = [
+    { label: "级别", render: lvl },
     { label: "条件", render: (x) => h("b", {}, x.label || "—") },
-    { label: "判据", render: (x) => (x.machine && x.field ? `${x.field} ${x.op || ""} ${plain(x.value)}` : "需人工判断") },
+    { label: "判据", render: (x) => (x.field ? `${x.field} ${x.op || ""} ${plain(x.value)}` : "—") },
     { label: "当前", cls: "r", render: (x) => plain(x.actual) },
     { label: "状态", render: (x) => (x.fired === true ? h("span", { class: "chip neg" }, "已触发") : x.fired === false ? "未触发"
-      : h("span", { class: "sub" }, x.machine ? "缺数据，判不了" : "未核对")) },
+      : h("span", { class: "sub" }, "缺数据，判不了")) },
   ];
+  const aCols = [
+    { label: "级别", render: (c) => (c.level ? lvl(c) : "—") },
+    { label: "条件", render: (c) => h("div", {}, h("b", {}, c.label || "—"), h("div", { class: "small muted" }, c.trigger || "")) },
+    { label: "核对结果", render: (c) => h("div", { class: "small" }, c.verdict?.facts || "—",
+      c.source ? h("div", { class: "muted" }, `来源：${c.source}${c.fetched_at ? `，取于 ${c.fetched_at.slice(0, 16).replace("T", " ")}（美东）` : ""}`) : null) },
+    { label: "状态", render: (c) => { const v = c.verdict || {}; const chip = AUTO_CHIP[v.status];
+      return chip ? h("span", { class: `chip ${chip[0]}` }, chip[1]) : v.status === "not_fired" ? "未触发"
+        : h("span", { class: "sub" }, v.reason_zh || "判不了"); } },
+  ];
+  const fired = r.thesis_fired + autoFired;
+  const sub = ` ${tb.length} 条里已触发 ${fired} 条` + (autoPartial ? `，${autoPartial} 条数字部分已满足` : "")
+    + (undecided + autoCant ? `，${undecided + autoCant} 条判不了` : "") + (manual.length ? `，${manual.length} 条需人工判断` : "");
+  let autoPart;
+  if (auto === null) autoPart = note("正在自动核对能按数据判的几条（季报、股息、收益率）…");
+  else if (!auto.available) autoPart = auto.reason === "demo" ? null : note(`自动核对没做成：${auto.reason_zh || auto.reason || "原因不明"}。这几条照旧算「需人工判断」。`);
+  else if (checks.length) {
+    autoPart = h("div", {}, h("h4", {}, `Alpha Bot 自动核对的 ${checks.length} 条`), table(aCols, checks),
+      note("按此刻取到的数据核对，只对最新一天做。「数字部分已满足」= 条件里能用数据判的那半已满足，另一半（如「融资无望」）仍要人工判断，不算已触发。数据只到最近一期财报。"));
+  } else if (!auto.applicable && (auto.checks || []).length) {
+    autoPart = note(`有 ${auto.checks.length} 条平时会自动核对，但看的不是最新一天（${auto.latest_date || "—"}）：自动核对用的是此刻的数据，拿它判过去那天会用上后来的信息，所以这一天不做，照旧算「需人工判断」。`);
+  } else autoPart = null;
+  return h("div", {},
+    h("h3", {}, "什么情况下这个判断不再成立", h("span", { class: "sub" }, auto === null ? ` ${tb.length} 条` : sub)),
+    tb.length || checks.length ? null : empty("这只标的当天没有记录。"),
+    machine.length ? table(mCols, machine) : null,
+    autoPart,
+    manual.length ? h("details", { class: "sd-why" },
+      h("summary", {}, `另有 ${manual.length} 条需人工判断，未核对（点开看）`),
+      table([{ label: "级别", render: lvl }, { label: "条件", render: (x) => x.label || "—" }], manual),
+      note("这些条件（分部收入、用户数、监管与管理层事件等）没有可靠的免费结构化数据，扫描和 Alpha Bot 都不核对。「未核对」不等于「未触发」。")) : null);
+}
+
+function risks(d) {
+  const r = d.risks, ins = r.insider;
   const tradeCols = [{ label: "内部人", render: (x) => x.insider || "—" }, { label: "动作", render: (x) => x.action || "—" },
     { label: "日期", render: (x) => x.date || "—" }, { label: "股数", cls: "r", render: (x) => qty(x.shares) },
     { label: "金额", cls: "r", render: (x) => usd(x.value_usd) },
@@ -81,15 +125,16 @@ function risks(d) {
     isNum(r.crowding_score) ? `拥挤度 ${num(r.crowding_score, 0)} / 100` : null,
     ins && isNum(ins.sold_usd) ? `已申报的内部人交易：卖出 ${usd(ins.sold_usd)}、买入 ${usd(ins.bought_usd)}` : null,
   ].filter(Boolean);
+  const tbBox = h("div", {}, thesisBlock(d, null));
+  api(`/api/thesis-auto/${encodeURIComponent(d.ticker)}?date=${encodeURIComponent(d.date)}`)
+    .catch((e) => ({ available: false, reason: "exception", reason_zh: `请求失败（${e.message || e}）` }))
+    .then((a) => { if (tbBox.isConnected) fill(tbBox, thesisBlock(d, a)); });
   return sec("risks", "风险",
     h("h3", {}, `看空一方的理由（强度 ${num(r.bear_score, 1)} / 10）`),
     r.bearish_signals.length ? h("ul", {}, r.bearish_signals.map((x) => h("li", {}, x))) : empty("扫描当天没有记到看空信号。"),
     r.enough_bear_points ? null : h("p", { class: "callout warn" }, `看空理由不到 ${d.rules.min_bear_points} 条，反对意见偏少，下结论前请自己再找反例。`),
     facts.length ? line(facts.join("；"), "。") : null,
-    h("h3", {}, "什么情况下这个判断不再成立",
-      h("span", { class: "sub" }, ` ${tb.length} 条里已触发 ${r.thesis_fired} 条` + (manual ? `，${manual} 条需人工判断` : "") + (undecided ? `，${undecided} 条当天缺数据判不了` : ""))),
-    tb.length ? table(tbCols, tb) : empty("这只标的当天没有记录。"),
-    manual ? note("需人工判断的条件（如财报数据、管理层变动）扫描不会去核对。「未核对」不等于「未触发」。") : null,
+    tbBox,
     ins && ins.trades.length ? h("div", {}, h("h3", {}, "内部人交易"), table(tradeCols, ins.trades)) : null);
 }
 
