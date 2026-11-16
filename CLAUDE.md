@@ -26,7 +26,7 @@
   - 不要自动搜索 `.anthropic_api_key` 文件路径
   - 2026-03-16 事故：`generate_deep_v2.py` opt-out 设计导致 NVDA deep 报告静默消费 $0.47 Opus，已修复为 opt-in
 
-- **matplotlib**：生产已无使用者（`chart_engine` v0.45.724、`code_generator` v0.45.750 均已退役），仅 `experiments/` 一个重放脚本还在 import；`requirements.txt` 仍钉着，删不删待用户定
+- **matplotlib**：生产已无使用者（`chart_engine` v0.45.724、`code_generator` v0.45.750 均已退役），仅 `experiments/` 一个重放脚本还在 import；`requirements.txt` / `constraints.txt` 仍钉着，删不删待用户定
 
 - **knowledge-pool 召回规则**：
   - 召回必须调真实引擎 `weighted_recall.py`（CLI 或 `WeightedRecall().recall()`），**禁止手动简化算分**
