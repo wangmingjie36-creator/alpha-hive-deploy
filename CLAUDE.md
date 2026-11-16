@@ -26,7 +26,7 @@
   - 不要自动搜索 `.anthropic_api_key` 文件路径
   - 2026-03-16 事故：`generate_deep_v2.py` opt-out 设计导致 NVDA deep 报告静默消费 $0.47 Opus，已修复为 opt-in
 
-- **图表**：深度报告的 `chart_engine.py` 随其 v0.45.724 退役；`code_generator` 随 CodeExecutorAgent 于 v0.45.750 退役，matplotlib 生产已无使用者（`requirements.txt` 仍钉着，删不删另议）
+- **matplotlib**：生产已无使用者（`chart_engine` v0.45.724、`code_generator` v0.45.750 均已退役），仅 `experiments/` 一个重放脚本还在 import；`requirements.txt` 仍钉着，删不删待用户定
 
 - **knowledge-pool 召回规则**：
   - 召回必须调真实引擎 `weighted_recall.py`（CLI 或 `WeightedRecall().recall()`），**禁止手动简化算分**
@@ -150,9 +150,6 @@ git -C ~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory add -A && git -C 
 
 ## 已知问题 / 注意事项（长期有效项）
 
-- `realtime_metrics` 在部分 JSON 里是空字典 `{}`，导致 `current_price = 0`
-  - 修复：`_try_compute_gex` 在报告生成时用 Scout 价格补算
-- GEX 在 Cowork VM 里用样本数据（yfinance 无法联网），在用户 Mac 上用真实数据
 - `BearBeeContrarian` 不在 `feedback_loop.calculate_agent_contribution()` 的 5 维映射中——设计如此，Bear 是元蜂不直接对应评估维度
 
 ---
@@ -192,18 +189,13 @@ v0.45.727 起，投研人设、三级任务模式（闪电 / 标准 / 深度）�
 ## 硬性规则（永久，不可覆盖）
 
 ### LLM 扫描必须用户确认
-- **禁止私自运行 LLM 模式扫描**（`--use-llm` / 任何调用 Claude API 的扫描）。
-- 每次需要 LLM 扫描前，必须明确告知用户并等待批准：
-  「需要跑 LLM 扫描，预计费用约 $X，是否确认？」
-- 测试与调试始终使用 `--no-llm`，不消耗 API 费用。
+- **禁止私自运行 LLM 模式扫描**（`--use-llm` / 任何调用 Claude API 的扫描）；每次先告知用户并等批准：「需要跑 LLM 扫描，预计费用约 $X，是否确认？」（默认 `--no-llm` 等细则见上文「用户偏好 → 报告生成模式」）
 
 ### Slack 推送规则
 - **频道推送只走 Claude Code 内置 Slack MCP 工具**（`slack_send_message`）→ **#alpha-hive 频道**（Channel ID: `C0AGUUWJXJS`）；现在只有月度自诊断定时任务在用
 - ⚠️ **每日富文本日报目前没有任何自动推送**；**用户 2026-10-21 定：现在不需要每日日报推送**——别再提议恢复，用户主动要再做
-- 扫描确认通知（"是否启用 LLM？"）**已删除**；编排器永远 `--no-llm`，要跑 LLM 扫描只能由人在终端显式 `--use-llm`，且仍须先问费用
 - **仓库里没有任何 Slack 发送代码**；Bot Token 文件 `~/.alpha_hive_slack_bot_token` 仍在本机，但无代码读它。删除记录、墓碑测试与冻结副本 → `.claude/rules/slack.md`
 
 ### Slack 通知精简规则（减少噪音）
-- Bot **不发任何消息**（`tests/test_slack_send_whitelist.py` 白名单为空）。原第一类「富文本日报」`push_report_to_slack.py` v0.45.571 删除（墓碑 `tests/test_step7_push_report_retired.py`），原第二类「扫描前 LLM 模式确认」v0.45.514 删除。加回任何一类先由用户改本条规则。
-- **禁止发送**以下类型的 Slack DM：扫描开始/完成通知、SLO 违规告警、权重自适应更新、数据质量降级预警、逐标的高分机会/低分预警、扫描失败通知。
-- 这些信息仅写入本地日志文件，不打扰用户。
+- Bot **不发任何消息**（`tests/test_slack_send_whitelist.py` 白名单为空）。原第一类「富文本日报」`push_report_to_slack.py` v0.45.571 删除（墓碑 `tests/test_step7_push_report_retired.py`），原第二类「扫描前 LLM 模式确认」v0.45.514 删除（编排器永远 `--no-llm`）。加回任何一类先由用户改本条规则。
+- **禁止发送**以下类型的 Slack DM：扫描开始/完成通知、SLO 违规告警、权重自适应更新、数据质量降级预警、逐标的高分机会/低分预警、扫描失败通知——这些只写本地日志（多处代码注释按名引用此清单，勿删）。
