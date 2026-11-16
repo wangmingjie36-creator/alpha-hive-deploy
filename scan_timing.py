@@ -133,7 +133,8 @@ def counters() -> Dict[str, Optional[dict]]:
                                       "ledger_io": None, "history_fill": None,
                                       "strangle_shadow": None, "stock_fetch_legacy": None, "sell_put": None,
                                       "event_rows": None, "yf_daily": None,
-                                      "price_nonfinite": None, "macro_context": None}
+                                      "price_nonfinite": None, "macro_context": None,
+                                      "shared_quotes": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -215,6 +216,12 @@ def counters() -> Dict[str, Optional[dict]]:
         out["event_rows"] = price_metrics.event_row_stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("event_rows stats 不可得: %s", e)
+    try:
+        import market_intelligence
+        # v0.45.775：全局标的（^GSPC / SOXX / 供应链同行）一轮只取一次的共享表统计；`unfilled` 非空 ⇒ 整轮有一层全体标的都缺 ⇒ alert_manager P2。从没开过 ⇒ None
+        out["shared_quotes"] = market_intelligence.shared_stats()
+    except Exception as e:  # noqa: BLE001
+        _log.debug("shared_quotes stats 不可得: %s", e)
     try:
         import yf_daily
         # v0.45.652：行情三字段以外的日线读者经唯一入口去掉的公司行动空行；末行 / 中间 ⇒ alert_manager P2。不可导入 ⇒ None
@@ -474,6 +481,11 @@ def summary_line(snap: dict) -> str:
         pg_s += (f" | 其他日线读者去掉公司行动空行 {yd['dropped']} 行"
                  f"(首段 {yd.get('first_row', 0)}, 最近一场缺了 {yd.get('last_row', 0)} 份"
                  f", 今天未收 {yd.get('last_row_pending', 0)} 份, 中间 {yd.get('middle', 0)})")
+    sq = c.get("shared_quotes")
+    if sq:                                                              # v0.45.775：全局标的共享表（只在出过失败重试 / 有键没取到时才占位）
+        if sq.get("unfilled") or sq.get("failed_attempts"):
+            pg_s += (f" | 全局标的共享 取{sq.get('fetches', 0)}/命中{sq.get('hits', 0)}/失败重试{sq.get('failed_attempts', 0)}"
+                     + (f"/整轮没取到 {','.join(sq['unfilled'])}" if sq.get("unfilled") else ""))
     nf = c.get("price_nonfinite")
     if nf and (nf.get("momentum_5d") or nf.get("volume_ratio")):        # v0.45.653
         pg_s += f" | 行情非有限改缺失 动量 {nf.get('momentum_5d', 0)} 次/量比 {nf.get('volume_ratio', 0)} 次"

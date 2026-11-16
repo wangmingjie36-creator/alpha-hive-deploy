@@ -143,6 +143,10 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         return svc.premium(request.path_params["ticker"], dict(request.query_params))
 
     @api
+    def volume_board(request):
+        return svc.volume_board(request.path_params["ticker"], dict(request.query_params))
+
+    @api
     def method(request):
         return svc.meta_texts()
 
@@ -175,6 +179,10 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
     @api
     def deep(request):
         return svc.deep(request.path_params["ticker"], _q(request, "date"))
+
+    @api
+    def thesis_auto(request):
+        return svc.thesis_auto(request.path_params["ticker"], _q(request, "date"))
 
     @api
     def compare(request):
@@ -277,6 +285,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/bars/{ticker}", bars),
         Route("/api/minute-bars/{ticker}", minute_bars),
         Route("/api/premium/{ticker}", premium),
+        Route("/api/volume-board/{ticker}", volume_board),
         Route("/api/method", method),
         Route("/api/intraday/{ticker}", intraday),
         Route("/api/intraday-heat/{ticker}", intraday_heat),
@@ -287,6 +296,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/hedge", hedge),
         Route("/api/wheel", wheel),
         Route("/api/deep/{ticker}", deep),
+        Route("/api/thesis-auto/{ticker}", thesis_auto),
         Route("/api/compare", compare),
         Route("/api/compare/{ticker}", compare_ticker),
         Route("/api/wheel/screen", wheel_screen),

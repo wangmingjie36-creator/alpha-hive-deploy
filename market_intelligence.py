@@ -41,6 +41,121 @@ def _retry_sleep(seconds: float) -> None:
     import time
     time.sleep(seconds)
 
+
+# ──────────────────────────────────────────────
+# 全局标的「一轮扫描只取一次」（v0.45.775）
+# ──────────────────────────────────────────────
+# 政体的宏观层（^GSPC）与板块层（SOXX）、供应链的四个同行（TSM / AMAT / ASML / SOXX）对**所有**标的都是同一个标的、同一份数据：
+# 30 只票的线程各取一遍 ⇒ 每轮 ≈180 次重复下载，而且每一次都是一次「这一层可能缺」的机会——11-13 ABBV 的 SOXX 板块层就是其中一次下载
+# 被 yfinance 吞了异常（`TypeError: 'NoneType'…`，真正的异常没人记），记成「数据不可用」，别的 29 只票的同一层都取到了、值逐只相同。
+# 现在扫描开头开一个共享表（`begin_scan_shared()`，`alpha_hive_daily_report._init_scan_context` 调），这些标的第一个到的线程取、其余等它取完直接用。
+#   · 只缓存**成功**的结果：失败（空帧 / 身份校验丢弃 / 异常）不缓存，下一个线程再试——天然的重试；同一个键连续失败 SHARED_MAX_FAILS 次
+#     本轮就不再试（避免行情全断时 30 个线程各等一次超时），调用方照旧当「这一层取不到」。
+#   · 没开共享表（单票 CLI / MCP / 测试 / 深度分析）⇒ 行为逐字等于改动前：每次都自己取。共享表只活在一轮扫描里，不会跨日串数据。
+#   · 每个键一把锁、拿着锁取数：同键并发只会有一个在飞；与 `yf_gate` 的 download 串行锁的加锁顺序恒为「键锁 → download 锁」，不会反过来。
+import threading as _threading
+from contextlib import contextmanager as _contextmanager
+
+SHARED_MAX_FAILS = 3
+_SHARED_LOCK = _threading.Lock()
+_SHARED: Optional[Dict[Any, "_SharedSlot"]] = None       # None = 没开
+_SHARED_LAST: Dict[str, Any] = {}                          # 上一轮结束时的统计（end_scan_shared 之后 shared_stats() 读它）
+
+
+class _SharedSlot:
+    __slots__ = ("lock", "has", "value", "fails", "hits", "fetches")
+
+    def __init__(self) -> None:
+        self.lock = _threading.Lock()
+        self.has = False
+        self.value: Any = None
+        self.fails = 0
+        self.hits = 0
+        self.fetches = 0
+
+
+class _SharedRef:
+    """`_shared_slot` 交给调用方的句柄：`hit`（已有值，读 `value`）、`skip`（本轮已放弃，当取不到）、`set(v)`（成功后登记）。"""
+
+    def __init__(self) -> None:
+        self.hit = False
+        self.skip = False
+        self.value: Any = None
+        self._set = False
+
+    def set(self, value: Any) -> None:
+        self.value = value
+        self._set = True
+
+
+@_contextmanager
+def _shared_slot(key: Any):
+    """用法：`with _shared_slot(key) as ref:` —— `ref.skip` ⇒ 放弃；`ref.hit` ⇒ 直接用 `ref.value`；否则自己取、取到调 `ref.set(v)`。
+    key 为 None 或没开共享表 ⇒ 不共享（句柄永远是「自己取」）。"""
+    ref = _SharedRef()
+    cache = _SHARED
+    if key is None or cache is None:
+        yield ref
+        return
+    with _SHARED_LOCK:
+        slot = cache.setdefault(key, _SharedSlot())
+    with slot.lock:
+        if slot.has:
+            slot.hits += 1
+            ref.hit, ref.value = True, slot.value
+            yield ref
+            return
+        if slot.fails >= SHARED_MAX_FAILS:
+            ref.skip = True
+            yield ref
+            return
+        try:
+            yield ref
+        finally:
+            if ref._set:
+                slot.has, slot.value = True, ref.value
+                slot.fetches += 1
+            else:
+                slot.fails += 1
+
+
+def begin_scan_shared() -> None:
+    """开一轮的共享表（清掉上一轮的）。只有扫描进程在预取阶段调。"""
+    global _SHARED
+    with _SHARED_LOCK:
+        _SHARED = {}
+        _SHARED_LAST.clear()
+
+
+def _shared_snapshot(cache: Dict[Any, "_SharedSlot"]) -> Dict[str, Any]:
+    keys = dict(cache)
+    return {"keys": len(keys),
+            "fetches": sum(s.fetches for s in keys.values()),
+            "hits": sum(s.hits for s in keys.values()),
+            "failed_attempts": sum(s.fails for s in keys.values()),
+            "gave_up": sorted(str(k) for k, s in keys.items() if not s.has and s.fails >= SHARED_MAX_FAILS),
+            "unfilled": sorted(str(k) for k, s in keys.items() if not s.has)}
+
+
+def end_scan_shared() -> Dict[str, Any]:
+    """关共享表并返回这一轮的统计（之后 `shared_stats()` 仍读得到）。`unfilled` ≠ 空 ⇒ 有键整轮没取到过（全体标的都缺那一层）。"""
+    global _SHARED
+    with _SHARED_LOCK:
+        cache, _SHARED = _SHARED, None
+        snap = _shared_snapshot(cache) if cache is not None else {}
+        _SHARED_LAST.clear()
+        _SHARED_LAST.update(snap)
+    return dict(snap)
+
+
+def shared_stats() -> Optional[Dict[str, Any]]:
+    """本轮（或刚结束那一轮）的共享表统计；从没开过 ⇒ None。进 scan_timing → alert_manager。"""
+    with _SHARED_LOCK:
+        if _SHARED is not None:
+            return _shared_snapshot(_SHARED)
+        return dict(_SHARED_LAST) if _SHARED_LAST else None
+
+
 _BASE = Path(__file__).parent
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -236,8 +351,21 @@ def detect_market_regime(ticker: str = "NVDA") -> Dict[str, Any]:
             ma = float(np.mean(closes[-period:]))
             return float(closes[-1]), ma
 
+        def _get_ma_global(sym: str, period: int, window: int) -> Tuple[float, float]:
+            """SPX / SOXX 对所有标的都一样 ⇒ 一轮扫描只取一次（见模块里 `begin_scan_shared` 的说明）；没开共享表 ⇒ 就是 `_get_ma`。
+            只缓存取到的（非 nan）；取不到不缓存，下一个线程再试。"""
+            with _shared_slot(("ma", sym, period, window)) as ref:
+                if ref.skip:
+                    return float("nan"), float("nan")
+                if ref.hit:
+                    return ref.value
+                res = _get_ma(sym, period, window)
+                if not math.isnan(res[0]):
+                    ref.set(res)
+                return res
+
         # ── 宏观：SPX vs 200MA ───────────────────────────────────────────────
-        spx_price, spx_ma200 = _get_ma("^GSPC", 200, 220)
+        spx_price, spx_ma200 = _get_ma_global("^GSPC", 200, 220)
         if math.isnan(spx_price):
             macro_regime, macro_detail = "neutral", "SPX 数据不可用"
         elif spx_price > spx_ma200 * 1.01:
@@ -253,7 +381,7 @@ def detect_market_regime(ticker: str = "NVDA") -> Dict[str, Any]:
             macro_detail = f"SPX ${spx_price:.0f} 在 200MA ${spx_ma200:.0f} 附近震荡，宏观政体中性"
 
         # ── 板块：SOXX 20MA 趋势 ─────────────────────────────────────────────
-        soxx_price, soxx_ma20 = _get_ma("SOXX", 20, 40)
+        soxx_price, soxx_ma20 = _get_ma_global("SOXX", 20, 40)
         if math.isnan(soxx_price):
             sector_regime, sector_detail = "neutral", "SOXX 数据不可用"
         elif soxx_price > soxx_ma20 * 1.01:
@@ -516,16 +644,24 @@ def get_supply_chain_signals(ticker: str = "NVDA", lookback_days: int = 5) -> Di
 
         for sym in syms:
             try:
-                import yf_daily
-                # v0.45.658：经唯一入口。5 日涨跌用末根当今天 ⇒ 最近一场缺了就跳过这只（不拿前一场冒充）
-                hist, _missing = yf_daily.download(yf, sym, source="supply_chain", period=period_str, interval="1d",
-                                                   progress=False, auto_adjust=True)
-                if any(_missing.values()) or hist.empty or len(hist) < 2:
-                    continue
-                closes = hist["Close"].dropna().values.flatten()
-                n = min(lookback_days, len(closes) - 1)
-                ret = (float(closes[-1]) / float(closes[-n - 1]) - 1) * 100
-                returns[sym] = round(ret, 2)
+                # v0.45.775：四个同行对所有标的都是同一份 ⇒ 一轮扫描只取一次（目标票自己那一路仍逐票取）；没开共享表 ⇒ 与改动前逐字相同
+                with _shared_slot(("sc", sym, period_str, lookback_days) if sym in _SUPPLY_CHAIN else None) as ref:
+                    if ref.skip:
+                        continue
+                    if ref.hit:
+                        returns[sym] = ref.value
+                        continue
+                    import yf_daily
+                    # v0.45.658：经唯一入口。5 日涨跌用末根当今天 ⇒ 最近一场缺了就跳过这只（不拿前一场冒充）
+                    hist, _missing = yf_daily.download(yf, sym, source="supply_chain", period=period_str, interval="1d",
+                                                       progress=False, auto_adjust=True)
+                    if any(_missing.values()) or hist.empty or len(hist) < 2:
+                        continue
+                    closes = hist["Close"].dropna().values.flatten()
+                    n = min(lookback_days, len(closes) - 1)
+                    ret = (float(closes[-1]) / float(closes[-n - 1]) - 1) * 100
+                    returns[sym] = round(ret, 2)
+                    ref.set(returns[sym])
             except Exception:
                 continue
 

@@ -256,6 +256,8 @@ class TestResultReachesAlerts:
         snap["counters"]["paper_portfolio"] = {"as_of": "2026-09-14", "ok": True, "error": None}
         # 历史字段回落计数同理（v0.45.473 起；也是进程级计数，单独跑这条时缺它 ⇒ checks_skipped，v0.45.493 发现）
         snap["counters"]["history_fill"] = {"still_missing": {}, "by_path": {}}
+        # 全局标的共享表同理（v0.45.775：扫描开头开、每轮都写）；缺它 ⇒ checks_skipped。健康 = 没有整轮没取到的键
+        snap["counters"]["shared_quotes"] = {"keys": 2, "fetches": 2, "hits": 58, "failed_attempts": 0, "gave_up": [], "unfilled": []}
         a, msgs = self._alerts(tmp_path, snap)
         assert not any("origin/main（" in m or "同步未执行" in m or "gh-pages 部署失败" in m for m in msgs), msgs
         assert not a.checks_skipped, a.checks_skipped

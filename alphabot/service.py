@@ -23,7 +23,7 @@ import threading
 import time
 from datetime import datetime, time as dtime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import sell_strike_report as R
@@ -42,6 +42,8 @@ from alphabot import price_intraday as PI
 from alphabot import straddle as SD
 from alphabot import strangle_compare as SC
 from alphabot import tail_hedge as TH
+from alphabot import volume_board as VB
+from alphabot import thesis_auto as TA
 from alphabot import wheel as WH
 from alphabot import wheel_prices as WP
 from alphabot import wheel_screen as WS
@@ -63,6 +65,7 @@ WATCH_LEASE_SEC = 150.0
 WATCH_POLL_SEC = 5.0
 #: 失败结果也短暂缓存：CBOE 不可达时别让每次切页都再排 15 秒 × 3 次重试
 FAIL_TTL_SEC = 15.0
+RAW_KEEP = 4             # 成交榜：内存里最多留几只票的原始链（v0.45.776）
 MAX_FOCUS = 5
 DEFAULT_FOCUS = ("NVDA", "TSLA", "MSFT", "META", "AMZN")
 DEFAULT_INTERVAL_MIN = 10
@@ -278,7 +281,7 @@ class AlphaBotService:
                  straddle_root=None, straddle_quote_fn=None, now_fn: Optional[Callable[[], datetime]] = None,
                  premium_root=None, beta_long_fn=None, wheel_prices_fn=None,
                  completed_session_fn: Optional[Callable[[], Optional[str]]] = None, compare_root=None,
-                 ohlc_fn=None, minute_fn=None):
+                 ohlc_fn=None, minute_fn=None, thesis_fetch_fn=None, thesis_config_path=None):
         self.fetch_fn = fetch_fn
         self.bars_fn = bars_fn or _default_bars
         # 价格页 K 线的开高低（v0.45.762）：`ohlc_fn(标的) -> ({日期: {open, high, low, close}}, {n, reason, …})`。
@@ -292,6 +295,16 @@ class AlphaBotService:
         self.minute_fn = minute_fn
         self._minute_default = minute_fn is None and bars_fn is None and not demo
         self._minute_cache: Dict[tuple, tuple] = {}
+        # 深度页证伪条件的自动核对（v0.45.777）：`thesis_fetch_fn(份, 标的, 今天) -> (数据, {reason, …})`。缺省接线规则同 `ohlc_fn`
+        # （注入了日线而没给它 ⇒ 不取，免得测试出网；演示 ⇒ 不核对）。`{份的键: (取到的时刻, 数据, meta)}`，成功留
+        # `TA.RULES["cache_ttl_sec"]`、失败留 `fail_ttl_sec`（限流时按冷却剩余），免得每次开页都去撞。
+        # 配置读代码检出里的 `thesis_breaks_config.json`（与扫描同一份；按 mtime 重读，外部每周任务改了不用重启）
+        self.thesis_fetch_fn = thesis_fetch_fn
+        self._thesis_default = thesis_fetch_fn is None and bars_fn is None and not demo
+        self._thesis_cache: Dict[str, tuple] = {}
+        self._thesis_config_path = Path(thesis_config_path) if thesis_config_path else None
+        self._thesis_config_cache: Optional[tuple] = None
+        self._thesis_lock = threading.Lock()
         # 盯盘（v0.45.764）：`{"ticker", "until"（self.clock() 时刻）}`；同一时刻只盯一只、后来的为准。只在内存里，重启即无。
         # `_watch_consumer`：有没有轮询线程在消费它（演示 / `--no-poll` 没有 ⇒ 续期照收，但如实回「不会拍」）
         self._watch: Optional[dict] = None
@@ -330,6 +343,9 @@ class AlphaBotService:
         self._am_excluded: Dict[str, int] = {}      # 指数票最近一次现算丢掉的上午结算合约数（`_live_fetch` 写）
         # 盘中成交活跃度：各票上一张**落盘**快照的逐合约成交量（只在内存里；重启后第一拍没有可比的，见 intraday_activity）
         self._act_prev: Dict[str, dict] = {}
+        # 成交榜（v0.45.776）：最近几次现算实际用到的原始链 `{标的: (取到的时刻, raw)}`——成交榜读它，不另取链
+        # （另取会多打一次 CBOE；走 Yahoo 备用源的票还会多挨限流）。一份整链约 1–2 MB ⇒ 只留最近 `RAW_KEEP` 只
+        self._raw_last: Dict[str, tuple] = {}
         self._premium_rules_cache: Optional[dict] = None     # 规则常量与文案表进程内不变：算一次
         self._cache: Dict[str, tuple] = {}
         self._bars_cache: Dict[tuple, dict] = {}
@@ -341,7 +357,8 @@ class AlphaBotService:
                       "howto_failures": 0, "yf_fallback_used": 0, "yf_fallback_failed": 0,
                       "beta_sens_computed": 0, "beta_sens_failures": 0, "yf_rate_limited": 0,
                       "activity_failures": 0, "ohlc_failures": 0,
-                      "minute_fetches": 0, "minute_cache_hits": 0, "minute_failures": 0}
+                      "minute_fetches": 0, "minute_cache_hits": 0, "minute_failures": 0,
+                      "thesis_fetches": 0, "thesis_cache_hits": 0, "thesis_failures": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -366,16 +383,25 @@ class AlphaBotService:
             if hit is not None and not force:
                 self.stats["live_cache_hits"] += 1
                 return self._stamp(hit)
-            fetch = self._live_fetch(t)
-            if _on_raw is not None:
-                base_fetch = fetch
+            base_fetch = self._live_fetch(t)
+            got_raw = []
 
-                def fetch(ticker, *, as_of=None):
-                    raw, reason = base_fetch(ticker, as_of=as_of)
-                    if raw is not None:
+            def fetch(ticker, *, as_of=None):
+                raw, reason = base_fetch(ticker, as_of=as_of)
+                if raw is not None:
+                    got_raw.append(True)
+                    self._keep_raw(t, raw)
+                    if _on_raw is not None:
                         _on_raw(raw)
-                    return raw, reason
-            res = clean_json(R.compute_live_detail(t, fetch_fn=fetch, state_dir=self.ledger_dir))
+                return raw, reason
+            try:
+                res = clean_json(R.compute_live_detail(t, fetch_fn=fetch, state_dir=self.ledger_dir))
+            finally:
+                # 这次现算没取到链 ⇒ 之前留的链不许冒充这次的（成交榜如实说没有）。取到之前不清：现算进行中别的请求
+                # 读到的仍是上一次那份（与此刻 live 缓存里的结果是同一次），清早了只会让它们以为链被挤掉、再多打一次取数
+                if not got_raw:
+                    with self._locks_guard:
+                        self._raw_last.pop(t, None)
             ok = bool(res.get("data_available"))
             ru = self._yf_retry_until.pop(t, None)
             if not ok and res.get("reason") == "yf_rate_limited" and ru is not None:
@@ -392,6 +418,42 @@ class AlphaBotService:
                 _log.warning("[%s] 现算不可得：%s", t, res.get("reason"))
             self._cache[t] = (self.clock(), res)
             return self._stamp(self._cache[t])
+
+    def _keep_raw(self, t: str, raw: dict) -> None:
+        with self._locks_guard:                   # 轮询线程与页面请求会同时现算不同的票
+            self._raw_last.pop(t, None)
+            self._raw_last[t] = (self.clock(), raw)
+            while len(self._raw_last) > RAW_KEEP:
+                self._raw_last.pop(next(iter(self._raw_last)))
+
+    def volume_board(self, ticker, params: Optional[dict] = None) -> dict:
+        """成交榜（v0.45.776）：同一只票「标的」页现算用的那份链，按当日累计成交量排合约（纯函数 `volume_board`）。
+        先走 `live()`（缓存内直接命中，`force=1` 时重拉）——标的页刚算过时不多发请求；现算有结果、链却不在（被别的票
+        挤出了 `RAW_KEEP`）⇒ 再强制现算一次。参数错 ⇒ BadRequest（带参数名）。"""
+        t = norm_ticker(ticker)
+        q = dict(params or {})
+        force = str(q.pop("force", "") or "") == "1"
+        try:
+            p = VB.parse_params(q)                    # 先验参数：参数错不该白拉一次链
+        except VB.ParamError as exc:
+            raise BadRequest(str(exc), param=exc.param) from exc
+        live = self.live(t, force=force)
+        ent = self._raw_last.get(t)
+        if live.get("data_available") and ent is None:
+            live = self.live(t, force=True)
+            ent = self._raw_last.get(t)
+        if not live.get("data_available"):
+            out = {"data_available": False, "reason": live.get("reason"), "fetch_failed": True,
+                   "retry_after_sec": live.get("retry_after_sec")}
+        else:
+            try:
+                out = VB.select(VB.build(ent[1] if ent else None), p)
+            except VB.ParamError as exc:
+                raise BadRequest(str(exc), param=exc.param) from exc
+            out["chain_age_sec"] = round(max(0.0, self.clock() - ent[0]), 1) if ent else None
+        out.update({"ticker": t, "demo": self.demo, "params": p, "rules": VB.public_rules(),
+                    "disclaimer": VB.DISCLAIMER})
+        return clean_json(out)
 
     def _howto(self, t: str, res: dict) -> dict:
         """「怎么卖」：同一份报价翻译成下单腿 / 限价 / 买回价 / 标的价位（纯函数，见 `alphabot/howto.py`）。
@@ -486,6 +548,7 @@ class AlphaBotService:
             "wheel": {**WH.public_rules(), "screen": WS.public_rules()},
             "compare": OC.public_rules(),
             "deep": DR.public_rules(),
+            "volume_board": VB.public_rules() | {"raw_keep": RAW_KEEP},
             # 帮助页「程序类」里给人抄的命令：进本代码目录、用运行本服务的解释器（从 .app 打开时就是 .app 记下的那个），
             # 不写死缺省、不假设人站在代码目录里（v0.45.611）
             "app": {"launcher": MA.here_command("-m alphabot.launcher"),
@@ -581,6 +644,106 @@ class AlphaBotService:
             _log.warning("接货型卖 put 账本不可得：%s: %s", type(exc).__name__, exc)
             state = {"available": False, "state_reason": f"{type(exc).__name__}: {exc}"}
         return clean_json(WH.build_overview(state, rules=rules))
+
+    # ── 深度页证伪条件的自动核对（v0.45.777，只展示）
+    def _thesis_config(self) -> Tuple[Optional[dict], Optional[str]]:
+        """`(整份配置, 出错原因)`。按 mtime + 大小缓存；读坏了如实回原因（不当成「没有条件」）。"""
+        path = self._thesis_config_path
+        if path is None:
+            import thesis_breaks  # noqa: PLC0415 - 只为拿配置路径（代码检出里的文件，与扫描同一份）
+            path = Path(thesis_breaks._CONFIG_JSON_PATH)
+        try:
+            st = path.stat()
+            key = (st.st_mtime_ns, st.st_size)
+            if self._thesis_config_cache and self._thesis_config_cache[0] == key:
+                return self._thesis_config_cache[1], None
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            return None, f"{type(e).__name__}"
+        if not isinstance(data, dict):
+            return None, "not_a_dict"
+        self._thesis_config_cache = (key, data)
+        return data, None
+
+    def _thesis_part(self, part: str, t: str, today) -> Tuple[object, dict]:
+        key = part if part in TA.GLOBAL_PARTS else f"{t}:{part}"
+        ent = self._thesis_cache.get(key)
+        if ent is not None and self.clock() < ent[0]:
+            self.stats["thesis_cache_hits"] += 1
+            return ent[1], ent[2]
+        if self.thesis_fetch_fn is not None:
+            fn = self.thesis_fetch_fn
+        elif self._thesis_default:
+            fn = lambda p, tk, d: TA.fetch_part(p, tk, today=d)  # noqa: E731
+        else:
+            return None, {"reason": "no_fetcher"}
+        self.stats["thesis_fetches"] += 1
+        try:
+            data, meta = fn(part, t, today)
+        except Exception as e:  # noqa: BLE001 - 注入的取数函数也不许把页面打挂
+            data, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
+        meta = dict(meta or {})
+        if meta.get("reason"):
+            self.stats["thesis_failures"] += 1
+            ttl = TA.RULES["fail_ttl_sec"]
+            if meta["reason"] == "rate_limited" and isinstance(meta.get("retry_after_sec"), (int, float)):
+                ttl = float(meta["retry_after_sec"])
+        else:
+            ttl = TA.RULES["cache_ttl_sec"]
+            meta["fetched_at"] = self.now_fn().isoformat(timespec="minutes")
+        self._thesis_cache[key] = (self.clock() + ttl, data, meta)
+        return data, meta
+
+    def thesis_auto(self, ticker, date: Optional[str] = None) -> dict:
+        """深度页「证伪条件」里登记过的几条人工条件的自动核对。只对**最新一天**（取到的是此刻的数据）。
+        每条带 `verdict`（`TA` 的判定）、数据来源与取数时刻；没登记的条件不出现（页面照旧写「需人工判断」）。"""
+        t = self._local_name(norm_ticker(ticker)).upper()
+        base = {"available": False, "ticker": t, "date": None, "checks": [], "rules": TA.public_rules()}
+        if self.demo:
+            return base | {"reason": "demo", "reason_zh": TA.REASONS["demo"]}
+        dates = self.compare_dates()
+        latest = dates[-1] if dates else None
+        target = norm_date(date) if date else latest
+        cfg, err = self._thesis_config()
+        if err:
+            return base | {"date": target, "reason": "config_unreadable", "reason_zh": f"证伪条件配置读不了（{err}）"}
+        matched = TA.match(t, cfg.get(t) if isinstance(cfg.get(t), dict) else {})
+        out = base | {"available": True, "date": target, "latest_date": latest,
+                      "applicable": latest is not None and target == latest}
+        if not matched:
+            return clean_json(out)
+        today = self.now_fn().date()
+        checks = []
+        with self._thesis_lock:
+            for m in matched:
+                spec = m["spec"]
+                row = {"id": m["id"], "label": m["label"], "level": m["level"], "trigger": m["trigger"],
+                       "source": TA.NEEDS[spec["kind"]][1] if spec else None, "fetched_at": None}
+                if not out["applicable"]:
+                    row["verdict"] = TA._cant("not_latest_date", f"最新一天是 {latest}")
+                elif spec is None:
+                    row["verdict"] = TA._cant(m["reason"])
+                else:
+                    data, fail = {}, None
+                    for part in TA.NEEDS[spec["kind"]][0]:
+                        v, meta = self._thesis_part(part, t, today)
+                        if meta.get("reason"):
+                            fail = meta
+                            break
+                        data[part] = v
+                        row["fetched_at"] = meta.get("fetched_at")
+                    if fail:
+                        wait = fail.get("retry_after_sec")
+                        row["verdict"] = TA._cant(fail["reason"], (f"约 {round(wait)} 秒后再试" if isinstance(wait, (int, float))
+                                                                    else str(fail.get("detail") or "")))
+                    else:
+                        try:
+                            row["verdict"] = TA.judge(spec, data, today)
+                        except Exception as e:  # noqa: BLE001 - 一条判挂了只丢它自己，计数可见
+                            self.stats["thesis_failures"] += 1
+                            row["verdict"] = TA._cant("fetch_error", f"判定出错 {type(e).__name__}")
+                checks.append(row)
+        return clean_json(out | {"checks": checks})
 
     # ── 期权结构跨日对比（v0.45.759，只读）：每日扫描落盘的 `.swarm_results_<日期>.json`，不联网、不写任何东西
     _SWARM_RE = re.compile(r"^\.swarm_results_(\d{4}-\d{2}-\d{2})\.json$")
