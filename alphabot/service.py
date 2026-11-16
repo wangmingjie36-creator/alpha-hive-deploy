@@ -645,6 +645,106 @@ class AlphaBotService:
             state = {"available": False, "state_reason": f"{type(exc).__name__}: {exc}"}
         return clean_json(WH.build_overview(state, rules=rules))
 
+    # ── 深度页证伪条件的自动核对（v0.45.777，只展示）
+    def _thesis_config(self) -> Tuple[Optional[dict], Optional[str]]:
+        """`(整份配置, 出错原因)`。按 mtime + 大小缓存；读坏了如实回原因（不当成「没有条件」）。"""
+        path = self._thesis_config_path
+        if path is None:
+            import thesis_breaks  # noqa: PLC0415 - 只为拿配置路径（代码检出里的文件，与扫描同一份）
+            path = Path(thesis_breaks._CONFIG_JSON_PATH)
+        try:
+            st = path.stat()
+            key = (st.st_mtime_ns, st.st_size)
+            if self._thesis_config_cache and self._thesis_config_cache[0] == key:
+                return self._thesis_config_cache[1], None
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            return None, f"{type(e).__name__}"
+        if not isinstance(data, dict):
+            return None, "not_a_dict"
+        self._thesis_config_cache = (key, data)
+        return data, None
+
+    def _thesis_part(self, part: str, t: str, today) -> Tuple[object, dict]:
+        key = part if part in TA.GLOBAL_PARTS else f"{t}:{part}"
+        ent = self._thesis_cache.get(key)
+        if ent is not None and self.clock() < ent[0]:
+            self.stats["thesis_cache_hits"] += 1
+            return ent[1], ent[2]
+        if self.thesis_fetch_fn is not None:
+            fn = self.thesis_fetch_fn
+        elif self._thesis_default:
+            fn = lambda p, tk, d: TA.fetch_part(p, tk, today=d)  # noqa: E731
+        else:
+            return None, {"reason": "no_fetcher"}
+        self.stats["thesis_fetches"] += 1
+        try:
+            data, meta = fn(part, t, today)
+        except Exception as e:  # noqa: BLE001 - 注入的取数函数也不许把页面打挂
+            data, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
+        meta = dict(meta or {})
+        if meta.get("reason"):
+            self.stats["thesis_failures"] += 1
+            ttl = TA.RULES["fail_ttl_sec"]
+            if meta["reason"] == "rate_limited" and isinstance(meta.get("retry_after_sec"), (int, float)):
+                ttl = float(meta["retry_after_sec"])
+        else:
+            ttl = TA.RULES["cache_ttl_sec"]
+            meta["fetched_at"] = self.now_fn().isoformat(timespec="minutes")
+        self._thesis_cache[key] = (self.clock() + ttl, data, meta)
+        return data, meta
+
+    def thesis_auto(self, ticker, date: Optional[str] = None) -> dict:
+        """深度页「证伪条件」里登记过的几条人工条件的自动核对。只对**最新一天**（取到的是此刻的数据）。
+        每条带 `verdict`（`TA` 的判定）、数据来源与取数时刻；没登记的条件不出现（页面照旧写「需人工判断」）。"""
+        t = self._local_name(norm_ticker(ticker)).upper()
+        base = {"available": False, "ticker": t, "date": None, "checks": [], "rules": TA.public_rules()}
+        if self.demo:
+            return base | {"reason": "demo", "reason_zh": TA.REASONS["demo"]}
+        dates = self.compare_dates()
+        latest = dates[-1] if dates else None
+        target = norm_date(date) if date else latest
+        cfg, err = self._thesis_config()
+        if err:
+            return base | {"date": target, "reason": "config_unreadable", "reason_zh": f"证伪条件配置读不了（{err}）"}
+        matched = TA.match(t, cfg.get(t) if isinstance(cfg.get(t), dict) else {})
+        out = base | {"available": True, "date": target, "latest_date": latest,
+                      "applicable": latest is not None and target == latest}
+        if not matched:
+            return clean_json(out)
+        today = self.now_fn().date()
+        checks = []
+        with self._thesis_lock:
+            for m in matched:
+                spec = m["spec"]
+                row = {"id": m["id"], "label": m["label"], "level": m["level"], "trigger": m["trigger"],
+                       "source": TA.NEEDS[spec["kind"]][1] if spec else None, "fetched_at": None}
+                if not out["applicable"]:
+                    row["verdict"] = TA._cant("not_latest_date", f"最新一天是 {latest}")
+                elif spec is None:
+                    row["verdict"] = TA._cant(m["reason"])
+                else:
+                    data, fail = {}, None
+                    for part in TA.NEEDS[spec["kind"]][0]:
+                        v, meta = self._thesis_part(part, t, today)
+                        if meta.get("reason"):
+                            fail = meta
+                            break
+                        data[part] = v
+                        row["fetched_at"] = meta.get("fetched_at")
+                    if fail:
+                        wait = fail.get("retry_after_sec")
+                        row["verdict"] = TA._cant(fail["reason"], (f"约 {round(wait)} 秒后再试" if isinstance(wait, (int, float))
+                                                                    else str(fail.get("detail") or "")))
+                    else:
+                        try:
+                            row["verdict"] = TA.judge(spec, data, today)
+                        except Exception as e:  # noqa: BLE001 - 一条判挂了只丢它自己，计数可见
+                            self.stats["thesis_failures"] += 1
+                            row["verdict"] = TA._cant("fetch_error", f"判定出错 {type(e).__name__}")
+                checks.append(row)
+        return clean_json(out | {"checks": checks})
+
     # ── 期权结构跨日对比（v0.45.759，只读）：每日扫描落盘的 `.swarm_results_<日期>.json`，不联网、不写任何东西
     _SWARM_RE = re.compile(r"^\.swarm_results_(\d{4}-\d{2}-\d{2})\.json$")
 
@@ -771,105 +871,6 @@ class AlphaBotService:
                 prev, prev_date = praw[t], d
                 break
         return clean_json(DR.build(t, target, cur, rank, prev=prev, prev_date=prev_date) | {"dates": dates[-90:], "tickers": names})
-
-    # ── 深度页证伪条件的自动核对（v0.45.777，只展示）
-    def _thesis_config(self) -> Tuple[Optional[dict], Optional[str]]:
-        """`(整份配置, 出错原因)`。按 mtime + 大小缓存；读坏了如实回原因（不当成「没有条件」）。"""
-        path = self._thesis_config_path
-        if path is None:
-            import thesis_breaks  # noqa: PLC0415 - 只为拿配置路径（代码检出里的文件，与扫描同一份）
-            path = Path(thesis_breaks._CONFIG_JSON_PATH)
-        try:
-            st = path.stat()
-            key = (st.st_mtime_ns, st.st_size)
-            if self._thesis_config_cache and self._thesis_config_cache[0] == key:
-                return self._thesis_config_cache[1], None
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
-            return None, f"{type(e).__name__}"
-        if not isinstance(data, dict):
-            return None, "not_a_dict"
-        self._thesis_config_cache = (key, data)
-        return data, None
-
-    def _thesis_part(self, part: str, t: str, today) -> Tuple[object, dict]:
-        key = part if part in TA.GLOBAL_PARTS else f"{t}:{part}"
-        ent = self._thesis_cache.get(key)
-        if ent is not None and self.clock() < ent[0]:
-            self.stats["thesis_cache_hits"] += 1
-            return ent[1], ent[2]
-        if self.thesis_fetch_fn is not None:
-            fn = self.thesis_fetch_fn
-        elif self._thesis_default:
-            fn = lambda p, tk, d: TA.fetch_part(p, tk, today=d)  # noqa: E731
-        else:
-            return None, {"reason": "no_fetcher"}
-        self.stats["thesis_fetches"] += 1
-        try:
-            data, meta = fn(part, t, today)
-        except Exception as e:  # noqa: BLE001 - 注入的取数函数也不许把页面打挂
-            data, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
-        meta = dict(meta or {})
-        if meta.get("reason"):
-            self.stats["thesis_failures"] += 1
-            ttl = TA.RULES["fail_ttl_sec"]
-            if meta["reason"] == "rate_limited" and isinstance(meta.get("retry_after_sec"), (int, float)):
-                ttl = float(meta["retry_after_sec"])
-        else:
-            ttl = TA.RULES["cache_ttl_sec"]
-            meta["fetched_at"] = self.now_fn().isoformat(timespec="minutes")
-        self._thesis_cache[key] = (self.clock() + ttl, data, meta)
-        return data, meta
-
-    def thesis_auto(self, ticker, date: Optional[str] = None) -> dict:
-        """深度页「证伪条件」里登记过的几条人工条件的自动核对。只对**最新一天**（取到的是此刻的数据）。
-        每条带 `verdict`（`TA` 的判定）、数据来源与取数时刻；没登记的条件不出现（页面照旧写「需人工判断」）。"""
-        t = self._local_name(norm_ticker(ticker)).upper()
-        base = {"available": False, "ticker": t, "date": None, "checks": [], "rules": TA.public_rules()}
-        if self.demo:
-            return base | {"reason": "demo", "reason_zh": TA.REASONS["demo"]}
-        dates = self.compare_dates()
-        latest = dates[-1] if dates else None
-        target = norm_date(date) if date else latest
-        cfg, err = self._thesis_config()
-        if err:
-            return base | {"date": target, "reason": "config_unreadable", "reason_zh": f"证伪条件配置读不了（{err}）"}
-        matched = TA.match(t, cfg.get(t) if isinstance(cfg.get(t), dict) else {})
-        out = base | {"available": True, "date": target, "latest_date": latest, "applicable": target == latest}
-        if not matched:
-            return clean_json(out)
-        today = self.now_fn().date()
-        checks = []
-        with self._thesis_lock:
-            for m in matched:
-                spec = m["spec"]
-                row = {"id": m["id"], "label": m["label"], "level": m["level"], "trigger": m["trigger"],
-                       "source": TA.NEEDS[spec["kind"]][1] if spec else None, "fetched_at": None}
-                if not out["applicable"]:
-                    row["verdict"] = TA._cant("not_latest_date", f"最新一天是 {latest}")
-                elif spec is None:
-                    row["verdict"] = TA._cant(m["reason"])
-                else:
-                    data, fail = {}, None
-                    for part in TA.NEEDS[spec["kind"]][0]:
-                        v, meta = self._thesis_part(part, t, today)
-                        if meta.get("reason"):
-                            fail = meta
-                            break
-                        data[part] = v
-                        row["fetched_at"] = meta.get("fetched_at")
-                    if fail:
-                        wait = fail.get("retry_after_sec")
-                        row["verdict"] = TA._cant(fail["reason"], (f"约 {round(wait)} 秒后再试" if isinstance(wait, (int, float))
-                                                                    else str(fail.get("detail") or "")))
-                    else:
-                        try:
-                            row["verdict"] = TA.judge(spec, data, today)
-                        except Exception as e:  # noqa: BLE001 - 一条判挂了只丢它自己，计数可见
-                            self.stats["thesis_failures"] += 1
-                            row["verdict"] = TA._cant("fetch_error", f"判定出错 {type(e).__name__}")
-                checks.append(row)
-        return clean_json(out | {"checks": checks})
 
     # ── 接货 · 筛选（v0.45.722，只读）：我们手工做过的那张表——30 只标的里「卖 put 好不好做」的客观事实
     WHEEL_CLOSES_TTL = 6 * 3600.0

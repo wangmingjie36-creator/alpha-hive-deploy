@@ -66,7 +66,11 @@ function thesisBlock(d, auto) {
   const r = d.risks, tb = r.thesis_breaks;
   const machine = tb.filter((x) => x.machine);
   // 看的不是最新一天 ⇒ 没核对：这几条照旧归「需人工判断」，只留一句为什么
-  const checks = auto && auto.available && auto.applicable ? auto.checks || [] : [];
+  // 条件原文改过 / 配置里已没有的那几条也没核对 ⇒ 同样归人工，只在下面说一句
+  const NOT_CHECKED = new Set(["trigger_changed", "not_in_config"]);
+  const all = auto && auto.available && auto.applicable ? auto.checks || [] : [];
+  const checks = all.filter((c) => !NOT_CHECKED.has(c.verdict?.reason));
+  const changed = all.filter((c) => c.verdict?.reason === "trigger_changed");
   const autoLabels = new Set(checks.filter((c) => c.label).map((c) => c.label));
   const manual = tb.filter((x) => !x.machine && !autoLabels.has(x.label));
   const undecided = machine.filter((x) => x.fired === null).length;
@@ -99,7 +103,8 @@ function thesisBlock(d, auto) {
   else if (!auto.available) autoPart = auto.reason === "demo" ? null : note(`自动核对没做成：${auto.reason_zh || auto.reason || "原因不明"}。这几条照旧算「需人工判断」。`);
   else if (checks.length) {
     autoPart = h("div", {}, h("h4", {}, `Alpha Bot 自动核对的 ${checks.length} 条`), table(aCols, checks),
-      note("按此刻取到的数据核对，只对最新一天做。「数字部分已满足」= 条件里能用数据判的那半已满足，另一半（如「融资无望」）仍要人工判断，不算已触发。数据只到最近一期财报。"));
+      note("按此刻取到的数据核对，只对最新一天做。「数字部分已满足」= 条件里能用数据判的那半已满足，另一半（如「融资无望」）仍要人工判断，不算已触发。数据只到最近一期财报。"),
+      changed.length ? note(`${changed.map((c) => c.label).join("、")}：条件原文与登记时不同（阈值可能改过），这次没自动核对，归在下面需人工判断的里。`) : null);
   } else if (!auto.applicable && (auto.checks || []).length) {
     autoPart = note(`有 ${auto.checks.length} 条平时会自动核对，但看的不是最新一天（${auto.latest_date || "—"}）：自动核对用的是此刻的数据，拿它判过去那天会用上后来的信息，所以这一天不做，照旧算「需人工判断」。`);
   } else autoPart = null;

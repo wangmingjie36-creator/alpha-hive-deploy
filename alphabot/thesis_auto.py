@@ -28,7 +28,7 @@ USDC 价格与市场份额。其余照旧「未核对」——错的「未触发
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, datetime
 from typing import Callable, Dict, List, Optional, Tuple
 
 from alphabot import beta_long as BL
@@ -58,6 +58,7 @@ REASONS = {
     "out_of_bounds": "取到的值不合常理，不用",
     "rate_limited": "Yahoo 限流",
     "fetch_error": "取数出错",
+    "empty": "Yahoo 返回了空表（可能是限流或临时故障，过一会儿会重取）",
     "trigger_changed": "条件原文与登记时不同（阈值可能改过），自动核对没对上",
     "not_in_config": "配置里没有这一条",
     "not_latest_date": "自动核对只对最新一天",
@@ -124,6 +125,13 @@ def _age(s, today: date) -> Optional[int]:
     return (today - d).days if d else None
 
 
+def _ts(s) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(str(s).replace(" ", "T"))
+    except ValueError:
+        return None
+
+
 def _pp(x: float) -> str:
     return f"{x:+.2f} 个百分点"
 
@@ -158,10 +166,13 @@ def _consecutive(a, b) -> bool:
 
 def judge_gm_qoq_drop(income: List[dict], pp: float, today: date) -> dict:
     """毛利率环比下降超过 `pp` 个百分点。`income` = `[{end, gross_profit, revenue}]`。"""
-    rows = [r for r in income if (_num(r.get("revenue")) or 0) > 0 and _num(r.get("gross_profit")) is not None]
-    if len(rows) < 2:
-        return _cant("insufficient", "不到两季有毛利与收入")
-    cur, prev = rows[0], rows[1]
+    # 只比最近两季：缺数据的季度不跳过（跳过就会拿更早的两季冒充「最近一季」）
+    ok = lambda r: (_num(r.get("revenue")) or 0) > 0 and _num(r.get("gross_profit")) is not None  # noqa: E731
+    if len(income) < 2:
+        return _cant("insufficient", "不到两季")
+    cur, prev = income[0], income[1]
+    if not (ok(cur) and ok(prev)):
+        return _cant("insufficient", f"{cur.get('end')} 或 {prev.get('end')} 那季缺毛利或收入", as_of=cur.get("end"))
     bad = _fresh(cur["end"], today)
     if bad:
         return bad
@@ -175,10 +186,13 @@ def judge_gm_qoq_drop(income: List[dict], pp: float, today: date) -> dict:
 
 def judge_eps_miss(eps: List[dict], pct: float, today: date) -> dict:
     """最近一次财报 EPS 实际值低于预期 `pct`% 以上。`eps` = `[{quarter, actual, estimate}]`。"""
-    rows = [r for r in eps if _num(r.get("actual")) is not None and _num(r.get("estimate")) is not None]
+    # 最近一次**已公布**的季度（还没公布的季度没有实际值，跳过它是对的）；它缺预期值 ⇒ 判不了，不退回更早的季度
+    rows = [r for r in eps if _num(r.get("actual")) is not None]
     if not rows:
-        return _cant("insufficient", "没有带实际值与预期值的季度")
+        return _cant("insufficient", "没有已公布实际值的季度")
     r = rows[0]
+    if _num(r.get("estimate")) is None:
+        return _cant("insufficient", f"{r.get('quarter')} 那季没有预期值", as_of=r.get("quarter"))
     bad = _fresh(r["quarter"], today)
     if bad:
         return bad
@@ -198,15 +212,15 @@ def judge_eps_miss(eps: List[dict], pct: float, today: date) -> dict:
 
 def judge_fcf_neg_streak(cashflow: List[dict], n: int, manual_part: str, today: date) -> dict:
     """自由现金流连续 `n` 季为负（「且 …」那半要人工判）。`cashflow` = `[{end, fcf}]`。"""
-    rows = [r for r in cashflow if _num(r.get("fcf")) is not None]
-    if not rows:
+    if not cashflow:
         return _cant("insufficient", "没有自由现金流")
-    bad = _fresh(rows[0]["end"], today)
+    bad = _fresh(cashflow[0]["end"], today)
     if bad:
         return bad
-    if len(rows) < n:
-        return _cant("insufficient", f"只有 {len(rows)} 季，不到 {n} 季", as_of=rows[0]["end"])
-    last = rows[:n]
+    last = cashflow[:n]
+    if len(last) < n or any(_num(r.get("fcf")) is None for r in last):
+        return _cant("insufficient", f"最近 {n} 季里有缺数的（不拿更早的季度顶替）", as_of=cashflow[0]["end"])
+    rows = last
     if not all(_consecutive(a["end"], b["end"]) for a, b in zip(last, last[1:])):
         return _cant("nonconsecutive", "、".join(r["end"] for r in last), as_of=rows[0]["end"])
     vals = "、".join(f"{r['end']} {r['fcf'] / 1e6:+,.0f} 百万" for r in last)
@@ -218,16 +232,22 @@ def judge_fcf_neg_streak(cashflow: List[dict], n: int, manual_part: str, today: 
 
 def judge_cash_runway(balance: List[dict], cashflow: List[dict], months: float, manual_part: str, today: date) -> dict:
     """现金按最近几季平均自由现金流的消耗速度能撑几个月，少于 `months` 个月（「且 …」那半要人工判）。"""
-    bal = [r for r in balance if _num(r.get("cash")) is not None]
-    if not bal:
-        return _cant("insufficient", "没有现金余额")
+    if not balance or _num(balance[0].get("cash")) is None:
+        return _cant("insufficient", "最近一季没有现金余额")
+    bal = balance
     bad = _fresh(bal[0]["end"], today)
     if bad:
         return bad
     k = int(RULES["burn_quarters"])
-    fl = [r for r in cashflow if _num(r.get("fcf")) is not None][:k]
+    fl = []
+    for r in cashflow[:k]:          # 从最近一季起连续取，遇到缺数就停（不跳过）
+        if _num(r.get("fcf")) is None:
+            break
+        fl.append(r)
     if len(fl) < 2:
-        return _cant("insufficient", "不到两季自由现金流", as_of=bal[0]["end"])
+        return _cant("insufficient", "最近不到两季有自由现金流", as_of=bal[0]["end"])
+    if fl[0]["end"] != bal[0]["end"]:
+        return _cant("nonconsecutive", f"现金截至 {bal[0]['end']}，现金流最近一季是 {fl[0]['end']}，不是同一季", as_of=bal[0]["end"])
     if not all(_consecutive(a["end"], b["end"]) for a, b in zip(fl, fl[1:])):
         return _cant("nonconsecutive", "、".join(r["end"] for r in fl), as_of=bal[0]["end"])
     cash = bal[0]["cash"]
@@ -305,7 +325,7 @@ def judge_yield_above(tnx: List[dict], pct: float, today: date) -> dict:
     if not 0 < r["close"] < 20:
         return _cant("out_of_bounds", f"{r['close']}", as_of=r["date"])
     # 当天那根在收盘前是盘中值（Yahoo 日线的末根会随盘中变），不写成「收盘」
-    when = f"{r['date']}（今天）的最新值，收盘前是盘中值" if a == 0 else f"{r['date']} 收盘"
+    when = f"{r['date']}（今天）的最新值，收盘前是盘中值" if a <= 0 else f"{r['date']} 收盘"
     facts = f"{when} {r['close']:.3f}%；阈值：高于 {pct:g}%"
     return _verdict("fired" if r["close"] > pct else "not_fired", facts, as_of=r["date"])
 
@@ -321,16 +341,26 @@ def judge_usdc_depeg(hourly: List[dict], price: float, hours: int, today: date) 
     if _age(last, today) is None or _age(last, today) > 1:
         return _cant("stale", f"最近一根是 {last[:16]}", as_of=last[:10])
     low = min(r["close"] for r in rows)
-    run = best = 0
+    # 两种连续时长：`best` 只数真有的、相邻的小时（中间缺一小时就断开）——够了才写已触发；
+    # `best_possible` 把缺的小时都当成「可能在 price 之下」——它也不够，才能写未触发；两者之间 ⇒ 临界
+    run = best = poss = best_poss = 0
+    prev_t = None
     for r in rows:
-        run = run + 1 if r["close"] < price else 0
-        best = max(best, run)
+        t = _ts(r["t"])
+        missing = max(0, round((t - prev_t).total_seconds() / 3600) - 1) if (t and prev_t) else 0
+        below = r["close"] < price
+        run = (run + 1 if missing == 0 else 1) if below else 0
+        poss = poss + missing + 1 if below else 0
+        best, best_poss = max(best, run), max(best_poss, poss)
+        prev_t = t
     facts = (f"过去 {days} 天 {len(rows)} 根小时线（覆盖 {min(cov, 1) * 100:.0f}%），最低收盘 {low:.4f}，"
              f"低于 {price:g} 最长连续 {best} 小时；阈值：连续 {hours} 小时以上")
     if best >= hours:
         return _verdict("fired", facts, as_of=last[:10])
     if cov < RULES["usdc_min_coverage"]:
         return _cant("insufficient", f"小时线只覆盖 {cov * 100:.0f}%，缺的那几小时判不了", facts, as_of=last[:10])
+    if best_poss >= hours:
+        return _cant("borderline", f"把缺的小时算进去最长可达 {best_poss} 小时，缺的那几小时可能正是脱钩", facts, as_of=last[:10])
     return _verdict("not_fired", facts, as_of=last[:10])
 
 
@@ -505,10 +535,13 @@ def fetch_part(part: str, ticker: str, *, today: date, yf_module=None, http_get=
             except Exception:  # noqa: BLE001 - 闸门不可得不阻断（与 price_ohlc / beta_long 同）
                 pass
         if part == "@tnx":
-            return _fetch_tnx(yf_module, ensure), {"reason": None}
-        if part == "@usdc":
-            return _fetch_usdc(yf_module, ensure), {"reason": None}
-        return _part(yf_module, gated, part, ticker), {"reason": None}
+            rows = _fetch_tnx(yf_module, ensure)
+        elif part == "@usdc":
+            rows = _fetch_usdc(yf_module, ensure)
+        else:
+            rows = _part(yf_module, gated, part, ticker)
+        # 空表不当「取到了」：yfinance 被限流时有的成员不抛、只给空表——当成功缓存 6 小时，页面就一直「数据不够」
+        return (rows, {"reason": None}) if rows else (None, {"reason": "empty"})
     except Exception as exc:  # noqa: BLE001 - 取不到只是这几条判不了，页面照实写
         if BL._rate_limited(exc):
             return None, {"reason": "rate_limited", "retry_after_sec": BL._retry_after()}

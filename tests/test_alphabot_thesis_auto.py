@@ -437,3 +437,98 @@ class TestDisplayOnly:
     def test_never_writes_config(self):
         src = Path(TA.__file__).read_text(encoding="utf-8") + (ROOT / "alphabot/service.py").read_text(encoding="utf-8")
         assert not re.search(r"thesis_breaks_config[^\n]*(write_text|json\.dump|open\([^)]*['\"]w)", src)
+
+
+# ───────────────────────────── 二次检查补的（v0.45.777 同版）
+
+class TestNoOlderQuarterImpersonation:
+    """最近一季缺数时不许跳过它、拿更早的季度冒充「最近一季」。"""
+
+    def test_gm_latest_missing_is_insufficient(self):
+        v = TA.judge_gm_qoq_drop([q("2026-09-30", None, 100), q("2026-06-30", 40, 100), q("2026-03-31", 43, 100)], 2.0, TODAY)
+        assert v["reason"] == "insufficient" and "2026-09-30" in v["reason_zh"]
+
+    def test_eps_latest_without_estimate_is_insufficient(self):
+        eps = [{"quarter": "2026-09-30", "actual": 0.5, "estimate": None}, {"quarter": "2026-06-30", "actual": 2.0, "estimate": 1.0}]
+        assert TA.judge_eps_miss(eps, 20, TODAY)["reason"] == "insufficient"
+
+    def test_eps_unreported_quarter_is_skipped(self):
+        eps = [{"quarter": "2026-12-31", "actual": None, "estimate": 1.0}, {"quarter": "2026-09-30", "actual": 0.5, "estimate": 1.0}]
+        assert TA.judge_eps_miss(eps, 20, TODAY)["status"] == "fired"
+
+    def test_fcf_gap_in_latest_quarters_is_insufficient(self):
+        cf = [{"end": "2026-09-30", "fcf": None}, {"end": "2026-06-30", "fcf": -1}, {"end": "2026-03-31", "fcf": -1},
+              {"end": "2025-12-31", "fcf": -1}]
+        assert TA.judge_fcf_neg_streak(cf, 3, "「X」", TODAY)["reason"] == "insufficient"
+
+    def test_runway_cash_and_flow_must_be_same_quarter(self):
+        bal = [{"end": "2026-09-30", "cash": 100e6}]
+        cf = [{"end": "2026-09-30", "fcf": None}, {"end": "2026-06-30", "fcf": -60e6}, {"end": "2026-03-31", "fcf": -60e6}]
+        assert TA.judge_cash_runway(bal, cf, 6, "「X」", TODAY)["reason"] in ("insufficient", "nonconsecutive")
+        cf2 = [{"end": "2026-06-30", "fcf": -60e6}, {"end": "2026-03-31", "fcf": -60e6}]
+        assert TA.judge_cash_runway(bal, cf2, 6, "「X」", TODAY)["reason"] == "nonconsecutive"
+
+
+class TestUsdcGaps:
+    def rows(self, spec):
+        """spec = [(相对末根的小时数, 收盘)]，末根在 TODAY 09:00。"""
+        from datetime import timedelta
+        end = datetime(2026, 11, 16, 9)
+        return [{"t": (end - timedelta(hours=h)).isoformat(), "close": c} for h, c in spec]
+
+    def test_gap_does_not_glue_two_dips_into_a_fire(self):
+        # 两段各 12 小时低于 0.97，中间缺 1 小时：真有的连续只有 12 ⇒ 不许「已触发」；算上缺口可达 25 ⇒ 临界
+        spec = [(h, 1.0) for h in range(119, 30, -1)] + [(h, 0.96) for h in range(30, 18, -1)] \
+            + [(h, 0.96) for h in range(17, 5, -1)] + [(h, 1.0) for h in range(5, -1, -1)]
+        v = TA.judge_usdc_depeg(self.rows(spec), 0.97, 24, TODAY)
+        assert v["status"] == "unjudgeable" and v["reason"] == "borderline"
+
+    def test_full_coverage_short_dip_still_not_fired(self):
+        spec = [(h, 0.96 if 40 <= h < 50 else 1.0) for h in range(119, -1, -1)]
+        assert TA.judge_usdc_depeg(self.rows(spec), 0.97, 24, TODAY)["status"] == "not_fired"
+
+    def test_real_style_timestamps_parse(self):
+        rows = [{"t": f"2026-11-16 0{h}:00:00+00:00", "close": 1.0} for h in range(10)]
+        assert TA._ts(rows[0]["t"]) is not None
+
+
+class TestEmptyIsFailure:
+    def test_empty_frame_is_a_failure_not_cached_as_success(self):
+        class Empty(FakeYF):
+            def Ticker(self, t):  # noqa: N802
+                class T:
+                    quarterly_income_stmt = FakeFrame({})
+                return T()
+        rows, meta = TA.fetch_part("income", "NVDA", today=TODAY, yf_module=Empty())
+        assert rows is None and meta["reason"] == "empty" and "empty" in TA.REASONS
+
+    def test_service_caches_empty_only_briefly(self, tmp_path):
+        calls = []
+
+        def fn(part, t, today):
+            calls.append(part)
+            return None, {"reason": "empty"}
+        s, clock = _svc(tmp_path, fn)
+        s.thesis_auto("NVDA")
+        n = len(calls)
+        clock[0] += TA.RULES["fail_ttl_sec"] + 1
+        s.thesis_auto("NVDA")
+        assert len(calls) > n
+
+
+def test_yield_negative_age_is_not_called_close():
+    v = TA.judge_yield_above([{"date": "2026-11-17", "close": 5.1}], 5.0, TODAY)
+    assert "收盘前是盘中值" in v["facts"]
+
+
+def test_no_scan_files_is_not_applicable_and_does_not_fetch(tmp_path):
+    calls = []
+    s, _ = _svc(tmp_path, _ok_fetch(calls), dates=())
+    r = s.thesis_auto("NVDA")
+    assert r["applicable"] is False and calls == []
+
+
+def test_frontend_keeps_unchecked_rows_out_of_the_auto_table():
+    """条件原文改过 / 配置里没有的那几条没核对：页面不许把它们放进「自动核对」表、算成「判不了」。"""
+    js = (ROOT / "alphabot/static/pages/deep.js").read_text(encoding="utf-8")
+    assert 'new Set(["trigger_changed", "not_in_config"])' in js and "!NOT_CHECKED.has(c.verdict?.reason)" in js
