@@ -42,6 +42,7 @@ from alphabot import price_intraday as PI
 from alphabot import straddle as SD
 from alphabot import strangle_compare as SC
 from alphabot import tail_hedge as TH
+from alphabot import volume_board as VB
 from alphabot import wheel as WH
 from alphabot import wheel_prices as WP
 from alphabot import wheel_screen as WS
@@ -63,6 +64,7 @@ WATCH_LEASE_SEC = 150.0
 WATCH_POLL_SEC = 5.0
 #: 失败结果也短暂缓存：CBOE 不可达时别让每次切页都再排 15 秒 × 3 次重试
 FAIL_TTL_SEC = 15.0
+RAW_KEEP = 4             # 成交榜：内存里最多留几只票的原始链（v0.45.776）
 MAX_FOCUS = 5
 DEFAULT_FOCUS = ("NVDA", "TSLA", "MSFT", "META", "AMZN")
 DEFAULT_INTERVAL_MIN = 10
@@ -330,6 +332,9 @@ class AlphaBotService:
         self._am_excluded: Dict[str, int] = {}      # 指数票最近一次现算丢掉的上午结算合约数（`_live_fetch` 写）
         # 盘中成交活跃度：各票上一张**落盘**快照的逐合约成交量（只在内存里；重启后第一拍没有可比的，见 intraday_activity）
         self._act_prev: Dict[str, dict] = {}
+        # 成交榜（v0.45.776）：最近几次现算实际用到的原始链 `{标的: (取到的时刻, raw)}`——成交榜读它，不另取链
+        # （另取会多打一次 CBOE；走 Yahoo 备用源的票还会多挨限流）。一份整链约 1–2 MB ⇒ 只留最近 `RAW_KEEP` 只
+        self._raw_last: Dict[str, tuple] = {}
         self._premium_rules_cache: Optional[dict] = None     # 规则常量与文案表进程内不变：算一次
         self._cache: Dict[str, tuple] = {}
         self._bars_cache: Dict[tuple, dict] = {}
@@ -366,16 +371,25 @@ class AlphaBotService:
             if hit is not None and not force:
                 self.stats["live_cache_hits"] += 1
                 return self._stamp(hit)
-            fetch = self._live_fetch(t)
-            if _on_raw is not None:
-                base_fetch = fetch
+            base_fetch = self._live_fetch(t)
+            got_raw = []
 
-                def fetch(ticker, *, as_of=None):
-                    raw, reason = base_fetch(ticker, as_of=as_of)
-                    if raw is not None:
+            def fetch(ticker, *, as_of=None):
+                raw, reason = base_fetch(ticker, as_of=as_of)
+                if raw is not None:
+                    got_raw.append(True)
+                    self._keep_raw(t, raw)
+                    if _on_raw is not None:
                         _on_raw(raw)
-                    return raw, reason
-            res = clean_json(R.compute_live_detail(t, fetch_fn=fetch, state_dir=self.ledger_dir))
+                return raw, reason
+            try:
+                res = clean_json(R.compute_live_detail(t, fetch_fn=fetch, state_dir=self.ledger_dir))
+            finally:
+                # 这次现算没取到链 ⇒ 之前留的链不许冒充这次的（成交榜如实说没有）。取到之前不清：现算进行中别的请求
+                # 读到的仍是上一次那份（与此刻 live 缓存里的结果是同一次），清早了只会让它们以为链被挤掉、再多打一次取数
+                if not got_raw:
+                    with self._locks_guard:
+                        self._raw_last.pop(t, None)
             ok = bool(res.get("data_available"))
             ru = self._yf_retry_until.pop(t, None)
             if not ok and res.get("reason") == "yf_rate_limited" and ru is not None:
@@ -392,6 +406,42 @@ class AlphaBotService:
                 _log.warning("[%s] 现算不可得：%s", t, res.get("reason"))
             self._cache[t] = (self.clock(), res)
             return self._stamp(self._cache[t])
+
+    def _keep_raw(self, t: str, raw: dict) -> None:
+        with self._locks_guard:                   # 轮询线程与页面请求会同时现算不同的票
+            self._raw_last.pop(t, None)
+            self._raw_last[t] = (self.clock(), raw)
+            while len(self._raw_last) > RAW_KEEP:
+                self._raw_last.pop(next(iter(self._raw_last)))
+
+    def volume_board(self, ticker, params: Optional[dict] = None) -> dict:
+        """成交榜（v0.45.776）：同一只票「标的」页现算用的那份链，按当日累计成交量排合约（纯函数 `volume_board`）。
+        先走 `live()`（缓存内直接命中，`force=1` 时重拉）——标的页刚算过时不多发请求；现算有结果、链却不在（被别的票
+        挤出了 `RAW_KEEP`）⇒ 再强制现算一次。参数错 ⇒ BadRequest（带参数名）。"""
+        t = norm_ticker(ticker)
+        q = dict(params or {})
+        force = str(q.pop("force", "") or "") == "1"
+        try:
+            p = VB.parse_params(q)                    # 先验参数：参数错不该白拉一次链
+        except VB.ParamError as exc:
+            raise BadRequest(str(exc), param=exc.param) from exc
+        live = self.live(t, force=force)
+        ent = self._raw_last.get(t)
+        if live.get("data_available") and ent is None:
+            live = self.live(t, force=True)
+            ent = self._raw_last.get(t)
+        if not live.get("data_available"):
+            out = {"data_available": False, "reason": live.get("reason"), "fetch_failed": True,
+                   "retry_after_sec": live.get("retry_after_sec")}
+        else:
+            try:
+                out = VB.select(VB.build(ent[1] if ent else None), p)
+            except VB.ParamError as exc:
+                raise BadRequest(str(exc), param=exc.param) from exc
+            out["chain_age_sec"] = round(max(0.0, self.clock() - ent[0]), 1) if ent else None
+        out.update({"ticker": t, "demo": self.demo, "params": p, "rules": VB.public_rules(),
+                    "disclaimer": VB.DISCLAIMER})
+        return clean_json(out)
 
     def _howto(self, t: str, res: dict) -> dict:
         """「怎么卖」：同一份报价翻译成下单腿 / 限价 / 买回价 / 标的价位（纯函数，见 `alphabot/howto.py`）。
@@ -486,6 +536,7 @@ class AlphaBotService:
             "wheel": {**WH.public_rules(), "screen": WS.public_rules()},
             "compare": OC.public_rules(),
             "deep": DR.public_rules(),
+            "volume_board": VB.public_rules() | {"raw_keep": RAW_KEEP},
             # 帮助页「程序类」里给人抄的命令：进本代码目录、用运行本服务的解释器（从 .app 打开时就是 .app 记下的那个），
             # 不写死缺省、不假设人站在代码目录里（v0.45.611）
             "app": {"launcher": MA.here_command("-m alphabot.launcher"),
