@@ -112,7 +112,9 @@ def _zero() -> Dict[str, Any]:
     return {"calls": 0, "frames": 0, "dropped": 0, "first_row": 0, "last_row": 0, "last_row_pending": 0, "middle": 0,
             "calendar_unavailable": 0, "uninspectable": 0, "items_total": 0, "items": [], "by_source": {},
             # v0.45.773：download 返回里混进了没请求的票（并发串数据）——几次、共几只外来票、前 20 条明细
-            "identity_mismatch": 0, "identity_foreign": 0, "identity_items": []}
+            "identity_mismatch": 0, "identity_foreign": 0, "identity_items": [],
+            # v0.45.781：history() 取数失败被 yfinance 吞成 None 下标 TypeError（已改名 YFFetchMasked 抛出）的次数
+            "fetch_masked": 0}
 
 
 _stats.update(_zero())
@@ -188,12 +190,44 @@ def history(tk, *, source: str, **request) -> Tuple[Any, bool]:
     没有空行时第一项就是 yfinance 返回的同一个对象。`source` 必须是 `SOURCES` 里的名字。取数异常原样抛（调用方原有的
     except 照旧接）。返回的不是 DataFrame（只在测试桩里见过）⇒ 原样返回、计 `uninspectable`，不猜。"""
     _check_source(source)
-    hist = tk.history(**request)
+    try:
+        hist = tk.history(**request)
+    except TypeError as e:
+        if not _is_masked_fetch_failure(e):
+            raise
+        _count_masked(source)
+        raise YFFetchMasked(
+            f"yfinance 取数失败（{getattr(tk, 'ticker', '?')}，source={source}）：底层异常（网络 / TLS / 非 JSON 响应）被 yfinance "
+            f"hide_exceptions 吞掉，原因不可见；yfinance 随后在 history.py 抛了 {type(e).__name__}: {e}") from e
     _count_call(source)
     if not _is_frame(hist):
         _count_uninspectable()
         return hist, False
     return _strip(source, str(getattr(tk, "ticker", "?")), hist, _is_daily(request))
+
+
+class YFFetchMasked(TypeError):
+    """yfinance 1.2.0 `PriceHistory.history` 取数失败被吞后抛的那个 `TypeError` 的改名（v0.45.781）。
+
+    机制（`yfinance/scrapers/history.py` 约 205–221 行）：`data = None` → GET / `.json()` 抛任何异常（curl (35) TLS、超时、
+    非 JSON 的 429 文本……）→ 缺省 `hide_exceptions=True` 下 `except Exception` 不抛也不记 → 紧接着 `data['chart']['result']`
+    ⇒ `TypeError: 'NoneType' object is not subscriptable`。调用方 / MCP 看到的是一个像代码 bug 的报错，网络原因整条丢了
+    （2026-11-17 MCP 蜡烛那次即此；同一窗口的 TLS (35) 只在没被吞的 option_chain 路径上留下了日志）。
+
+    **只改名、不改行为**：仍是 `TypeError` 子类，现有 `except TypeError` / `except Exception` 一条不变（评分冻结期内作废 0 条）。
+    不用 `raise_errors=True` 是因为它同时把「空数据返回空帧」改成抛 `YFPricesMissingError`，会改二十多个调用方的空数据路径。
+    原始异常已被 yfinance 丢弃，这里**拿不回来**——消息只能说清「是取数失败、不是代码 bug」。计数见 `stats()["fetch_masked"]`。"""
+
+
+def _is_masked_fetch_failure(e: TypeError) -> bool:
+    """认这一种：消息是 None 下标，且抛点（回溯最内层）在 yfinance 的 `scrapers/history.py`。别处的 TypeError 原样抛。"""
+    if "NoneType" not in str(e) or "subscriptable" not in str(e):
+        return False
+    tb = e.__traceback__
+    while tb is not None and tb.tb_next is not None:
+        tb = tb.tb_next
+    path = (tb.tb_frame.f_code.co_filename if tb is not None else "").replace("\\", "/")
+    return path.endswith("yfinance/scrapers/history.py")
 
 
 def download(yf_module, *args, source: str, **request) -> Tuple[Any, Dict[str, bool]]:
@@ -364,6 +398,13 @@ def _count_call(source: str) -> None:
         _by(source)["calls"] += 1
 
 
+def _count_masked(source: str) -> None:
+    with _lock:
+        _stats["fetch_masked"] += 1
+        _by(source).setdefault("fetch_masked", 0)
+        _by(source)["fetch_masked"] += 1
+
+
 def _count_uninspectable() -> None:
     with _lock:
         _stats["uninspectable"] += 1
@@ -407,7 +448,8 @@ def stats() -> Dict[str, Any]:
     ``first_row`` 首段（正常）、``middle`` 窗口中间（yfinance 1.2.0 不会产生，出现 = yfinance 行为变了）；末段按份数分两种：
     ``last_row`` = 最近一场已收盘的 K 线缺了（refuse 的调用方已当取不到），``last_row_pending`` = 今天那场还没收（盘前跑，照用）；
     ``calendar_unavailable`` = 交易日历判不了、按缺了算的份数；``items_total`` = 「缺了」的份数 + 中间行数，``items`` 是前 20 条明细；
-    ``uninspectable`` = 返回的不是 DataFrame / 认不出的多层列；``by_source`` 逐调用点。"""
+    ``uninspectable`` = 返回的不是 DataFrame / 认不出的多层列；``fetch_masked`` = history() 取数失败被 yfinance 吞成
+    None 下标 TypeError、已改名 `YFFetchMasked` 抛出的次数（逐调用点的同名键只在发生过时出现）；``by_source`` 逐调用点。"""
     with _lock:
         return {**_stats, "items": [dict(x) for x in _stats["items"]],
                 "identity_items": [dict(x) for x in _stats["identity_items"]],
