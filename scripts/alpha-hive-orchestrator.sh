@@ -1796,10 +1796,11 @@ fi
 log "INFO" "📊 总耗时：${TOTAL_DURATION}s"
 log "INFO" "📂 日志位置：$LOGFILE"
 log "INFO" ""
-log "INFO" "✅ Phase 1 流程：Step 1-5（数据采集、蜂群分析、ML 报告、仪表板、部署）"
-log "INFO" "✨ Phase 2 Week 1：Step 6（智能告警）"
-log "INFO" "✨ Phase 2 Week 3：Week 3 内集成（动态蜂群扩展 - AdaptiveSpawner）"
-log "INFO" "✨ Phase 2 Week 4：Step 9（信息素持久化 + T+1/T+7/T+30 准确率追踪）"
+# v0.45.779：这里原有四行手写的「Phase 1 / Phase 2 Week N」步骤清单日志，已删。
+# 它们不跟着代码走，删步骤时没人改：每天还在打印 v0.45.546 删掉的 Step 1（data_fetcher）、
+# v0.45.316 删掉的 Step 9（pheromone_recorder.py，从未存在），以及早已不在仓库里的
+# AdaptiveSpawner。哪些步骤真跑了，看各步自己的「【Step N】… - 启动」行与 status.json，
+# 别在这里再手写一份步骤清单。
 
 # 清理全局看门狗
 kill "$_GLOBAL_WATCHDOG_PID" 2>/dev/null

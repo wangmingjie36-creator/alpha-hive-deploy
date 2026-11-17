@@ -17,8 +17,8 @@
 | 协议 | 对应代码 | 细节在哪（按路径加载的规则 / auto-memory） |
 |---|---|---|
 | `sell_strike_routing_prereg.md`（v0.45.333） | `sell_strike_*.py` | `.claude/rules/options-ledgers.md`；`alpha-hive-sell-strike-selector.md` |
-| `straddle_gex_prereg.md`（v0.45.424） | `straddle_gex_prereg.py`、`options_paper_leg.py` | `.claude/rules/options-ledgers.md`（「跨式」页条）；`alpha-hive-straddle-gex-prereg.md` |
-| `straddle_strangle_shadow_prereg.md`（v1 v0.45.586，修订 2–5） | `straddle_strangle_shadow.py` | `.claude/rules/options-ledgers.md`；`alpha-hive-strangle-compare.md` |
+| `straddle_gex_prereg.md`（v0.45.424） | `straddle_gex_prereg.py`、`options_paper_leg.py` | `.claude/rules/options-ledgers.md`（「跨式」页条）；`alpha-hive-straddle-prereg-and-page.md` |
+| `straddle_strangle_shadow_prereg.md`（v1 v0.45.586，修订 2–5） | `straddle_strangle_shadow.py` | `.claude/rules/options-ledgers.md`；`alpha-hive-straddle-prereg-and-page.md` |
 | `sell_put_wheel_prereg.md`（v0.45.720，规则登记） | `sell_put_wheel.py` | `.claude/rules/options-ledgers.md`；`alpha-hive-sell-put-research.md` |
 | `llm_shadow_prereg.md`（v0.45.555） | `llm_shadow_scan.py`、`llm_shadow_report.py` | `.claude/rules/llm-shadow.md`；`alpha-hive-llm-ab-pilot.md` |
 | `dim_ic_preregistration.md`（维度 IC，P1） | `experiments/dim_ic_protocol.py`、`experiments/dim_ic_forward_test.py`、根目录 `buzz_v1*.py` | `.claude/rules/data-intake.md`；`alpha-hive-locked-tasks.md`、`alpha-hive-buzz-frozen-scorer.md` |
