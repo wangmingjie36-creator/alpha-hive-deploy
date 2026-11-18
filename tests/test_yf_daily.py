@@ -1352,3 +1352,75 @@ def test_entry_module_does_not_import_data_pipeline():
     names = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names} | {
         n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
     assert "data_pipeline" not in names and "price_metrics" in names
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# v0.45.781：取数失败被 yfinance 吞成 None 下标 TypeError ⇒ 改名 YFFetchMasked
+# ══════════════════════════════════════════════════════════════════════════
+
+class _FailingYfTicker:
+    """yfinance 自己的 `PriceHistory.history()`，底层 GET 抛 `exc`（不联网）。"""
+
+    def __init__(self, exc):
+        from yfinance.scrapers.history import PriceHistory
+
+        class _Data:
+            def get(self_inner, url, params, timeout):
+                raise exc
+            cache_get = get
+
+        self.ticker = "FAKE"
+        self._ph = PriceHistory(_Data(), self.ticker, TZ, session=object())
+
+    def history(self, **kw):
+        return self._ph.history(**kw)
+
+
+class TestMaskedFetchFailure:
+    """2026-11-17：MCP 蜡烛报 `'NoneType' object is not subscriptable`，真因是同一窗口的 curl (35) TLS 失败被 yfinance 吞了。"""
+
+    def _tls(self):
+        from curl_cffi.requests.exceptions import SSLError
+        return SSLError("Failed to perform, curl: (35) TLS connect error (test)")
+
+    def test_positive_control_raw_yfinance_masks_network_error_as_typeerror(self):
+        """前提：yfinance 1.2.0 真的把网络异常吞成 None 下标 TypeError。换版本后这里红 = 重新核对。"""
+        with pytest.raises(TypeError) as ei:
+            _FailingYfTicker(self._tls()).history(period="5d")
+        assert type(ei.value) is TypeError and "NoneType" in str(ei.value)
+        assert yf_daily._is_masked_fetch_failure(ei.value)
+        assert not yf_daily._is_masked_fetch_failure(TypeError("'NoneType' object is not subscriptable"))
+
+    @pytest.mark.parametrize("exc", [ConnectionError("reset"), TimeoutError("slow"), ValueError("not json")])
+    def test_entry_renames_and_counts_and_stays_a_typeerror(self, exc):
+        with pytest.raises(yf_daily.YFFetchMasked) as ei:
+            yf_daily.history(_FailingYfTicker(exc), source="mcp_price_history", period="5d")
+        assert isinstance(ei.value, TypeError), "必须仍是 TypeError：现有 except 一条不变（冻结期作废 0 条）"
+        msg = str(ei.value)
+        assert "取数失败" in msg and "FAKE" in msg and "mcp_price_history" in msg and "hide_exceptions" in msg
+        assert isinstance(ei.value.__cause__, TypeError)
+        st = yf_daily.stats()
+        assert st["fetch_masked"] == 1 and st["by_source"]["mcp_price_history"]["fetch_masked"] == 1
+        assert st["calls"] == 0, "失败的调用不计 calls（与改前一致）"
+
+    def test_tls_error_case(self):
+        with pytest.raises(yf_daily.YFFetchMasked):
+            yf_daily.history(_FailingYfTicker(self._tls()), source="options_hv", period="5d")
+
+    def test_other_typeerrors_pass_through_unchanged(self):
+        class _Bug:
+            ticker = "X"
+
+            def history(self, **kw):
+                data = None
+                return data["chart"]          # 同样的消息，但抛点不在 yfinance ⇒ 不改名
+        with pytest.raises(TypeError) as ei:
+            yf_daily.history(_Bug(), source="options_hv", period="1y")
+        assert type(ei.value) is TypeError
+        assert yf_daily.stats()["fetch_masked"] == 0
+
+    def test_empty_data_path_unchanged(self):
+        """空数据仍返回空帧、不抛（这正是不用 raise_errors=True 的原因）。"""
+        payload = {"chart": {"result": None, "error": {"code": "Not Found", "description": "No data found"}}}
+        out, _last = yf_daily.history(_RealYfTicker(payload), source="options_hv", period="5d")
+        assert out.empty
