@@ -148,10 +148,6 @@ git -C ~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory add -A && git -C 
 
 只影响**开发检出**（阶段 8 起生产代码与数据都不在 iCloud 同步里）。macOS「桌面与文稿同步 iCloud」持续产出 `xxx 2.py` / `settings.local 2.json` 式副本（空格 + 数字）。**已知故障**：`git fetch` 报 `fatal: bad object refs/heads/... 2`——实际是 refname 含空格非法；**诊断** `find .git/refs -type f -name "* *"`。⚠️ **清理前必读** auto-memory `alpha-hive-environment-facts.md`（副本可能含未提交内容，不能无脑 `rm`）。**根治**是把项目移出 iCloud 同步——用户的机器设置，**由用户决定，不要自行更改**。全文 → `tests/CLAUDE.md`
 
-## 已知问题 / 注意事项（长期有效项）
-
-- `BearBeeContrarian` 不在 `feedback_loop.calculate_agent_contribution()` 的 5 维映射中——设计如此，Bear 是元蜂不直接对应评估维度
-
 ---
 
 # 蜂群规格（原 ~/CLAUDE.md，2026-08-11 并入）
