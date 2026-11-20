@@ -143,16 +143,22 @@ class TestDividends:
 
 class TestMarket:
     def test_yield_above(self):
-        v = TA.judge_yield_above([{"date": "2026-11-13", "close": 5.154}], 5.0, TODAY)
-        assert v["status"] == "fired" and "收盘" in v["facts"]
+        v = TA.judge_yield_above({"date": "2026-11-13", "y10": 5.15}, 5.0, TODAY)
+        assert v["status"] == "fired" and "财政部" in v["facts"] and "5.15%" in v["facts"]
 
-    def test_same_day_value_is_not_called_close(self):
-        v = TA.judge_yield_above([{"date": "2026-11-16", "close": 4.9}], 5.0, TODAY)
-        assert v["status"] == "not_fired" and "盘中" in v["facts"]
+    def test_yield_below(self):
+        assert TA.judge_yield_above({"date": "2026-11-13", "y10": 4.99}, 5.0, TODAY)["status"] == "not_fired"
+
+    def test_yield_rounding_band(self):
+        """官方只给两位小数：5.00 的真值在 4.995～5.005，分不出是否「高于 5.0」；5.01 一定高于。"""
+        v = TA.judge_yield_above({"date": "2026-11-13", "y10": 5.00}, 5.0, TODAY)
+        assert v["status"] == "unjudgeable" and v["reason"] == "borderline"
+        assert TA.judge_yield_above({"date": "2026-11-13", "y10": 5.01}, 5.0, TODAY)["status"] == "fired"
 
     def test_yield_stale_and_out_of_bounds(self):
-        assert TA.judge_yield_above([{"date": "2026-10-01", "close": 5.2}], 5.0, TODAY)["reason"] == "stale"
-        assert TA.judge_yield_above([{"date": "2026-11-13", "close": 51.5}], 5.0, TODAY)["reason"] == "out_of_bounds"
+        assert TA.judge_yield_above({"date": "2026-10-01", "y10": 5.2}, 5.0, TODAY)["reason"] == "stale"
+        assert TA.judge_yield_above({"date": "2026-11-13", "y10": 51.5}, 5.0, TODAY)["reason"] == "out_of_bounds"
+        assert TA.judge_yield_above(None, 5.0, TODAY)["reason"] == "insufficient"
 
     def hourly(self, closes):
         """逐小时递增、最后一根落在 TODAY（真实小时线的样子）。"""
@@ -169,15 +175,44 @@ class TestMarket:
         closes = [1.0] * 40 + [0.96] * 23 + [1.0] * 57
         assert TA.judge_usdc_depeg(self.hourly(closes), 0.97, 24, TODAY)["status"] == "not_fired"
 
+    def test_window_is_last_days_from_last_bar(self):
+        """多取的那两天不算：最早 30 小时里的脱钩落在窗口外，窗口里 120 根齐全 ⇒ 未触发（不是判不了）。"""
+        closes = [0.96] * 30 + [1.0] * 120
+        assert TA.judge_usdc_depeg(self.hourly(closes), 0.97, 24, TODAY)["status"] == "not_fired"
+
+    def test_coverage_is_counted_inside_window(self):
+        """取回的根数比窗口多，不代表窗口里齐：窗口内缺 20 小时 ⇒ 覆盖 83%，判不了。"""
+        rows = self.hourly([1.0] * 150)
+        rows = rows[:40] + rows[60:]
+        v = TA.judge_usdc_depeg(rows, 0.97, 24, TODAY)
+        assert v["status"] == "unjudgeable" and v["reason"] == "insufficient"
+
+    def test_fetch_takes_more_than_window(self):
+        src = Path(TA.__file__).read_text(encoding="utf-8")
+        assert "period=f\"{int(RULES['usdc_window_days']) + 2}d\"" in src
+
     def test_low_coverage_cannot_say_not_fired(self):
         """缺的那几小时可能正是脱钩：覆盖不够时不许写「未触发」。"""
         v = TA.judge_usdc_depeg(self.hourly([1.0] * 60), 0.97, 24, TODAY)
         assert v["status"] == "unjudgeable" and v["reason"] == "insufficient"
 
+    CIRCLE = {"usdc": 68.6e9, "chains": 39, "as_of": "2026-11-16"}
+
     def test_share(self):
-        assert TA.judge_usdc_share({"usdc": 69e9, "total": 287e9, "n_assets": 300}, 20)["status"] == "not_fired"
-        assert TA.judge_usdc_share({"usdc": 50e9, "total": 287e9, "n_assets": 300}, 20)["status"] == "fired"
-        assert TA.judge_usdc_share({"usdc": None, "total": 287e9}, 20)["reason"] == "insufficient"
+        st = {"usdc": 69e9, "total": 287e9, "n_assets": 300}
+        assert TA.judge_usdc_share(st, self.CIRCLE, 20, TODAY)["status"] == "not_fired"
+        assert TA.judge_usdc_share(st, {**self.CIRCLE, "usdc": 50e9}, 20, TODAY)["status"] == "fired"
+        assert TA.judge_usdc_share({"usdc": None, "total": 287e9}, self.CIRCLE, 20, TODAY)["reason"] == "insufficient"
+        assert TA.judge_usdc_share(st, None, 20, TODAY)["reason"] == "insufficient"
+
+    def test_share_swaps_llama_usdc_for_circle(self):
+        """分母 = DeFiLlama 合计里把它自己的 USDC 换成 Circle 的：(287 − 69) + 68.6 = 286.6。"""
+        v = TA.judge_usdc_share({"usdc": 69e9, "total": 287e9, "n_assets": 300}, self.CIRCLE, 20, TODAY)
+        assert "286.6" in v["facts"] and f"{68.6 / 286.6 * 100:.1f}%" in v["facts"] and "Circle" in v["facts"]
+
+    def test_share_stale_circle(self):
+        v = TA.judge_usdc_share({"usdc": 69e9, "total": 287e9}, {**self.CIRCLE, "as_of": "2026-11-01"}, 20, TODAY)
+        assert v["reason"] == "stale"
 
 
 # ───────────────────────────── 规则表与配置
@@ -294,6 +329,48 @@ class TestFetch:
                                     {"symbol": "X", "circulating": {"peggedUSD": None}}]}
         st, meta = TA.fetch_part("@stables", "CRCL", today=TODAY, http_get=lambda url: payload)
         assert meta["reason"] is None and st["usdc"] == 70e9 and st["total"] == 250e9 and st["n_assets"] == 2
+
+    def test_circle_parse(self):
+        payload = {"data": [{"symbol": "EURC", "totalAmount": "300000000"},
+                            {"symbol": "USDC", "totalAmount": "68622128844.16",
+                             "chains": [{"chain": "ETH", "amount": "1", "updateDate": "2026-11-15T03:00:00Z"},
+                                        {"chain": "SOL", "amount": "1", "updateDate": "2026-11-16T03:01:01.861Z"}]}]}
+        got, meta = TA.fetch_part("@circle", "CRCL", today=TODAY, http_get=lambda url: payload)
+        assert meta["reason"] is None and got == {"usdc": 68622128844.16, "chains": 2, "as_of": "2026-11-16"}
+
+    def test_circle_without_usdc_is_empty_not_success(self):
+        got, meta = TA.fetch_part("@circle", "CRCL", today=TODAY, http_get=lambda url: {"data": []})
+        assert got is None and meta["reason"] == "empty"
+
+    def test_ust10_latest(self):
+        asked = []
+
+        def tg(d):
+            asked.append(d)
+            return {"date": "2026-11-13", "y10": 5.15, "y2": 4.7, "source": "treasury_gov"}
+        got, meta = TA.fetch_part("@ust10", "NEE", today=TODAY, treasury_get=tg)
+        assert meta["reason"] is None and got == {"date": "2026-11-13", "y10": 5.15} and asked == [None]
+
+    def test_ust10_month_start_asks_previous_month_once(self):
+        """本月还没有官方值（11-01 是周日）⇒ 只补问一次上月最后一个工作日（10-30 周五），不逐日回找。"""
+        asked = []
+
+        def tg(d):
+            asked.append(d)
+            return {"date": "2026-10-30", "y10": 4.94} if d == "2026-10-30" else None
+        got, meta = TA.fetch_part("@ust10", "NEE", today=date(2026, 11, 1), treasury_get=tg)
+        assert got == {"date": "2026-10-30", "y10": 4.94} and asked == [None, "2026-10-30"]
+
+    def test_ust10_unavailable_is_empty(self):
+        asked = []
+        got, meta = TA.fetch_part("@ust10", "NEE", today=TODAY, treasury_get=lambda d: asked.append(d))
+        assert got is None and meta["reason"] == "empty" and asked == [None]
+
+    def test_ust10_exception_never_raises(self):
+        def tg(d):
+            raise OSError("down")
+        got, meta = TA.fetch_part("@ust10", "NEE", today=TODAY, treasury_get=tg)
+        assert got is None and meta == {"reason": "fetch_error", "detail": "OSError"}
 
 
 # ───────────────────────────── service
@@ -432,7 +509,7 @@ class TestDisplayOnly:
             elif isinstance(n, ast.ImportFrom):
                 mods.add((n.module or "").split(".")[0])
         assert mods <= {"__future__", "math", "datetime", "typing", "alphabot", "yf_daily", "yfinance", "yf_gate",
-                        "json", "urllib"}, mods
+                        "json", "urllib", "treasury_yields"}, mods
 
     def test_never_writes_config(self):
         src = Path(TA.__file__).read_text(encoding="utf-8") + (ROOT / "alphabot/service.py").read_text(encoding="utf-8")
@@ -516,9 +593,12 @@ class TestEmptyIsFailure:
         assert len(calls) > n
 
 
-def test_yield_negative_age_is_not_called_close():
-    v = TA.judge_yield_above([{"date": "2026-11-17", "close": 5.1}], 5.0, TODAY)
-    assert "收盘前是盘中值" in v["facts"]
+def test_yield_source_is_official_not_tnx():
+    """有权威值的量用权威源（v0.45.785）：收益率不再走 Yahoo ^TNX，USDC 流通量要 Circle 的数。"""
+    assert TA.NEEDS["yield_above"][0] == ("@ust10",) and "财政部" in TA.NEEDS["yield_above"][1]
+    assert "@circle" in TA.NEEDS["usdc_share"][0]
+    src = Path(TA.__file__).read_text(encoding="utf-8")
+    assert 'Ticker("^TNX"' not in src and "alphabot_thesis_tnx" not in src
 
 
 def test_no_scan_files_is_not_applicable_and_does_not_fetch(tmp_path):
