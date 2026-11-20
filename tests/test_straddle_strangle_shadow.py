@@ -429,6 +429,24 @@ class TestEndToEndByHand:
         assert SS.units([c])[0]["status"] == "exit_unpriced" and SS.stats()["exit_unpriced"] == 1 and SS.stats()["errors"] == 0
 
 
+class TestLedgerBidZeroExitKeepsShadowPriced:
+    """v0.45.787：账本一条腿 bid=0、按 ask 买回平仓。mark_source 仍是 `cboe_mid`（成交约定没变），所以影子宽跨走同一条
+    重新报价的路径，**不**落到 `ledger_<basis>` 的 `unpriced`（那会静默把这笔单位踢出检验）。影子自己的腿 bid=0 本来就按 ask 定价。"""
+
+    def test_atm_leg_bid0_ledger_closes_and_shadow_stays_priced(self, tmp_path, monkeypatch):
+        _paths(tmp_path, monkeypatch, "bid0")
+        _run(AS_OF, [_signal()])
+        zero = {"quote_ok": False, "bid": 0.0, "ask": 0.05, "mid": None}
+        _run(EXIT_DAY, [], quotes_fn=exit_quotes({ATM_C: zero, SH_C: {"quote_ok": False, "bid": 0.0, "ask": 0.3, "mid": None}}))
+        c = _closed_rows()[0]
+        assert c["mark_source"] == "cboe_mid" and c["exit_bid0_legs"] == ["call"]
+        assert c["exit_premium"] == pytest.approx(0.05 + 6.1)
+        ex = c["shadow_strangle"]["exit"]
+        assert ex["status"] == "ok" and ex["basis"] == "cboe_mid", ex
+        assert ex["exit_premium"] == pytest.approx(0.3 + 3.0)               # 影子的 bid=0 腿也按 ask
+        assert SS.units([c])[0]["status"] == "ok" and SS.stats()["exit_unpriced"] == 0
+
+
 class TestReaders:
     KEYS = ("strangle_quote", "shadow_strangle")
     ALLOWED_FILES = {"earnings_vol_signal.py", "options_paper_leg.py", "straddle_strangle_shadow.py"}
