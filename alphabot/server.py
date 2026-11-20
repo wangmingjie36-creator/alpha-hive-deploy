@@ -23,6 +23,7 @@ from starlette.staticfiles import StaticFiles
 
 from alphabot import __version__
 from alphabot.chat import ChatEngine, ChatError
+from alphabot.thesis_claude import ThesisClaude
 from alphabot.code_version import CodeVersion
 from alphabot.service import (AlphaBotService, BadRequest, IntradayPoller, MAX_FOCUS, clean_json,
                               market_session)
@@ -48,7 +49,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
                port: int = 8765, start_poller: bool = False,
                on_shutdown: Optional[Callable[[], None]] = None, from_app: bool = False,
                chat: Optional[ChatEngine] = None, outbound: Optional[dict] = None,
-               code_version: Optional[CodeVersion] = None) -> Starlette:
+               code_version: Optional[CodeVersion] = None, thesis_claude: Optional[ThesisClaude] = None) -> Starlette:
     """`on_shutdown`：页面「停止服务」调它（`alphabot.__main__` 传入 uvicorn 的退出开关）；
     不传 ⇒ `/api/shutdown` 答 400，页面也不显示该按钮。
     `from_app`：由 Alpha Bot.app 起的（`--from-app`）——`/api/ping` 报出来，启动器据此决定关窗时停不停它；
@@ -61,6 +62,8 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
     缺省在这里建 = 记下此刻的 HEAD；测试可换（配假 git）。"""
     svc = service or AlphaBotService()
     chat = chat or ChatEngine(svc)
+    # 「让 Claude 核对」（v0.45.794）：花钱走 `chat` 的同一道闸；测试可换（配假引擎 / 同步 spawn）
+    thesis_claude = thesis_claude or ThesisClaude(svc, chat, conditions_fn=svc.thesis_manual, dates_fn=svc.compare_dates)
     code_version = code_version or CodeVersion()
     allowed_hosts = {f"{h}:{port}" for h in LOOPBACK_HOSTS} | set(LOOPBACK_HOSTS)
 
@@ -258,6 +261,24 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
             _log.warning("对话失败：%s: %s", type(exc).__name__, exc)
             return _json({"error": f"对话失败：{type(exc).__name__}: {exc}"}, 502)
 
+    async def thesis_claude_api(request: Request):
+        """GET = 条件、预估费用、今天已花、上次结果与进度；POST {"confirm": true} = 开始核对（后台跑，页面轮询 GET）。
+        POST 只认真布尔 confirm：页面先弹出预估、人点了确定才带上（花钱的唯一入口）。"""
+        from starlette.concurrency import run_in_threadpool
+        t = request.path_params["ticker"]
+        if request.method == "GET":
+            return _json(await run_in_threadpool(thesis_claude.status, t, _q(request, "date")))
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return _json({"error": "请求体须为 JSON"}, 400)
+        if not isinstance(body, dict):
+            return _json({"error": "请求体须为 JSON 对象"}, 400)
+        try:
+            return _json(await run_in_threadpool(thesis_claude.start, t, body.get("confirm")))
+        except ChatError as exc:
+            return _json({"error": str(exc)}, exc.status)
+
     def snap_now(request: Request):
         if svc.demo:
             return _json({"error": "演示模式不写快照"}, 400)
@@ -302,6 +323,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/wheel", wheel),
         Route("/api/deep/{ticker}", deep),
         Route("/api/thesis-auto/{ticker}", thesis_auto),
+        Route("/api/thesis-claude/{ticker}", thesis_claude_api, methods=["GET", "POST"]),
         Route("/api/compare", compare),
         Route("/api/compare/{ticker}", compare_ticker),
         Route("/api/wheel/screen", wheel_screen),

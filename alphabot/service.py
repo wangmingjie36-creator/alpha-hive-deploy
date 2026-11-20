@@ -694,6 +694,17 @@ class AlphaBotService:
         self._thesis_config_cache = (key, data)
         return data, None
 
+    def thesis_manual(self, ticker) -> Tuple[List[dict], Optional[str]]:
+        """「让 Claude 核对」的条件清单（v0.45.794）：这只票不归机器判据、也不归 `thesis_auto` 的人工条件 → `(条件, 出错原因)`。"""
+        from alphabot import thesis_claude as TC  # noqa: PLC0415 - 只有按钮那一页用到
+        t = self._local_name(norm_ticker(ticker)).upper()
+        cfg, err = self._thesis_config()
+        if err:
+            return [], err
+        block = cfg.get(t)
+        auto_ids = {i for (tk, i) in TA.CHECKS if tk == t}
+        return TC.manual_conditions(block if isinstance(block, dict) else {}, auto_ids), None
+
     def _thesis_part(self, part: str, t: str, today) -> Tuple[object, dict]:
         key = part if part in TA.GLOBAL_PARTS else f"{t}:{part}"
         ent = self._thesis_cache.get(key)

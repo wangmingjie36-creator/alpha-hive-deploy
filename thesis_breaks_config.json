@@ -81,7 +81,7 @@
         {
           "id": "export_ban",
           "metric": "美国芯片出口禁令",
-          "trigger": "直接禁止对华 H100/H800 销售",
+          "trigger": "美国商务部（BIS）新发布规则，禁止或收紧 NVIDIA 当前在售对华产品（H20 / H200 等）的销售；已生效的旧限制（如 H100 / H800）不算",
           "data_source": "商务部公告",
           "check_frequency": "实时",
           "current_status": "⚠️ 监管风险中等",

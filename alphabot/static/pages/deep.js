@@ -62,7 +62,58 @@ function summary(d) {
 // 证伪条件（v0.45.777 起分三块）：扫描能判的机器条件 / Alpha Bot 自动核对的几条人工条件 / 其余需人工判断的（折叠）。
 // 自动核对另走 `/api/thesis-auto`（要去 Yahoo 取季报，首次几秒），先把这一块画成「正在核对」，结果回来再整块重画。
 const AUTO_CHIP = { fired: ["neg", "已触发"], partial: ["warn", "数字部分已满足"] };
-function thesisBlock(d, auto) {
+const usd2 = (v) => (isNum(v) ? `$${num(v, 2)}` : "—");
+const etTime = (s) => (s ? s.slice(0, 16).replace("T", " ") : "—");
+
+// 「让 Claude 核对」（v0.45.794，只开 NVDA）：人点按钮、确认预估后才花钱；结果是核对那一刻的结论，只对最新一天显示。
+// 有效结果 = 条件原文没改过、跑出了三种结论之一；出错的那条照旧算「需人工判断」。
+const CL_CHIP = { fired: ["neg", "已触发"], not_fired: [null, "未触发"], unjudgeable: ["sub", "判不了"] };
+function claudeValid(cl) {
+  if (!cl || !cl.available || !cl.applicable || !cl.last) return [];
+  return (cl.last.results || []).filter((r) => !r.stale && r.status);
+}
+function claudePart(cl, onStart) {
+  if (!cl || !cl.supported) return null;
+  if (!cl.available) return cl.reason === "demo" ? null : note(`Claude 核对：${cl.reason_zh || cl.reason || "不可用"}`);
+  if (!cl.applicable) return note("Claude 联网核对的结果是核对那一刻的结论，只在最新一天显示。");
+  const n = (cl.conditions || []).length;
+  if (!n) return null;
+  const last = cl.last, valid = claudeValid(cl), rules = cl.rules || {}, est = cl.estimate || {};
+  const errors = last ? (last.results || []).filter((r) => !r.stale && !r.status) : [];
+  const stale = last ? (last.results || []).filter((r) => r.stale) : [];
+  const src = (r) => ((r.sources || []).length ? h("ul", { class: "small" }, r.sources.map((x) =>
+    h("li", {}, h("a", { href: x.url, target: "_blank", rel: "noopener noreferrer" }, x.what || x.url), x.date ? `（${x.date}）` : ""))) : null);
+  const conf = { high: "高", medium: "中", low: "低" };
+  const cols = [
+    { label: "级别", render: (r) => (r.level === 2 ? h("span", { class: "chip neg" }, "止损") : h("span", { class: "chip warn" }, "预警")) },
+    { label: "条件", render: (r) => h("div", {}, h("b", {}, r.label || r.id), h("div", { class: "small muted" }, r.trigger || "")) },
+    { label: "核对结果", render: (r) => h("div", { class: "small" }, r.finding || "—",
+      r.ambiguity ? h("div", { class: "muted" }, `措辞歧义：${r.ambiguity}`) : null, src(r),
+      h("div", { class: "muted" }, `依据截至 ${r.as_of || "—"}，把握${conf[r.confidence] || "未注明"}，这条花了 ${usd2(r.cost_usd)}`)) },
+    { label: "状态", render: (r) => { const c = CL_CHIP[r.status];
+      if (!c) return "—";
+      return c[0] === "sub" ? h("span", { class: "sub" }, c[1]) : c[0] ? h("span", { class: `chip ${c[0]}` }, c[1]) : c[1]; } },
+  ];
+  const spent = isNum(cl.spent_today) ? `今天已花 ${usd2(cl.spent_today)} / 上限 ${usd2(cl.cap_usd)}（与对话抽屉共用）` : (cl.spend_error || "今天已花多少读不了");
+  const running = cl.running;
+  const btn = running ? h("p", { class: "callout" }, `正在核对第 ${running.done + 1} / ${running.total} 条（${running.current}）……每条约一到三分钟，可以先看别的，回来再看。`)
+    : h("button", { class: "btn", type: "button", onclick: () => onStart && onStart(n, est, rules, spent) },
+      `${last ? "重新" : ""}让 Claude 核对这 ${n} 条（约 ${usd2(est.low_usd)}–${usd2(est.high_usd)}）`);
+  return h("div", {},
+    h("h4", {}, `Claude 联网核对的 ${n} 条`, last ? h("span", { class: "sub" }, ` 上次核对 ${etTime(last.started_at)}（美东），共花 ${usd2(last.spent_usd)}`) : null),
+    valid.length ? table(cols, valid) : last ? null : note("还没核对过。"),
+    last && last.stopped_zh ? h("p", { class: "callout warn" }, last.stopped_zh) : null,
+    last && last.state === "interrupted" ? h("p", { class: "callout warn" }, "上次核对没跑完（Alpha Bot 中途重启过），下面只有跑完的那几条。") : null,
+    errors.length ? note(errors.map((r) => `${r.label || r.id}：${r.error_zh}`).join("；")) : null,
+    stale.length ? note(`${stale.map((r) => r.label || r.id).join("、")}：条件原文在核对之后改过，那次结果作废、不显示。`) : null,
+    cl.save_error ? h("p", { class: "callout warn" }, cl.save_error) : null,
+    cl.load_error ? h("p", { class: "callout warn" }, cl.load_error) : null,
+    btn,
+    note(`每条一个请求（${rules.model || "Claude"}，最多联网搜 ${rules.web_search_max_uses ?? "—"} 次），点了按钮并确认预估才会花钱；${spent}。`
+      + "结论来自联网搜索，来源未经本系统核实；是核对那一刻的结论，不进评分。"));
+}
+
+function thesisBlock(d, auto, cl = null, onStart = null) {
   const r = d.risks, tb = r.thesis_breaks;
   const machine = tb.filter((x) => x.machine);
   // 看的不是最新一天 ⇒ 没核对：这几条照旧归「需人工判断」，只留一句为什么
@@ -72,7 +123,9 @@ function thesisBlock(d, auto) {
   const checks = all.filter((c) => !NOT_CHECKED.has(c.verdict?.reason));
   const changed = all.filter((c) => c.verdict?.reason === "trigger_changed");
   const autoLabels = new Set(checks.filter((c) => c.label).map((c) => c.label));
-  const manual = tb.filter((x) => !x.machine && !autoLabels.has(x.label));
+  const clDone = claudeValid(cl);
+  const clLabels = new Set(clDone.map((r) => r.label));
+  const manual = tb.filter((x) => !x.machine && !autoLabels.has(x.label) && !clLabels.has(x.label));
   const undecided = machine.filter((x) => x.fired === null).length;
   const autoFired = checks.filter((c) => c.verdict?.status === "fired").length;
   const autoPartial = checks.filter((c) => c.verdict?.status === "partial").length;
@@ -95,9 +148,11 @@ function thesisBlock(d, auto) {
       return chip ? h("span", { class: `chip ${chip[0]}` }, chip[1]) : v.status === "not_fired" ? "未触发"
         : h("span", { class: "sub" }, v.reason_zh || "判不了"); } },
   ];
-  const fired = r.thesis_fired + autoFired;
+  const clFired = clDone.filter((r) => r.status === "fired").length;
+  const clCant = clDone.filter((r) => r.status === "unjudgeable").length;
+  const fired = r.thesis_fired + autoFired + clFired;
   const sub = ` ${tb.length} 条里已触发 ${fired} 条` + (autoPartial ? `，${autoPartial} 条数字部分已满足` : "")
-    + (undecided + autoCant ? `，${undecided + autoCant} 条判不了` : "") + (manual.length ? `，${manual.length} 条需人工判断` : "");
+    + (undecided + autoCant + clCant ? `，${undecided + autoCant + clCant} 条判不了` : "") + (manual.length ? `，${manual.length} 条需人工判断` : "");
   let autoPart;
   if (auto === null) autoPart = note("正在自动核对能按数据判的几条（季报、股息、收益率）…");
   else if (!auto.available) autoPart = auto.reason === "demo" ? null : note(`自动核对没做成：${auto.reason_zh || auto.reason || "原因不明"}。这几条照旧算「需人工判断」。`);
@@ -113,10 +168,12 @@ function thesisBlock(d, auto) {
     tb.length || checks.length ? null : empty("这只标的当天没有记录。"),
     machine.length ? table(mCols, machine) : null,
     autoPart,
+    claudePart(cl, onStart),
     manual.length ? h("details", { class: "sd-why" },
       h("summary", {}, `另有 ${manual.length} 条需人工判断，未核对（点开看）`),
       table([{ label: "级别", render: lvl }, { label: "条件", render: (x) => x.label || "—" }], manual),
-      note("这些条件（分部收入、用户数、监管与管理层事件等）没有可靠的免费结构化数据，扫描和 Alpha Bot 都不核对。「未核对」不等于「未触发」。")) : null);
+      note(cl && cl.supported && cl.available ? "这些条件没有可靠的免费结构化数据，扫描与自动核对都不判；上面「让 Claude 核对」可以付费联网核对。「未核对」不等于「未触发」。"
+        : "这些条件（分部收入、用户数、监管与管理层事件等）没有可靠的免费结构化数据，扫描和 Alpha Bot 都不核对。「未核对」不等于「未触发」。")) : null);
 }
 
 function risks(d) {
@@ -131,9 +188,32 @@ function risks(d) {
     ins && isNum(ins.sold_usd) ? `已申报的内部人交易：卖出 ${usd(ins.sold_usd)}、买入 ${usd(ins.bought_usd)}` : null,
   ].filter(Boolean);
   const tbBox = h("div", {}, thesisBlock(d, null));
+  // 两份结果各自回来就整块重画；Claude 核对在跑时每 5 秒问一次本机进度（只问本机、不花钱），页面离开就停
+  const st = { auto: null, cl: null, err: null };
+  const clUrl = `/api/thesis-claude/${encodeURIComponent(d.ticker)}?date=${encodeURIComponent(d.date)}`;
+  const redraw = () => {
+    if (!tbBox.isConnected) return;
+    fill(tbBox, thesisBlock(d, st.auto, st.cl, start), st.err ? h("p", { class: "callout warn" }, st.err) : null);
+  };
+  const pollCl = () => api(clUrl).then((c) => {
+    st.cl = c; redraw();
+    if (c.running && tbBox.isConnected) setTimeout(pollCl, 5000);
+  }).catch((e) => { st.err = `读 Claude 核对状态失败（${e.message || e}）`; redraw(); });
+  async function start(n, est, rules, spent) {
+    const ok = confirm(`让 Claude（${rules.model || "Opus 5.5"}）联网核对 ${d.ticker} 的 ${n} 条人工证伪条件？\n\n`
+      + `· 每条一个请求，最多联网搜 ${rules.web_search_max_uses ?? "—"} 次，按实际用量收 API 费用\n`
+      + `· 预计共约 $${num(est.low_usd, 2)}–$${num(est.high_usd, 2)}（11-20 试跑实测单条 $0.36–0.46；搜到的网页计入输入，可能更贵）\n`
+      + `· ${spent}；每条发出前按最坏情况预检，超上限就停\n· 任何一条出错（断线、可能已计费等）后面的就不发`);
+    if (!ok) return;
+    st.err = null;
+    try { await api(`/api/thesis-claude/${encodeURIComponent(d.ticker)}`, { method: "POST", body: { confirm: true } }); }
+    catch (e) { st.err = `没开始：${e.message || e}`; }
+    pollCl();
+  }
   api(`/api/thesis-auto/${encodeURIComponent(d.ticker)}?date=${encodeURIComponent(d.date)}`)
     .catch((e) => ({ available: false, reason: "exception", reason_zh: `请求失败（${e.message || e}）` }))
-    .then((a) => { if (tbBox.isConnected) fill(tbBox, thesisBlock(d, a)); });
+    .then((a) => { st.auto = a; redraw(); });
+  pollCl();
   return sec("risks", "风险",
     h("h3", {}, `看空一方的理由（强度 ${num(r.bear_score, 1)} / 10）`),
     r.bearish_signals.length ? h("ul", {}, r.bearish_signals.map((x) => h("li", {}, x))) : empty("扫描当天没有记到看空信号。"),

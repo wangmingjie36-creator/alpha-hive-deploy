@@ -74,6 +74,10 @@ ET = ZoneInfo("America/New_York")
 #: 工具能调的服务方法——都是页面 GET 接口背后的那一个（守卫核对它们 ⊆ server.py 的 GET 路由所调）
 TOOL_METHODS = ("live", "premium", "overview", "straddle", "hedge", "assess", "meta_texts")
 
+#: `one_shot`（「让 Claude 核对」，v0.45.794）：只带联网搜索；服务端搜索做到一半（pause_turn）最多续发到几次
+ONE_SHOT_TOOLS = [{"type": "web_search_20260209", "name": "web_search", "max_uses": WEB_SEARCH_MAX_USES}]
+ONE_SHOT_MAX_CALLS = 3
+
 #: 任何工具结果里都不发出去的键：本机路径与页面已在系统提示里交代过的长免责文本
 _DROP_EVERYWHERE = frozenset({"state_dir", "disclaimer", "caveats"})
 
@@ -563,6 +567,23 @@ def page_context(page) -> str:
     return "，".join(parts) or "未知页面"
 
 
+def _cost_notes(cost: dict) -> List[str]:
+    """一次调用记账后要告诉人的事（v0.45.794 从 `_run` 搬出，对话与「让 Claude 核对」共用）。"""
+    notes = []
+    if cost.get("landed_despite_error"):
+        notes.append(f"记账时报错（{cost['landed_despite_error']}），但这一笔已经写进花费记录、没少记；"
+                     "存放花费记录的磁盘可能有问题，留意一下")
+    if cost.get("unbooked_error"):
+        notes.append(
+            f"这次调用已计费（约 ${cost['usd']:.3f}），但记账失败（{cost['unbooked_error']}）：花费记录少了这一笔，"
+            "今天的额度照样把它算进去（Alpha Bot 重启后就不再算）。请修好 Alpha Bot 状态目录里的 chat/spend.jsonl")
+    if cost.get("estimated"):
+        notes.append(f"有一次调用的用量读不懂，按最坏情况记了 ${cost['usd']:.2f}")
+    elif cost.get("ceiling_priced"):
+        notes.append(f"有一次尝试由未登记价格的模型完成（{cost['models']}），按最贵单价记账")
+    return notes
+
+
 class ChatEngine:
     """一个 Alpha Bot 进程一个。`client_fn` / `now_fn` 只给测试换。"""
 
@@ -614,9 +635,9 @@ class ChatEngine:
         return out
 
     # ── 一问
-    def _reserve(self, messages: list) -> float:
+    def _reserve(self, messages: list, system: str = SYSTEM_PROMPT, tools: Optional[list] = None) -> float:
         p = llm_service.price_of(MODEL)
-        chars = len(SYSTEM_PROMPT) + len(json.dumps(TOOL_DEFS, ensure_ascii=False)) + \
+        chars = len(system) + len(json.dumps(TOOL_DEFS if tools is None else tools, ensure_ascii=False)) + \
             len(json.dumps(messages, ensure_ascii=False, default=str))
         return chars * p["input"] + MAX_TOKENS * p["output"] + \
             WEB_SEARCH_MAX_USES * llm_service.SERVER_TOOL_PRICES["web_search_requests"]
@@ -685,11 +706,11 @@ class ChatEngine:
         except (ledger_io.LedgerError, OSError, ValueError):
             return False
 
-    def _call(self, client, messages: list) -> dict:
+    def _call(self, client, messages: list, system: str = SYSTEM_PROMPT, tools: Optional[list] = None) -> dict:
         raw = client.with_options(timeout=REQUEST_TIMEOUT_SEC, max_retries=0).messages.with_raw_response.create(
             model=MODEL, max_tokens=MAX_TOKENS,
-            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            tools=TOOL_DEFS, messages=messages,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            tools=TOOL_DEFS if tools is None else tools, messages=messages,
             extra_headers={"anthropic-beta": ",".join(BETAS)},
             # SDK 0.84 不认识这几个字段 ⇒ 走 extra_body（与 llm_service 的模型档案同一做法）
             extra_body={"thinking": {"type": "adaptive"}, "output_config": {"effort": EFFORT},
@@ -701,6 +722,92 @@ class ChatEngine:
             raise _UnreadableReply(f"回复不是 JSON：{raw.text[:60]!r}") from exc
         if not isinstance(out, dict) or out.get("type") != "message" or not isinstance(out.get("usage"), dict):
             raise _UnreadableReply(f"回复不是带 usage 的消息对象：{str(out)[:60]!r}")
+        return out
+
+    def _gated_call(self, client, tag: str, messages: list, *, fresh: bool, system: str = SYSTEM_PROMPT,
+                    tools: Optional[list] = None):
+        """一次 API 调用的整道闸（v0.45.794 从 `_run` 搬出，对话与「让 Claude 核对」共用）：按最坏情况预检额度并占住预留 →
+        发请求 → 失败交 `_classify`（限流 / 过载等一下再发；可能已计费 ⇒ 按最坏情况记账、不重发、抛 `ChatError`）→
+        成功先记账再释放预留。返回 `(resp, cost)`。`tag` 记进 spend.jsonl 的 `conversation` 字段。"""
+        reserve = self._reserve(messages, system, tools)
+        with self._lock:
+            spent = self.spent_today()
+            if spent + self._inflight + reserve > self.cap_usd:
+                raise BudgetExceeded(
+                    f"今天已花 ${spent:.2f}，上限 ${self.cap_usd:.2f}；这次请求按最坏情况要预留 ${reserve:.2f}，"
+                    "超了——明天再问，或开新对话（历史越长预留越多）")
+            self._inflight += reserve
+        try:
+            attempt = 0
+            while True:
+                try:
+                    resp = self._call(client, messages, system, tools)
+                    break
+                except Exception as exc:
+                    v = _classify(exc)                # 记不记账、重不重发、怎么说，只在这一处定（v0.45.627 / 632）
+                    if v is None:
+                        raise
+                    if v.outcome == RETRY and attempt < RETRY_STATUS_TRIES:
+                        # 限流 / 过载：服务端拒了、没计费 ⇒ 等一下再发；预留一直占着（这期间没花钱，不用重新预检）
+                        wait = _retry_wait(exc, attempt)
+                        _log.info("对话请求被拒（%s），%.1f 秒后重试", exc.status_code, wait)
+                        self._sleep(wait)
+                        attempt += 1
+                        continue
+                    booking = None
+                    if v.outcome == MAYBE_BILLED:
+                        booking = self._write_spend(lambda bid: self._record(
+                            tag, reserve, estimated=True, error=v.label, booking_id=bid), reserve)
+                    raise _explain(v, retries=attempt, fresh=fresh, booked=reserve, booking=booking,
+                                   detail=str(exc) if v.reason == "unreadable" else "") from exc
+            # 先记账、再释放预留（finally）：中间不留「预留已撤、花费未记」的空档，并发的另一问预检才看得到这笔
+            cost = self._book(tag, resp, reserve)
+        finally:
+            with self._lock:
+                self._inflight -= reserve
+        return resp, cost
+
+    def one_shot(self, prompt: str, *, tag: str, system: str) -> dict:
+        """一次性的一问（v0.45.794，「让 Claude 核对」用）：只带联网搜索、不带 Alpha Bot 工具、没有对话历史。
+        走同一道闸 `_gated_call`（同一个每日上限、同一份 spend.jsonl）。**不看 `chat_enabled`**：调用方（按钮）每次都要人
+        确认过预估费用才调；演示模式一律不调。服务端搜索做到一半（`pause_turn`）原样续发，最多 `ONE_SHOT_MAX_CALLS` 次。
+        失败抛 `ChatError`；前面已有调用记了账的，报错里写明已花多少。"""
+        if self.svc.demo:
+            raise ChatDisabled("演示模式不调 API：数据是合成的，花费也记不住")
+        client = self._client_fn()
+        if client is None:
+            raise ChatUnavailable("调不了 Claude API（取不到 API 客户端）")
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        out = {"text": "", "cost_usd": 0.0, "searches": 0, "calls": 0, "notes": [], "stop_reason": None, "served_by": None}
+        texts: List[str] = []
+        while True:
+            try:
+                resp, cost = self._gated_call(client, tag, messages, fresh=True, system=system, tools=ONE_SHOT_TOOLS)
+            except ChatError as exc:
+                if not out["calls"]:
+                    raise
+                raise type(exc)(f"{exc}（这一条前面 {out['calls']} 次 API 调用已花 ${out['cost_usd']:.3f}、已记账）") from exc
+            out["calls"] += 1
+            out["cost_usd"] += cost["usd"]
+            out["searches"] += cost["searches"]
+            out["notes"].extend(_cost_notes(cost))
+            content = _echo_content([b for b in resp.get("content") or [] if isinstance(b, dict)])
+            texts.extend(_text_groups(content))
+            out["stop_reason"] = resp.get("stop_reason")
+            if resp.get("model") and resp.get("model") != MODEL:
+                out["served_by"] = resp.get("model")
+            if out["stop_reason"] != "pause_turn":
+                break
+            if out["calls"] >= ONE_SHOT_MAX_CALLS:
+                out["notes"].append(f"服务端的搜索做到一半就到了调用上限（{ONE_SHOT_MAX_CALLS} 次），结论可能不完整")
+                break
+            messages = messages + [{"role": "assistant", "content": content}]
+        if out["stop_reason"] == "max_tokens":
+            out["notes"].append("回答到了长度上限、被截断了")
+        elif out["stop_reason"] == "refusal":
+            out["notes"].append("模型拒绝回答")
+        out["text"] = "\n\n".join(texts)
+        out["cost_usd"] = round(out["cost_usd"], 4)
         return out
 
     def send(self, message: str, conversation_id: Optional[str] = None, page=None) -> dict:
@@ -775,56 +882,11 @@ class ChatEngine:
                     commit = False
                     turn["notes"].append("服务端的搜索没做完就到了上限：这一问没写进对话历史，下一问不会接着它")
                 break
-            reserve = self._reserve(messages)
-            with self._lock:
-                spent = self.spent_today()
-                if spent + self._inflight + reserve > self.cap_usd:
-                    raise BudgetExceeded(
-                        f"今天已花 ${spent:.2f}，上限 ${self.cap_usd:.2f}；这次请求按最坏情况要预留 ${reserve:.2f}，"
-                        "超了——明天再问，或开新对话（历史越长预留越多）")
-                self._inflight += reserve
-            try:
-                attempt = 0
-                while True:
-                    try:
-                        resp = self._call(client, messages)
-                        break
-                    except Exception as exc:
-                        v = _classify(exc)                # 记不记账、重不重发、怎么说，只在这一处定（v0.45.627 / 632）
-                        if v is None:
-                            raise
-                        if v.outcome == RETRY and attempt < RETRY_STATUS_TRIES:
-                            # 限流 / 过载：服务端拒了、没计费 ⇒ 等一下再发；预留一直占着（这期间没花钱，不用重新预检）
-                            wait = _retry_wait(exc, attempt)
-                            _log.info("对话请求被拒（%s），%.1f 秒后重试", exc.status_code, wait)
-                            self._sleep(wait)
-                            attempt += 1
-                            continue
-                        booking = None
-                        if v.outcome == MAYBE_BILLED:
-                            booking = self._write_spend(lambda bid: self._record(
-                                conversation_id, reserve, estimated=True, error=v.label, booking_id=bid), reserve)
-                        raise _explain(v, retries=attempt, fresh=fresh, booked=reserve, booking=booking,
-                                       detail=str(exc) if v.reason == "unreadable" else "") from exc
-                # 先记账、再释放预留（finally）：中间不留「预留已撤、花费未记」的空档，并发的另一问预检才看得到这笔
-                cost = self._book(conversation_id, resp, reserve)
-                turn["calls"] += 1          # 只数记上了账的调用：半路失败时「前面 N 次已花 $x、已记账」才对得上
-            finally:
-                with self._lock:
-                    self._inflight -= reserve
+            resp, cost = self._gated_call(client, conversation_id, messages, fresh=fresh)
+            turn["calls"] += 1          # 只数记上了账的调用：半路失败时「前面 N 次已花 $x、已记账」才对得上
             turn["cost_usd"] += cost["usd"]
             turn["searches"] += cost["searches"]
-            if cost.get("landed_despite_error"):
-                turn["notes"].append(f"记账时报错（{cost['landed_despite_error']}），但这一笔已经写进花费记录、没少记；"
-                                     "存放花费记录的磁盘可能有问题，留意一下")
-            if cost.get("unbooked_error"):
-                turn["notes"].append(
-                    f"这次调用已计费（约 ${cost['usd']:.3f}），但记账失败（{cost['unbooked_error']}）：花费记录少了这一笔，"
-                    "今天的额度照样把它算进去（Alpha Bot 重启后就不再算）。请修好 Alpha Bot 状态目录里的 chat/spend.jsonl")
-            if cost.get("estimated"):
-                turn["notes"].append(f"有一次调用的用量读不懂，按最坏情况记了 ${cost['usd']:.2f}")
-            elif cost["ceiling_priced"]:
-                turn["notes"].append(f"有一次尝试由未登记价格的模型完成（{cost['models']}），按最贵单价记账")
+            turn["notes"].extend(_cost_notes(cost))
             content = _echo_content([b for b in resp.get("content") or [] if isinstance(b, dict)])
             replies.extend(_text_groups(content))
             for b in content:
