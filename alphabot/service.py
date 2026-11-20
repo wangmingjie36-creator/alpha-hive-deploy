@@ -38,6 +38,7 @@ from alphabot import intraday_heat as IH
 from alphabot import macos_app as MA
 from alphabot import options_compare as OC
 from alphabot import premium as PM
+from alphabot import sector_map as SM
 from alphabot import price_intraday as PI
 from alphabot import straddle as SD
 from alphabot import strangle_compare as SC
@@ -281,7 +282,8 @@ class AlphaBotService:
                  straddle_root=None, straddle_quote_fn=None, now_fn: Optional[Callable[[], datetime]] = None,
                  premium_root=None, beta_long_fn=None, wheel_prices_fn=None,
                  completed_session_fn: Optional[Callable[[], Optional[str]]] = None, compare_root=None,
-                 ohlc_fn=None, minute_fn=None, thesis_fetch_fn=None, thesis_config_path=None):
+                 ohlc_fn=None, minute_fn=None, thesis_fetch_fn=None, thesis_config_path=None,
+                 sector_holdings_fn=None, sector_quotes_fn=None):
         self.fetch_fn = fetch_fn
         self.bars_fn = bars_fn or _default_bars
         # 价格页 K 线的开高低（v0.45.762）：`ohlc_fn(标的) -> ({日期: {open, high, low, close}}, {n, reason, …})`。
@@ -305,6 +307,18 @@ class AlphaBotService:
         self._thesis_config_path = Path(thesis_config_path) if thesis_config_path else None
         self._thesis_config_cache: Optional[tuple] = None
         self._thesis_lock = threading.Lock()
+        # 「板块」页（v0.45.783）：`sector_holdings_fn() -> (成分表, meta)`、`sector_quotes_fn(代码表) -> (报价, meta)`。缺省接线规则同
+        # `ohlc_fn`（注入了日线而没给它们 ⇒ 不取，免得测试出网；演示 ⇒ 不取）。成分表落盘在状态目录（重启不用重下 12 份文件），
+        # 报价只在内存：`(取到的时刻, 报价, 美东时刻文本)`；`*_retry_at` = 上次失败后最早什么时候再试（self.clock() 时刻）
+        self.sector_holdings_fn = sector_holdings_fn
+        self.sector_quotes_fn = sector_quotes_fn
+        self._sector_default = bars_fn is None and not demo
+        self._sector_holdings: Optional[dict] = None
+        self._sector_holdings_note: Optional[dict] = None
+        self._sector_holdings_retry_at = 0.0
+        self._sector_quotes: Optional[tuple] = None
+        self._sector_quotes_fail: Optional[tuple] = None
+        self._sector_lock = threading.Lock()
         # 盯盘（v0.45.764）：`{"ticker", "until"（self.clock() 时刻）}`；同一时刻只盯一只、后来的为准。只在内存里，重启即无。
         # `_watch_consumer`：有没有轮询线程在消费它（演示 / `--no-poll` 没有 ⇒ 续期照收，但如实回「不会拍」）
         self._watch: Optional[dict] = None
@@ -358,7 +372,9 @@ class AlphaBotService:
                       "beta_sens_computed": 0, "beta_sens_failures": 0, "yf_rate_limited": 0,
                       "activity_failures": 0, "ohlc_failures": 0,
                       "minute_fetches": 0, "minute_cache_hits": 0, "minute_failures": 0,
-                      "thesis_fetches": 0, "thesis_cache_hits": 0, "thesis_failures": 0}
+                      "thesis_fetches": 0, "thesis_cache_hits": 0, "thesis_failures": 0,
+                      "sector_quote_fetches": 0, "sector_cache_hits": 0, "sector_failures": 0,
+                      "sector_holdings_fetches": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -693,6 +709,120 @@ class AlphaBotService:
             meta["fetched_at"] = self.now_fn().isoformat(timespec="minutes")
         self._thesis_cache[key] = (self.clock() + ttl, data, meta)
         return data, meta
+
+    # ── 板块热力图（v0.45.783）
+    def _sector_holdings_path(self) -> Path:
+        return self.state_dir() / "sector_map" / "holdings.json"
+
+    def _sector_load_holdings(self) -> Tuple[Optional[dict], Optional[dict]]:
+        """成分表：内存 → 状态目录 → 现取。过期（`holdings_ttl_sec`）才重取；重取失败沿用旧的一份并说明（`note`）。
+        返回 `(成分表 | None, 失败说明 | None)`。"""
+        now = self.now_fn()
+        if self._sector_holdings is None:
+            try:
+                d = json.loads(self._sector_holdings_path().read_text(encoding="utf-8"))
+                if isinstance(d, dict) and isinstance(d.get("constituents"), list) and d["constituents"]:
+                    self._sector_holdings = d
+            except (OSError, ValueError):
+                pass                                    # 没有 / 读不了 = 没缓存，下面现取；取不到会照实报
+        cur = self._sector_holdings
+        age = None
+        if cur is not None:
+            try:
+                age = (now - datetime.fromisoformat(cur["fetched_at"])).total_seconds()
+            except (KeyError, TypeError, ValueError):
+                age = None
+        # 缺了板块文件的那一份只当临时的：过 `holdings_fail_ttl_sec` 就再取，不等一整天
+        ttl = SM.RULES["holdings_fail_ttl_sec"] if (cur or {}).get("failed_sectors") else SM.RULES["holdings_ttl_sec"]
+        if cur is not None and age is not None and 0 <= age < ttl:
+            return cur, None
+        if self.clock() < self._sector_holdings_retry_at:
+            return cur, self._sector_holdings_note
+        fn = self.sector_holdings_fn or (SM.fetch_holdings if self._sector_default else None)
+        if fn is None:
+            return cur, {"reason": "no_fetcher"}
+        self.stats["sector_holdings_fetches"] += 1
+        try:
+            data, meta = fn()
+        except Exception as e:  # noqa: BLE001 - 注入的取数函数也不许把页面打挂
+            data, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
+        if data is None:
+            self.stats["sector_failures"] += 1
+            self._sector_holdings_retry_at = self.clock() + SM.RULES["holdings_fail_ttl_sec"]
+            self._sector_holdings_note = dict(meta or {}) or {"reason": "holdings_unavailable"}
+            _log.warning("板块页：持仓文件刷新失败（%s）%s", self._sector_holdings_note,
+                         "，沿用旧的一份" if cur is not None else "")
+            return cur, self._sector_holdings_note
+        data = dict(SM.carry_sectors(data, cur)) | {"fetched_at": now.isoformat(timespec="seconds")}
+        self._sector_holdings, self._sector_holdings_note = data, None
+        try:
+            _atomic_write_json(self._sector_holdings_path(), data)
+        except OSError as e:                            # 落不了盘只是下次启动要重下，这一次照常用
+            _log.warning("板块页：成分表写不进状态目录（%s）", e)
+        return data, None
+
+    def sector_map(self, refresh: bool = False) -> dict:
+        """标普 500 板块热力图：成分与面积取 SPY 持仓文件、板块取 11 只板块 SPDR 的持仓文件、涨跌取 Yahoo 报价
+        （`alphabot.sector_map`）。`refresh` 只是「别等缓存到期」——同一份报价 `quote_fail_ttl_sec` 内仍不重取。
+        报价刷新失败 ⇒ 沿用上一份并写明（`quotes.refresh_failed` + 真实年龄），一份都没有才 `available=False`。"""
+        base = {"available": False, "rules": SM.public_rules(), "disclaimer": SM.DISCLAIMER}
+
+        def fail(reason, **extra):
+            return clean_json(base | {"reason": reason, "reason_zh": SM.REASONS.get(reason, reason)} | extra)
+        if self.demo:
+            return fail("demo")
+        with self._sector_lock:
+            holdings, hnote = self._sector_load_holdings()
+            if holdings is None:
+                return fail((hnote or {}).get("reason") or "holdings_unavailable", detail=(hnote or {}).get("detail"))
+            sess = market_session(self.now_fn())
+            ttl = SM.RULES["quote_ttl_live_sec"] if sess["live"] else SM.RULES["quote_ttl_idle_sec"]
+            if refresh:
+                ttl = min(ttl, SM.RULES["quote_fail_ttl_sec"])
+            ent, now = self._sector_quotes, self.clock()
+            failed = None
+            if ent is not None and now - ent[0] < ttl:
+                self.stats["sector_cache_hits"] += 1
+            elif self._sector_quotes_fail is not None and now < self._sector_quotes_fail[0]:
+                failed = self._sector_quotes_fail[1]
+            else:
+                fn = self.sector_quotes_fn or (SM.fetch_quotes if self._sector_default else None)
+                if fn is None:
+                    failed = {"reason": "no_fetcher"}
+                else:
+                    self.stats["sector_quote_fetches"] += 1
+                    try:
+                        q, meta = fn(SM.symbols_for(holdings))
+                    except Exception as e:  # noqa: BLE001
+                        q, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
+                    if q is None:
+                        self.stats["sector_failures"] += 1
+                        failed = dict(meta or {}) or {"reason": "fetch_error"}
+                        wait = SM.RULES["quote_fail_ttl_sec"]
+                        if failed.get("reason") == "rate_limited" and isinstance(failed.get("retry_after_sec"), (int, float)):
+                            wait = float(failed["retry_after_sec"])
+                        self._sector_quotes_fail = (now + wait, failed)
+                    else:
+                        ent = self._sector_quotes = (now, q, self.now_fn().isoformat(timespec="seconds"))
+                        self._sector_quotes_fail = None
+            if ent is None:
+                failed = failed or {"reason": "fetch_error"}
+                return fail(failed["reason"], detail=failed.get("detail"), retry_after_sec=failed.get("retry_after_sec"))
+            if failed is not None and failed.get("reason") == "rate_limited":
+                failed = failed | {"retry_after_sec": max(0.0, round(self._sector_quotes_fail[0] - now, 0))}
+            body = SM.build(holdings, ent[1], watchlist=self.watchlist()["tickers"])
+            return clean_json(base | body | {
+                "available": True, "session": sess, "refresh_sec": SM.RULES["quote_ttl_live_sec"],
+                "quotes": {"fetched_at": ent[2], "age_sec": round(now - ent[0], 0),
+                           "refresh_failed": ({**failed, "reason_zh": SM.REASONS.get(failed.get("reason"), failed.get("reason"))}
+                                              if failed is not None else None)},
+                "holdings": {"as_of": holdings.get("as_of"), "fetched_at": holdings.get("fetched_at"),
+                             "skipped": holdings.get("skipped") or [], "cash_weight": holdings.get("cash_weight"),
+                             "failed_sectors": holdings.get("failed_sectors") or [],
+                             "carried": holdings.get("carried") or 0,
+                             "multi_sector": holdings.get("multi_sector") or {},
+                             "refresh_failed": ({**hnote, "reason_zh": SM.REASONS.get(hnote.get("reason"), hnote.get("reason"))}
+                                                if hnote else None)}})
 
     def thesis_auto(self, ticker, date: Optional[str] = None) -> dict:
         """深度页「证伪条件」里登记过的几条人工条件的自动核对。只对**最新一天**（取到的是此刻的数据）。

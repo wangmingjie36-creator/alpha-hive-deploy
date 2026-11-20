@@ -420,6 +420,74 @@ export function gammaTrace(el, hm) {
   });
 }
 
+// 板块热力图（v0.45.783）：两层矩形树图——外层板块、内层成分股；面积 = SPY 权重，颜色 = 涨跌幅（服务端给数，这里只上色）。
+// 颜色自己算（不用 visualMap）：没数据的块要画成灰的、不是「0%」；色阶封顶 `clamp`（±这么多 % 及以上最深）。
+// 提示里的名字来自外部数据 ⇒ 一律转义；排版只用样式类（本站 CSP 不许行内样式）。
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+const rgb = (hex) => { const m = /^#?([0-9a-f]{6})$/i.exec(String(hex).trim()); const n = m ? parseInt(m[1], 16) : 0x808080; return [n >> 16, (n >> 8) & 255, n & 255]; };
+const mix = (a, b, t) => { const x = rgb(a), y = rgb(b); return `rgb(${x.map((v, i) => Math.round(v + (y[i] - v) * t)).join(",")})`; };
+const sgn = (v, dp = 2) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(dp)}%` : "—");
+const capShort = (v) => (!isNum(v) ? "—" : v >= 1e12 ? `$${(v / 1e12).toFixed(2)}T` : v >= 1e9 ? `$${(v / 1e9).toFixed(1)}B` : `$${(v / 1e6).toFixed(0)}M`);
+export function heatColor(v, clamp, c = C()) {
+  if (!isNum(v)) return c.sunk;
+  if (v === 0) return c.lineStrong;
+  return mix(c.lineStrong, v > 0 ? c.pos : c.neg, 0.22 + 0.63 * Math.min(Math.abs(v) / clamp, 1));
+}
+export function sectorTreemap(el, { sectors, field, clamp, periodLabel, reasons = {}, onPick }) {
+  const c = C();
+  const size = (w) => (w >= 3 ? 22 : w >= 1.2 ? 17 : w >= 0.5 ? 13 : w >= 0.2 ? 11 : 9.5);
+  const data = sectors.map((s) => {
+    const head = field === "change_1d" ? (s.etf && isNum(s.etf.change_1d) ? s.etf.change_1d : s.change_1d) : s.etf?.change_52w;
+    return {
+      name: `${s.name}  ${sgn(head)}`, value: s.weight, sector: s,
+      itemStyle: { color: c.surface, borderColor: c.surface },
+      children: s.children.map((k) => ({
+        name: k.ticker, value: k.weight, leaf: k,
+        itemStyle: { color: heatColor(k[field], clamp, c) },
+        // 代码大、涨跌幅小一号；太小的块只写代码（写不下的 ECharts 自己截断 / 不画）
+        label: { fontSize: size(k.weight), fontWeight: 600, color: isNum(k[field]) ? "#ffffff" : c.ink3,
+          lineHeight: Math.round(size(k.weight) * 1.25),
+          rich: { p: { fontSize: Math.max(9, Math.round(size(k.weight) * 0.72)), fontWeight: 400, color: isNum(k[field]) ? "#ffffff" : c.ink3,
+            lineHeight: Math.round(size(k.weight) * 1.05) } },
+          formatter: k.weight >= 0.09 ? `${k.ticker}\n{p|${isNum(k[field]) ? sgn(k[field], Math.abs(k[field]) >= 100 ? 0 : 2) : "无数据"}}` : k.ticker },
+      })),
+    };
+  });
+  const tip = (p) => {
+    const k = p.data.leaf, s = p.data.sector;
+    if (s) {
+      return `<b>${esc(s.name)}</b><span class="tip-name"> ${esc(s.key === "_" ? "" : s.key)}</span>`
+        + `<br>占标普 <b>${num(s.weight, 1)}%</b> · ${s.n} 只`
+        + (s.etf ? `<br>${esc(s.etf.symbol)} 今日 <b>${sgn(s.etf.change_1d)}</b> · 52 周 <b>${sgn(s.etf.change_52w, 1)}</b>` : "")
+        + `<br>成分加权今日 <b>${sgn(s.change_1d)}</b>`;
+    }
+    if (!k) return "";
+    return `<b>${esc(k.ticker)}</b><span class="tip-name"> ${esc(k.name)}</span>`
+      + (k.reason ? `<br>没上色：${esc(reasons[k.reason] || k.reason)}` : `<br>今日 <b>${sgn(k.change_1d)}</b> · 52 周 <b>${sgn(k.change_52w, 1)}</b>`)
+      + `<br>现价 ${num(k.price)} · 昨收 ${num(k.prev_close)}`
+      + `<br>SPY 权重 ${num(k.weight, 2)}% · 市值 ${capShort(k.market_cap)}`;
+  };
+  const chart = mount(el, {
+    tooltip: { trigger: "item", formatter: tip, confine: true },
+    series: [{
+      type: "treemap", name: periodLabel, left: 0, right: 0, top: 0, bottom: 0, roam: false, nodeClick: false,
+      breadcrumb: { show: false }, squareRatio: 1, visibleMin: 0, animation: false, sort: "desc",
+      label: { show: true, position: "inside", align: "center", verticalAlign: "middle", overflow: "truncate", fontFamily: FONT },
+      upperLabel: { show: true, height: 22, color: c.ink, fontSize: 12.5, fontWeight: 600, fontFamily: FONT, overflow: "truncate" },
+      itemStyle: { borderColor: c.surface, borderWidth: 0, gapWidth: 1 },
+      emphasis: { itemStyle: { borderColor: c.ink, borderWidth: 1 }, upperLabel: { color: c.ink } },
+      levels: [
+        { itemStyle: { borderWidth: 0, gapWidth: 4, borderColor: c.paper }, upperLabel: { show: false } },   // 根节点不要标题行
+        { itemStyle: { borderWidth: 2, gapWidth: 1, borderColor: c.surface } },
+        { itemStyle: { borderWidth: 0, gapWidth: 1 } },
+      ],
+      data,
+    }],
+  });
+  if (onPick) chart.on("click", (p) => { if (p.data && p.data.leaf) onPick(p.data.leaf); });
+  return chart;
+}
+
 export function payoff(el, { grid, series, spot, band }) {
   const c = C();
   const vmarks = [];
