@@ -169,10 +169,14 @@ class ThesisBreakMonitor:
         """检查单个条件是否触发。
 
         v0.45.50：`thesis_breaks_config.json` 现在**同时承载两套 schema**——
-          · 人读散文 `{id, metric, trigger, current_status}` ← 本模块用
+          · 人读散文 `{id, metric, trigger, current_status}` ← 本模块用（只读 id / trigger）
           · 机器可比 `{field, op, value}`                   ← market_intelligence 用
         本模块只处理散文条目，遇到机器条目原样跳过（而不是 KeyError）。
         每个求值器跳过自己看不懂的条目，是两套 schema 并存的前提。
+
+        v0.45.793：`current_status` 是外部周任务手写的散文快照（会过时），**生产代码一律不读**——
+        唯一读者 `generate_html_section`（还把每条写死成「✅ 安全」）只被 `__main__` 示例调用，已删。
+        守卫 `tests/test_thesis_current_status_unread.py`。
         """
         if not isinstance(condition, dict):
             return False
@@ -193,176 +197,6 @@ class ThesisBreakMonitor:
             return current_value > threshold
 
         return False
-
-    def generate_html_section(self) -> str:
-        """生成 HTML 报告段落"""
-
-        html = f"""
-        <section id="thesis-breaks-{self.ticker}" class="report-section">
-            <h2>🚨 失效条件监控 (Thesis Breaks) - {self.ticker}</h2>
-
-            <!-- Level 1 预警 -->
-            <div class="thesis-break-container level-1">
-                <h3 class="level-label">⚠️ Level 1: 预警条件（降低评分 -15%）</h3>
-                <div class="conditions-grid">
-        """
-
-        for condition in self.config["level_1_warning"]["conditions"]:
-            html += f"""
-                    <div class="break-condition">
-                        <div class="break-metric">{condition['metric']}</div>
-                        <div class="break-details">
-                            <p><span class="label">触发条件：</span>{condition['trigger']}</p>
-                            <p><span class="label">数据来源：</span>{condition['data_source']}</p>
-                            <p><span class="label">当前状态：</span>{condition['current_status']}</p>
-                            <p><span class="label">严重程度：</span>{condition.get('severity', 'MEDIUM')}</p>
-                        </div>
-                    </div>
-            """
-
-        html += """
-                </div>
-            </div>
-
-            <!-- Level 2 认输 -->
-            <div class="thesis-break-container level-2">
-                <h3 class="level-label">🛑 Level 2: 认输条件（反转推荐）</h3>
-                <div class="conditions-grid">
-        """
-
-        for condition in self.config["level_2_stop_loss"]["conditions"]:
-            html += f"""
-                    <div class="break-condition">
-                        <div class="break-metric">{condition['metric']}</div>
-                        <div class="break-details">
-                            <p><span class="label">触发条件：</span>{condition['trigger']}</p>
-                            <p><span class="label">数据来源：</span>{condition['data_source']}</p>
-                            <p><span class="label">当前状态：</span>{condition['current_status']}</p>
-                            <p><span class="label">后续行动：</span>{condition.get('action', 'N/A')}</p>
-                        </div>
-                    </div>
-            """
-
-        html += """
-                </div>
-            </div>
-
-            <!-- 监控仪表板 -->
-            <div class="monitoring-dashboard">
-                <h3>📊 实时监控状态</h3>
-                <table class="monitoring-table">
-                    <thead>
-                        <tr>
-                            <th>条件</th>
-                            <th>触发阈值</th>
-                            <th>当前值</th>
-                            <th>状态</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-        """
-
-        # 添加监控行（示例）
-        conditions = self.config.get("level_1_warning", {}).get("conditions", [])
-        for condition in conditions:
-            html += f"""
-                        <tr>
-                            <td>{condition['metric']}</td>
-                            <td>{condition['trigger']}</td>
-                            <td>{condition['current_status']}</td>
-                            <td>✅ 安全</td>
-                        </tr>
-            """
-
-        html += """
-                    </tbody>
-                </table>
-            </div>
-        </section>
-
-        <style>
-            #thesis-breaks-{ticker} {{
-                background: #f8f9fa;
-                padding: 20px;
-                border-radius: 8px;
-                margin: 30px 0;
-            }}
-
-            .thesis-break-container {{
-                margin: 20px 0;
-                background: white;
-                padding: 15px;
-                border-radius: 6px;
-            }}
-
-            .level-1 {{
-                border-left: 4px solid #ff9800;
-            }}
-
-            .level-2 {{
-                border-left: 4px solid #f44336;
-            }}
-
-            .level-label {{
-                margin-bottom: 15px;
-                font-size: 16px;
-                font-weight: 600;
-            }}
-
-            .conditions-grid {{
-                display: grid;
-                gap: 12px;
-            }}
-
-            .break-condition {{
-                background: #fafafa;
-                padding: 12px;
-                border-radius: 4px;
-                border-left: 3px solid #e0e0e0;
-            }}
-
-            .break-metric {{
-                font-weight: 600;
-                margin-bottom: 8px;
-                color: #333;
-            }}
-
-            .break-details p {{
-                margin: 4px 0;
-                font-size: 13px;
-            }}
-
-            .label {{
-                font-weight: 600;
-                color: #666;
-            }}
-
-            .monitoring-table {{
-                width: 100%;
-                border-collapse: collapse;
-                margin: 15px 0;
-            }}
-
-            .monitoring-table th {{
-                background: #f5f5f5;
-                padding: 10px;
-                text-align: left;
-                font-weight: 600;
-                border-bottom: 2px solid #ddd;
-            }}
-
-            .monitoring-table td {{
-                padding: 10px;
-                border-bottom: 1px solid #eee;
-            }}
-
-            .monitoring-table tr:hover {{
-                background: #f9f9f9;
-            }}
-        </style>
-        """
-
-        return html
 
     def save_to_json(self, filename: str = None) -> str:
         """保存监控配置到 JSON 文件"""
@@ -397,10 +231,6 @@ if __name__ == "__main__":
     print(f"最终评分: {result['final_score']}")
     print(f"警告数: {len(result['level_1_warnings'])}")
     print(f"认输数: {len(result['level_2_stops'])}")
-
-    # 生成 HTML
-    html = nvda_monitor.generate_html_section()
-    print("\n✅ HTML 已生成")
 
     # 保存配置
     nvda_monitor.save_to_json()
