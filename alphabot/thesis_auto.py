@@ -657,7 +657,7 @@ def _press_release(ticker: str, after: date, sec_get: Callable[[str], bytes]) ->
     hits = []
     for i, form in enumerate(forms):
         filed = _d(dates[i]) if i < len(dates) else None
-        its = str(items[i] or "").split(",") if i < len(items) else []
+        its = [x.strip() for x in str(items[i] or "").split(",")] if i < len(items) else []
         if form == "8-K" and "2.02" in its and filed and i < len(accs) and 0 <= (filed - after).days <= PR_RULES["filed_within_days"]:
             hits.append((filed, accs[i], prims[i] if i < len(prims) else ""))
     if not hits:

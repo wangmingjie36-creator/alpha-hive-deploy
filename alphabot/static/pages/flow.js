@@ -93,7 +93,8 @@ export async function flow(body, d, t, routeAlive, force) {
       sub: `道富官网净值历史 · 资金流 = 份额变化 × 净值 · 取于 ${timeAgo(e.age_sec)}` + (funds[0] ? ` · 最新到 ${funds[0].last_date}` : ""),
     },
     e.refresh_failed ? h("p", { class: "callout warn" }, `刷新失败（${e.refresh_failed.reason_zh}），下面是旧的一份`) : null,
-    errs.length ? h("p", { class: "callout warn" }, `没取到：${errs.map(([s, x]) => `${s}（${x.zh}）`).join("、")}`) : null,
+    errs.length ? h("p", { class: "callout warn" }, `这次没取到：${errs.map(([s, x]) => `${s}（${x.zh}）`).join("、")}`
+      + ((e.kept_from_earlier || []).length ? `；其中 ${e.kept_from_earlier.join("、")} 沿用今天先前取到的那一份` : "")) : null,
     table(cols, [totals, ...(e.week_table || [])], { class: "flow" }),
     gaps.length ? h("p", { class: "small muted" }, `${gaps.map((f) => f.symbol).join("、")} 的文件里有几天两行之间隔了不止一个交易日（或日历判不了），那几行的变化跨了几天。`) : null,
     h("p", { class: "small muted" }, "SMH / SOXX 等非道富基金没有可程序读取的份额历史，这里没有。"));

@@ -1007,6 +1007,13 @@ class AlphaBotService:
                     data, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
                 meta = dict(meta or {})
                 if data:
+                    # 这次缺的几只，同一场里先前已取到过 ⇒ 沿用那一份（不然一次临时失败就把已有的数从页面上抹掉）；
+                    # 换了场次不沿用：那是别的日子的数。沿用的照样记在 `errors` 里，过冷却期再取一次
+                    if ent is not None and ent[0] == key and meta.get("errors"):
+                        kept = {s: ent[2][s] for s in meta["errors"] if s in ent[2]}
+                        if kept:
+                            data = {**data, **kept}
+                            meta["kept_from_earlier"] = sorted(kept)
                     ent = self._flow_etf = (key, now, data, meta, self.now_fn().isoformat(timespec="seconds"))
                     self._flow_etf_fail = None
                     if meta.get("errors"):           # 缺几只：照用这一份，但过冷却期再取一次补
@@ -1026,6 +1033,7 @@ class AlphaBotService:
         return {"available": True, **body, "fetched_at": ent[4], "age_sec": round(now - ent[1], 0),
                 "errors": {s: {"code": c, "zh": MF.REASONS.get(str(c).split(":")[0], c)} for s, c in errors.items()},
                 "skipped": (ent[3] or {}).get("skipped") or {},
+                "kept_from_earlier": (ent[3] or {}).get("kept_from_earlier") or [],
                 "refresh_failed": ({**failed, "reason_zh": MF.REASONS.get(failed.get("reason"), failed.get("reason"))}
                                    if failed is not None and failed.get("reason") else None)}
 

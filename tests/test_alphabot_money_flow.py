@@ -191,6 +191,7 @@ class _Env:
         self.e_result = ({"XLP": MF.parse_navhist(SM.read_xlsx_rows(_xlsx(XLP_ROWS)))[0]},
                          {"reason": None, "errors": {}, "skipped": {}})
         self.markets = []
+        self.session = "2026-11-18"
 
     def svc(self):
         def sf(t, known_market=None):
@@ -206,7 +207,7 @@ class _Env:
             return self.e_result
         return AlphaBotService(bars_fn=lambda t: {"available": True, "source": "demo", "bars": syn.demo_bars(t, "2026-09-01")},
                                state_dir=self.dir, clock=lambda: self.t, now_fn=lambda: self.now,
-                               completed_session_fn=lambda: "2026-11-18", flow_stock_fn=sf, flow_etf_fn=ef)
+                               completed_session_fn=lambda: self.session, flow_stock_fn=sf, flow_etf_fn=ef)
 
 
 class TestService:
@@ -257,6 +258,23 @@ class TestService:
         env.t += MF.RULES["etf_fail_ttl_sec"] + 1
         svc.money_flow("NVDA")
         assert env.e_calls == 2                                      # 缺几只的那份过冷却再取一次补
+
+    def test_partial_refetch_keeps_same_session_series_but_not_older_session(self, tmp_path):
+        # v0.45.799：同一场里先取齐、过 3 小时重取时 XLK 临时失败 ⇒ 不该把已有的 XLK 从页面上抹掉；换了场次不沿用旧日子的数
+        env = _Env(tmp_path)
+        xlp = env.e_result[0]["XLP"]
+        env.e_result = ({"XLP": xlp, "XLK": xlp}, {"reason": None, "errors": {}, "skipped": {}})
+        svc = env.svc()
+        assert {f["symbol"] for f in svc.money_flow("NVDA")["etf"]["funds"]} == {"XLP", "XLK"}
+        env.t += MF.RULES["etf_ttl_sec"] + 1
+        env.e_result = ({"XLP": xlp}, {"reason": None, "errors": {"XLK": "fetch_error:TimeoutError"}, "skipped": {}})
+        e = svc.money_flow("NVDA")["etf"]
+        assert env.e_calls == 2 and {f["symbol"] for f in e["funds"]} == {"XLP", "XLK"}
+        assert e["kept_from_earlier"] == ["XLK"] and "XLK" in e["errors"]          # 沿用的照样点名
+        env.t += MF.RULES["etf_fail_ttl_sec"] + 1
+        env.session = "2026-11-19"
+        e = svc.money_flow("NVDA")["etf"]
+        assert env.e_calls == 3 and [f["symbol"] for f in e["funds"]] == ["XLP"] and e["kept_from_earlier"] == []
 
     def test_index_demo_and_injected_services_never_reach_the_network(self, tmp_path):
         env = _Env(tmp_path)

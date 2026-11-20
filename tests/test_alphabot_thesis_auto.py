@@ -728,6 +728,12 @@ class TestPressReleaseFill:
         out = TA.fill_income_from_press(nvda_rows(), "NVDA", sec_fake(subs=subs))
         assert "还没有" in self._note(out)
 
+    def test_items_with_spaces_still_match(self):
+        subs = json.loads(json.dumps(SUBMISSIONS))
+        subs["filings"]["recent"]["items"][0] = "2.02, 9.01"
+        rows = TA.fill_income_from_press(nvda_rows(), "NVDA", sec_fake(subs=subs))
+        assert rows[0]["source"].startswith("SEC 8-K")
+
     def test_sec_error_is_visible_not_raised(self):
         def boom(url):
             raise OSError("down")
