@@ -405,7 +405,7 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "delayed_quotes/* 被 307 跳到 cdn-api.cboe.com，后者的 Cloudflare 规则对不带 Referer 的请求一律 403，"
      "_fetch_cboe_payload 出口 None。只改放行条件，取到的文件与解析不变：2026-11-20 盘中经生产路径取 SPY，"
      "旧域名跟跳转与新域名直取的 data 段 SHA-256 相同（12766 个合约）；重试、陈旧判定、进程缓存、_cboe_symbol、URL 不变。"
-     "403 起于 11-19 扫描（15:23 完成、CBOE 抓取 39 次全成）之后，无扫描日受影响。"
+     "403 起于 11-19 扫描（15:23 完成；scan_timing 记 CBOE fetches=39、failed=0，另 9 次 BILI 陈旧拒收与本次无关）之后，无扫描日受影响。"
      "**用户 2026-11-20 在对话里选 no_value_change**；不登记边界"),
 ]
 
