@@ -24,7 +24,9 @@
 综合分（`final_score`）本身也没有被证实有预测力，这里照实摆出来只为看它怎么变。
 
 口径（照扫描记录的原样，不重算）
-  · **全链** P/C（`full_pc_ratio`）与**全链** OI（call + put 合计）是总览列、变化与提示的口径：覆盖全部到期日，日间可比；
+  · **全链** P/C（`full_pc_ratio`）与**全链** OI（call + put 合计）是总览列摆出的数，但它们**也有窗口**：扫描只收行权价在
+    [0.60×现价, 1.45×现价] 之内、前 24 个到期日的合约，窗口跟着现价走，现价大动时总量与 P/C 会假跳（v0.45.798 实测，见 `same_grid`）；
+    ⇒ **变化与提示的口径是「同一批合约」**：两天都覆盖到的到期日 × 行权价范围交集上的合计（`same_grid`），拿不到逐合约明细就不比；
   · **近端窗口** P/C（`put_call_ratio`）与窗口 OI（`total_oi`）只在详情页并排摆出、**不挂提示**：它们只数扫描主链选中的
     那 4 个到期日（8 个日历日之后最近的 4 个）。月度到期日（第三个周五，OI 是周度的好几倍）进出这个窗口时，窗口 OI 会
     跳 3～5 倍、窗口 P/C 也跟着变，那是窗口换了、不是持仓变了（2026-11-11 实测：NVDA 10-08 → 10-09 窗口 OI 171 万 → 47 万，
@@ -35,6 +37,7 @@
 from __future__ import annotations
 
 import math
+from array import array
 from typing import List, Optional, Tuple
 
 ORACLE = "OracleBeeEcho"
@@ -85,6 +88,7 @@ REASONS = {
     "no_gex_state": "这一天的扫描没有记 gamma 读数",
     "no_oi_detail": "这一次或上一次扫描没有逐合约的未平仓明细",
     "no_session_between": "上一次扫描到这一次之间没有交易日，两次记的是同一份未平仓",
+    "no_common_grid": "两次扫描记的合约没有重叠（到期日或行权价范围对不上），没法在同一批合约上比",
 }
 
 
@@ -520,8 +524,10 @@ def big_trades(result, prev_result=None, date: Optional[str] = None, prev_date: 
 METRIC_READS = {
     "score": "综合分 0–10，由各维度分数按权重合成。它没有被证实有预测力，只用来在名单里排先后。",
     "spot": "现价取自期权快照那一刻；涨跌幅是对上一次扫描的。",
-    "full_pc_ratio": "全链 P/C = 全部到期日的 Put 未平仓 ÷ Call 未平仓。大于 1 是 Put 更多。Put 多可能是买保护，也可能是卖 Put 收权利金，单看这个数分不出方向。",
-    "full_oi": "全链 OI = 全部到期日的未平仓合约数。增加是新开的仓多于平掉的；月度到期日当天会因合约到期而明显减少。",
+    "full_pc_ratio": "全链 P/C = Put 未平仓 ÷ Call 未平仓。大于 1 是 Put 更多。Put 多可能是买保护，也可能是卖 Put 收权利金，单看这个数分不出方向。"
+                     "扫描只收行权价在现价 0.6–1.45 倍之间的合约，现价大动时会有一批合约进出这个范围，所以「和上一次比」只在两天都覆盖到的同一批合约上算。",
+    "full_oi": "全链 OI = 扫描覆盖到的合约的未平仓合计。增加是新开的仓多于平掉的。「和上一次比」只算两天都覆盖到的同一批合约："
+               "现价大动挤进挤出的合约、已经到期的合约、新挂出来的到期日都不算进变化。",
     "iv_rank": "IV Rank = 当前波动率在历史最低到最高之间的位置（0–100）。标着「HV 代」时用的是过去一年已实现波动率的排名；真 IV 历史攒够 63 个交易日后自动切换，那时窗口是已攒下的天数。",
     "iv_rv": "IV 是期权隐含的年化波动率，RV30 是过去 30 天实际走出来的。IV 高于 RV 是期权定价比近期实际波动贵，差得越多越贵。",
     "skew": "IV Skew = 虚值 Put 的隐含波动率 ÷ 虚值 Call 的。大于 1 是下行保护比上行期权贵，是多数股票的常态；数值升高是这个差距在拉大。",
@@ -550,12 +556,17 @@ def readings(today: dict, prev: Optional[dict], d: dict) -> List[dict]:
     add("score", "综合分", f"{sc:.2f}" if sc is not None else None, chg(d.get("score"), "{:.2f}", "比上一次高 {}", "比上一次低 {}"))
     sp = today.get("spot")
     add("spot", "现价", f"{sp:,.2f}" if sp is not None else None, chg(d.get("spot_pct"), "{:.2f}%", "比上一次涨 {}", "比上一次跌 {}"))
+    g = d.get("grid") or {}
+    scope = (f"（同一批合约：行权价 {g['strike_lo']:g}–{g['strike_hi']:g}、{g['n_expiries']} 个到期日）"
+             if g.get("available") else "")
+    no_grid = (f"没法在同一批合约上比：{reason_zh(g.get('reason'))}" if ok and g and not g.get("available") else None)
     pc = today.get("full_pc_ratio")
+    pc_chg = chg(d.get("grid_pc_ratio"), "{:.2f}", "比上一次高 {}：Put 相对 Call 变多了", "比上一次低 {}：Put 相对 Call 变少了")
     add("full_pc_ratio", "P/C（全链）", f"{pc:.2f}（Put 未平仓{'多于' if pc > 1 else '少于' if pc < 1 else '等于'} Call）" if pc is not None else None,
-        chg(d.get("full_pc_ratio"), "{:.2f}", "比上一次高 {}：Put 相对 Call 变多了", "比上一次低 {}：Put 相对 Call 变少了"))
+        (pc_chg + scope) if pc_chg else no_grid)
     oi = today.get("full_oi")
-    add("full_oi", "全链 OI", f"{oi / 1e6:.2f}M 张" if oi is not None else None,
-        chg(d.get("full_oi_pct"), "{:.1f}%", "比上一次多 {}", "比上一次少 {}"))
+    oi_chg = chg(d.get("grid_oi_pct"), "{:.1f}%", "比上一次多 {}", "比上一次少 {}")
+    add("full_oi", "全链 OI", f"{oi / 1e6:.2f}M 张" if oi is not None else None, (oi_chg + scope) if oi_chg else no_grid)
     ivr = today.get("iv_rank")
     src = "（已实现波动率的排名）" if today.get("iv_rank_source") == "hv_proxy" else ""
     win = "过去一年" if today.get("iv_rank_source") == "hv_proxy" else "所用历史窗口"      # 真 IV 历史的窗口是自攒的天数，不是一年
@@ -619,7 +630,83 @@ def day_view(result) -> Optional[dict]:
         "flows": flows[: int(RULES["flows_shown"])], "flow_summary": flow_sum,
         "flow_expiries": flow_by_expiry(o.get("unusual_activity"), spot, _levels(_dig(o, "key_levels", "resistance"), spot)),
         "unusual_flow_ok": o.get("unusual_flow_ok"),
+        "oi_grid": _oi_grid(o),
     }
+
+
+def _oi_grid(o: dict) -> Optional[dict]:
+    """扫描记的逐合约未平仓（`full_chain_oi.{call,put}_exp_oi`：行权价字符串键 → {到期日: OI}）→
+    `{"call": {到期日: (行权价数组, OI 数组)}, "put": …}`。用 `array('d')` 存：服务端按天缓存读数，一天 30 只票约 3.4 万格，
+    存成 dict 套 dict 一天约 2.7 MB、对比页回看 31 天就是 80 多 MB；数组约为四分之一。
+    任一侧缺表 ⇒ None（不拿一侧顶替）；行权价读不了、OI 不是有限数的格子丢掉。"""
+    out = {}
+    for side in ("call", "put"):
+        table = _dig(o, "full_chain_oi", f"{side}_exp_oi")
+        if not isinstance(table, dict):
+            return None
+        by_exp: dict = {}
+        for k, row in table.items():
+            try:
+                strike = float(k)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(strike) or not isinstance(row, dict):
+                continue
+            for e, v in row.items():
+                v = _num(v)
+                if v is not None:
+                    ks, vs = by_exp.setdefault(str(e), (array("d"), array("d")))
+                    ks.append(strike)
+                    vs.append(v)
+        out[side] = by_exp
+    return out
+
+
+def same_grid(today_grid: Optional[dict], prev_grid: Optional[dict]) -> dict:
+    """两天的未平仓放到**同一批合约**上比（v0.45.798）。
+
+    为什么：扫描的「全链」OI 只收行权价在 [0.60×现价, 1.45×现价] 之内、前 24 个到期日的合约（`cboe_options.fetch_cboe_full_chain_oi`
+    与 yfinance 路径同口径）。窗口跟着现价走 ⇒ 现价大动时一批合约被挤进 / 挤出，总量与 P/C 跟着跳，持仓却没变——
+    2026-11-20 实测：同一份 NVDA 链只把现价从 145.98 换成 130.35，put 675 万 → 602 万、call 559 万 → 354 万，P/C 1.21 → 1.70。
+    月度到期日当天到期的合约也会让总量骤降（到期了，不是平仓）。
+
+    做法：只数两天都覆盖到的格子——到期日取两天都有的，行权价取两天各自出现过的行权价范围的交集；范围内某天没记的格子
+    （扫描只收 OI > 0 的）按 0 算。返回两天各自在这批合约上的 Call / Put 合计、变化百分比、P/C 与差，以及这批合约占各自全链的比例。
+    任一天没有逐合约明细 ⇒ `available: False`，**不退回全链总量**（退回去就是这次要修的假跳变）。"""
+    if not today_grid or not prev_grid:
+        return {"available": False, "reason": "no_oi_detail"}
+
+    def span(g):
+        ks = [k for side in ("call", "put") for strikes, _ in g[side].values() for k in (min(strikes), max(strikes)) if strikes]
+        exps = {e for side in ("call", "put") for e, (strikes, _) in g[side].items() if strikes}
+        return (min(ks), max(ks), exps) if ks else (None, None, set())
+    lo_a, hi_a, ex_a = span(today_grid)
+    lo_b, hi_b, ex_b = span(prev_grid)
+    exps = ex_a & ex_b
+    if lo_a is None or lo_b is None or not exps:
+        return {"available": False, "reason": "no_common_grid"}
+    lo, hi = max(lo_a, lo_b), min(hi_a, hi_b)
+    if lo > hi:
+        return {"available": False, "reason": "no_common_grid"}
+
+    def total(g, side, common):
+        return sum(v for e, (strikes, ois) in g[side].items() if (not common or e in exps)
+                   for k, v in zip(strikes, ois) if (not common or lo <= k <= hi))
+    out = {"available": True, "reason": None, "strike_lo": lo, "strike_hi": hi, "n_expiries": len(exps)}
+    for tag, g in (("now", today_grid), ("prev", prev_grid)):
+        c, p = total(g, "call", True), total(g, "put", True)
+        allc, allp = total(g, "call", False), total(g, "put", False)
+        out[f"call_{tag}"], out[f"put_{tag}"] = c, p
+        out[f"pc_{tag}"] = round(p / c, 3) if c > 0 else None
+        out[f"covered_pct_{tag}"] = round((c + p) / (allc + allp) * 100, 1) if allc + allp > 0 else None
+    out["oi_pct"] = _pct(out["call_now"] + out["put_now"], out["call_prev"] + out["put_prev"])
+    out["pc_delta"] = _delta(out["pc_now"], out["pc_prev"], 3)
+    return out
+
+
+def public_view(v: Optional[dict]) -> Optional[dict]:
+    """给页面的读数：去掉逐合约明细 `oi_grid`（只给服务端比较用；几千个格子、行权价是浮点键，不上页面）。对比页与深度页都经它出。"""
+    return None if v is None else {k: x for k, x in v.items() if k != "oi_grid"}
 
 
 def views_of(results) -> dict:
@@ -649,8 +736,13 @@ def compare(today: dict, prev: Optional[dict]) -> dict:
     same_ivr = today.get("iv_rank_source") == prev.get("iv_rank_source")
     tc, pc = _dig(today, "flow_summary", "call_centroid"), _dig(prev, "flow_summary", "call_centroid")
     spot = today.get("spot")
+    grid = same_grid(today.get("oi_grid"), prev.get("oi_grid"))
     return {
         "available": True,
+        # 变化与提示用的 OI / P/C：同一批合约上比（`same_grid`）；拿不到逐合约明细 ⇒ None，不退回全链总量
+        "grid": grid,
+        "grid_oi_pct": grid.get("oi_pct"),
+        "grid_pc_ratio": grid.get("pc_delta"),
         "score": _delta(today.get("score"), prev.get("score")),
         "direction_flipped": bool(today.get("direction") and prev.get("direction")
                                   and today.get("direction") != prev.get("direction")),
@@ -685,15 +777,16 @@ def alerts(today: dict, prev: Optional[dict], d: dict) -> List[dict]:
             out.append({"level": "move", "key": key, "text": text})
     move("score", d["score"], RULES["score_jump"],
          f"综合分单日 {d['score']:+.2f}（{prev.get('score')} → {today.get('score')}）" if d["score"] is not None else "")
-    move("full_pc_ratio", d["full_pc_ratio"], RULES["pc_jump"],
-         f"全链 P/C 单日 {d['full_pc_ratio']:+.2f}（{prev.get('full_pc_ratio')} → {today.get('full_pc_ratio')}）"
-         if d["full_pc_ratio"] is not None else "")
+    g = d.get("grid") or {}
+    move("full_pc_ratio", d.get("grid_pc_ratio"), RULES["pc_jump"],
+         f"同一批合约上 P/C 单日 {d['grid_pc_ratio']:+.2f}（{g.get('pc_prev')} → {g.get('pc_now')}）"
+         if d.get("grid_pc_ratio") is not None else "")
     move("iv_rank", d["iv_rank"], RULES["iv_rank_jump"],
          f"IV Rank 单日 {d['iv_rank']:+.0f}（{prev.get('iv_rank')} → {today.get('iv_rank')}）" if d["iv_rank"] is not None else "")
     move("skew", d["skew"], RULES["skew_jump"],
          f"IV Skew 单日 {d['skew']:+.3f}（{prev.get('skew')} → {today.get('skew')}）" if d["skew"] is not None else "")
-    move("full_oi", d["full_oi_pct"], RULES["oi_jump_pct"],
-         f"全链 OI 单日 {d['full_oi_pct']:+.1f}%" if d["full_oi_pct"] is not None else "")
+    move("full_oi", d.get("grid_oi_pct"), RULES["oi_jump_pct"],
+         f"同一批合约上 OI 单日 {d['grid_oi_pct']:+.1f}%" if d.get("grid_oi_pct") is not None else "")
     move("call_centroid", d["call_centroid_pct_of_spot"], RULES["centroid_shift_pct"],
          (f"Call 成交重心{'上移' if (d['call_centroid'] or 0) > 0 else '下移'} {abs(d['call_centroid'] or 0):.2f}"
           f"（现价的 {abs(d['call_centroid_pct_of_spot']):.1f}%）") if d["call_centroid_pct_of_spot"] is not None else "")
@@ -758,6 +851,6 @@ def build_ticker(t: str, days: List[Tuple[str, dict]], date: str) -> dict:
                      "iv_current": v["iv_current"], "skew": v["skew"], "total_oi": v["total_oi"],
                      "call_pct": v["flow_summary"]["call_pct"]})
     return base | {"available": True, "reason": None if pv else "no_prev", "reason_zh": None if pv else reason_zh("no_prev"),
-                   "prev_date": pd_, "scans_between": gap, "today": today, "prev": pv, "delta": d,
+                   "prev_date": pd_, "scans_between": gap, "today": public_view(today), "prev": public_view(pv), "delta": d,
                    "alerts": alerts(today, pv, d), "readings": readings(today, pv, d),
                    "history": hist[-int(RULES["history_days"]):]}

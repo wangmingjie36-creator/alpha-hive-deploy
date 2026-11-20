@@ -26,8 +26,17 @@ STATIC = REPO / "alphabot" / "static"
 D0, D1, D2 = "2026-11-06", "2026-11-09", "2026-11-10"
 
 
+def _cells(call, put, strike="100.0", expiry="2026-12-18"):
+    """逐合约未平仓表（扫描 `full_chain_oi.{call,put}_exp_oi` 的形状：行权价字符串键 → {到期日: OI}）。"""
+    return {"call_exp_oi": {strike: {expiry: call}}, "put_exp_oi": {strike: {expiry: put}}}
+
+
 def _res(score=6.0, direction="bullish", spot=100.0, pc=0.80, ivr=50.0, src="iv_history", skew=1.00, oi=1000.0,
-         flows=None, fpc=1.20, fcall=5000, fput=6000, **extra):
+         flows=None, fpc=1.20, fcall=5000, fput=6000, grid="auto", **extra):
+    """`grid="auto"`：逐合约表 = 全部 OI 放在同一个合约格（行权价 100、12-18 到期）上，与 `fcall` / `fput` 一致；
+    传 dict ⇒ 原样作为 `{call,put}_exp_oi`；传 None ⇒ 不记逐合约表（旧记录的样子）。"""
+    if grid == "auto":
+        grid = _cells(fcall, fput) if isinstance(fcall, (int, float)) and isinstance(fput, (int, float)) else None
     flows = flows if flows is not None else [
         {"type": "call_sweep", "strike": 110.0, "volume": 300, "oi": 100, "ratio": 3.0, "otm_pct": 10.0,
          "dollar_premium": 9e5, "days_to_exp": 9, "expiry": "2026-11-20"},
@@ -41,7 +50,7 @@ def _res(score=6.0, direction="bullish", spot=100.0, pc=0.80, ivr=50.0, src="iv_
                "key_levels": {"support": [{"strike": 90.0, "oi": 500.0}, {"strike": 85.0, "oi": 300.0}],
                               "resistance": [{"strike": 110.0, "oi": 700.0}]},
                "full_chain_oi": {"full_pc_ratio": fpc, "total_call_oi": fcall, "total_put_oi": fput,
-                                 "oi_by_strike_call": {"100.0": 1}}, **extra}
+                                 "oi_by_strike_call": {"100.0": 1}, **(grid or {})}, **extra}
     return {"final_score": score, "direction": direction, "resonance": {"resonance_detected": True},
             "agent_details": {"OracleBeeEcho": {"details": details}, "ScoutBeeNova": {"details": {"price": 99.0}}}}
 
@@ -84,7 +93,8 @@ class TestDayView:
     def test_views_of_uppercases_and_drops_non_objects(self):
         v = OC.views_of({"nvda": _res(), "bad": 3, "x": None})
         assert list(v) == ["NVDA"] and v["NVDA"] == OC.day_view(_res()) and OC.views_of(None) == {}
-        assert len(json.dumps(v)) < 4000 and "oi_by_strike_call" not in json.dumps(v)     # 缓存的是读数，不是原始大表
+        page = json.dumps({t: OC.public_view(x) for t, x in v.items()})
+        assert len(page) < 4000 and "oi_by_strike_call" not in page and "oi_grid" not in page   # 缓存的是读数，不是原始大表
 
 
 class TestCompare:
@@ -113,7 +123,7 @@ class TestCompare:
 
     @pytest.mark.parametrize("kw,key,hit", [
         ({"score": 7.5}, "score", True), ({"score": 7.49}, "score", False),
-        ({"fpc": 1.45}, "full_pc_ratio", True), ({"fpc": 1.44}, "full_pc_ratio", False),
+        ({"fput": 7250}, "full_pc_ratio", True), ({"fput": 7245}, "full_pc_ratio", False),     # 同一批合约上 P/C 1.20 → 1.45 / 1.449
         ({"ivr": 70.0}, "iv_rank", True), ({"ivr": 69.0}, "iv_rank", False),
         ({"skew": 1.10}, "skew", True), ({"skew": 1.09}, "skew", False),
         ({"fcall": 6650}, "full_oi", True), ({"fcall": 6649}, "full_oi", False),
@@ -132,6 +142,73 @@ class TestCompare:
         d = OC.compare(t, p)
         assert d["window_oi_pct"] > 200 and abs(d["full_oi_pct"]) < 1
         assert OC.alerts(t, p, d) == []
+
+    def test_window_shift_raises_no_alert(self):
+        """扫描的「全链」只收行权价在 [0.6×现价, 1.45×现价] 之内的合约：现价大跌 ⇒ 高行权价那批被挤出、低的那批挤进来，
+        总量与 P/C 大跳，同一批合约却一张没动（2026-11-20 实测：同一份 NVDA 链只把现价从 145.98 换成 130.35，P/C 1.21 → 1.70）。"""
+        same = {"100.0": {"2026-12-18": 4000}}
+        prev = {"call_exp_oi": same | {"140.0": {"2026-12-18": 3000}}, "put_exp_oi": same}          # 现价高时覆盖到 140 的 call
+        now = {"call_exp_oi": same, "put_exp_oi": same | {"60.0": {"2026-12-18": 3000}}}             # 现价低时覆盖到 60 的 put
+        p = OC.day_view(_res(fcall=7000, fput=4000, fpc=0.571, grid=prev))
+        t = OC.day_view(_res(fcall=4000, fput=7000, fpc=1.75, grid=now))
+        d = OC.compare(t, p)
+        assert abs(d["full_oi_pct"]) < 1 and d["full_pc_ratio"] > 1               # 全链：OI 不变、P/C 0.57 → 1.75
+        g = d["grid"]
+        assert (g["strike_lo"], g["strike_hi"], g["n_expiries"]) == (100.0, 100.0, 1)
+        assert (d["grid_oi_pct"], d["grid_pc_ratio"], g["pc_now"], g["pc_prev"]) == (0.0, 0.0, 1.0, 1.0)
+        assert not {a["key"] for a in OC.alerts(t, p, d)} & {"full_oi", "full_pc_ratio"}
+        # 同一批合约真变了 ⇒ 照样提示（守卫有牙）
+        moved = {"call_exp_oi": same, "put_exp_oi": {"100.0": {"2026-12-18": 6000}, "60.0": {"2026-12-18": 3000}}}
+        t2 = OC.day_view(_res(fcall=4000, fput=9000, grid=moved))
+        keys = {a["key"] for a in OC.alerts(t2, p, OC.compare(t2, p))}
+        assert {"full_oi", "full_pc_ratio"} <= keys
+
+    def test_expired_and_newly_listed_expiries_are_not_a_change(self):
+        """月度到期日当天到期的合约下一次就没了；新挂出来的到期日上一次没有。两者都不算持仓变化。"""
+        prev = _cells(5000, 6000) | {}
+        prev["put_exp_oi"] = prev["put_exp_oi"] | {"90.0": {"2026-11-20": 9000}}
+        now = _cells(5000, 6000)
+        now["call_exp_oi"] = {"100.0": {"2026-12-18": 5000, "2029-01-19": 800}}
+        p, t = OC.day_view(_res(fput=15000, grid=prev)), OC.day_view(_res(fcall=5800, grid=now))
+        d = OC.compare(t, p)
+        assert d["full_oi_pct"] < -30 and d["grid_oi_pct"] == 0.0 and d["grid"]["n_expiries"] == 1
+        assert d["grid"]["covered_pct_now"] == round(11000 / 11800 * 100, 1)
+        assert not {a["key"] for a in OC.alerts(t, p, d)} & {"full_oi", "full_pc_ratio"}
+
+    def test_no_grid_means_no_oi_alert_not_full_chain_fallback(self):
+        """哪天没记逐合约表 ⇒ 不比、说为什么；**不退回全链总量**（退回去就是要修的假跳变）。"""
+        t, p = OC.day_view(_res(fcall=9000, fput=9000, grid=None)), OC.day_view(_res())
+        d = OC.compare(t, p)
+        assert d["full_oi_pct"] > 15 and d["grid"] == {"available": False, "reason": "no_oi_detail"}
+        assert d["grid_oi_pct"] is None and d["grid_pc_ratio"] is None
+        assert not {a["key"] for a in OC.alerts(t, p, d)} & {"full_oi", "full_pc_ratio"}
+        rd = {r["key"]: r for r in OC.readings(t, p, d)}
+        assert rd["full_oi"]["change"] == "没法在同一批合约上比：" + OC.REASONS["no_oi_detail"]
+        assert rd["full_pc_ratio"]["change"].startswith("没法在同一批合约上比")
+        ok = {r["key"]: r for r in OC.readings(OC.day_view(_res(fcall=6650)), p, OC.compare(OC.day_view(_res(fcall=6650)), p))}
+        assert ok["full_oi"]["change"] == "比上一次多 15.0%（同一批合约：行权价 100–100、1 个到期日）"
+
+    def test_disjoint_contracts_cannot_be_compared(self):
+        t = OC.day_view(_res(grid=_cells(5000, 6000, strike="300.0")))
+        p = OC.day_view(_res(grid=_cells(5000, 6000, expiry="2027-01-15")))
+        assert OC.compare(t, p)["grid"] == {"available": False, "reason": "no_common_grid"}
+        assert OC.compare(OC.day_view(_res(grid=_cells(5000, 6000, strike="300.0"))), OC.day_view(_res()))["grid"]["reason"] \
+            == "no_common_grid"
+
+    def test_grid_reads_recorded_shape(self):
+        """坏格子丢掉、一侧缺表整份 None；行权价在记录里是字符串键。"""
+        g = OC.day_view(_res(grid={"call_exp_oi": {"100.0": {"2026-12-18": 5, "2027-01-15": float("nan")}, "x": {"2026-12-18": 1}},
+                                   "put_exp_oi": {"95": {"2026-12-18": 7}, "100.0": "bad"}}))["oi_grid"]
+        assert {e: (list(k), list(v)) for e, (k, v) in g["call"].items()} == {"2026-12-18": ([100.0], [5.0])}
+        assert {e: (list(k), list(v)) for e, (k, v) in g["put"].items()} == {"2026-12-18": ([95.0], [7.0])}
+        assert OC.day_view(_res(grid={"call_exp_oi": {"100.0": {"2026-12-18": 5}}}))["oi_grid"] is None
+
+    def test_page_payloads_carry_no_grid(self):
+        det = OC.build_ticker("AAA", TestBuild.DAYS, D2)
+        json.dumps(det, allow_nan=False)
+        assert "oi_grid" not in det["today"] and "oi_grid" not in det["prev"]
+        from alphabot import deep_report
+        assert "oi_grid" not in deep_report.build("AAA", D2, _res())["options"]["read"]
 
     def test_flip_and_centroid_alerts(self):
         up = [{"type": "call_sweep", "strike": 113.0, "volume": 300, "dollar_premium": 1.0}]
@@ -232,7 +309,7 @@ class TestService:
     def test_endpoints(self, tmp_path):
         from starlette.testclient import TestClient
         from alphabot.server import create_app
-        svc = self._svc(tmp_path, {D1: {"NVDA": _res()}, D2: {"NVDA": _res(fpc=1.6)}})
+        svc = self._svc(tmp_path, {D1: {"NVDA": _res()}, D2: {"NVDA": _res(fput=8000)}})
         c = TestClient(create_app(svc, port=8765), base_url="http://127.0.0.1:8765")
         assert c.get("/api/compare").json()["rows"][0]["alerts"][0]["key"] == "full_pc_ratio"
         assert c.get(f"/api/compare/NVDA?date={D1}").json()["reason"] == "no_prev"
@@ -301,7 +378,7 @@ class TestPurity:
                 mods |= {a.name.split(".")[0] for a in n.names}
             elif isinstance(n, ast.ImportFrom):
                 mods.add((n.module or "").split(".")[0])
-        assert mods == {"__future__", "math", "typing"}, mods
+        assert mods == {"__future__", "array", "math", "typing"}, mods
         calls = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
         assert not calls & {"open", "exec", "eval", "__import__"}
 

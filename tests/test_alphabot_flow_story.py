@@ -93,11 +93,18 @@ class TestFlowByExpiry:
         assert len(fx["layers"]) == 2 and fx["nearest_resistance"] == 205.0
 
 
+def _grid(call, put):
+    """`day_view` 的逐合约未平仓（同一个合约格）：变化只在两天都覆盖到的同一批合约上算（v0.45.798）。"""
+    from array import array
+    return {"call": {"2026-12-18": (array("d", [170.0]), array("d", [call]))},
+            "put": {"2026-12-18": (array("d", [170.0]), array("d", [put]))}}
+
+
 TODAY = {"score": 5.96, "spot": 168.89, "full_pc_ratio": 1.30, "full_oi": 11_240_000.0, "iv_rank": 100.0, "iv_rank_source": "hv_proxy",
          "iv_current": 79.06, "rv_30d": 42.7, "skew": 1.057, "max_pain": 185.0, "pc_ratio": 0.73, "total_oi": 1.72e6,
-         "direction": "bearish", "flow_summary": {}}
+         "direction": "bearish", "flow_summary": {}, "oi_grid": _grid(1000.0, 1300.0)}
 PREV = {**TODAY, "score": 6.13, "spot": 178.67, "full_pc_ratio": 1.19, "full_oi": 11_140_000.0, "iv_current": 72.92, "skew": 1.049,
-        "max_pain": 195.0}
+        "max_pain": 195.0, "oi_grid": _grid(1000.0, 1190.0)}
 
 
 class TestReadings:
@@ -107,7 +114,7 @@ class TestReadings:
     def test_states_level_and_change_without_reading_direction(self):
         r = self._by_key()
         assert r["full_pc_ratio"]["now"] == "1.30（Put 未平仓多于 Call）"
-        assert r["full_pc_ratio"]["change"] == "比上一次高 0.11：Put 相对 Call 变多了"
+        assert r["full_pc_ratio"]["change"] == "比上一次高 0.11：Put 相对 Call 变多了（同一批合约：行权价 170–170、1 个到期日）"
         assert r["spot"]["change"] == "比上一次跌 5.47%" and r["score"]["change"] == "比上一次低 0.17"
         assert r["iv_rank"]["now"] == "100（已实现波动率的排名）：等于过去一年的最高值" and r["iv_rank"]["change"] == "与上一次相同"
         assert r["iv_rv"]["now"] == "79.1 / 42.7：IV 是 RV 的 1.85 倍"

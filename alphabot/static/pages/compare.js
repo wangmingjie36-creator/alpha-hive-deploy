@@ -60,10 +60,10 @@ function drawOverview(root, d, pick) {
     { label: "方向", render: (r) => h("span", {}, dirChip(r.direction), r.flipped ? h("span", { class: "chip warn" }, "翻转") : null) },
     { label: "综合分", cls: "r", render: (r) => cell(num(r.score, 2), r.delta.score, signed(r.delta.score, 2)) },
     { label: "现价", cls: "r", render: (r) => cell(num(r.spot, 2), r.delta.spot_pct, signedPct(r.delta.spot_pct, 2)) },
-    { label: "P/C（全链）", cls: "r", render: (r) => cell(num(r.full_pc_ratio, 2), r.delta.full_pc_ratio, signed(r.delta.full_pc_ratio, 2)) },
+    { label: "P/C（全链）", cls: "r", render: (r) => cell(num(r.full_pc_ratio, 2), r.delta.grid_pc_ratio, signed(r.delta.grid_pc_ratio, 2)) },
     { label: "IV Rank", cls: "r", render: (r) => ivrCell(r, r.delta) },
     { label: "IV Skew", cls: "r", render: (r) => cell(num(r.skew, 3), r.delta.skew, signed(r.delta.skew, 3)) },
-    { label: "全链 OI", cls: "r", render: (r) => cell(oiShort(r.full_oi), r.delta.full_oi_pct, signedPct(r.delta.full_oi_pct, 1)) },
+    { label: "全链 OI", cls: "r", render: (r) => cell(oiShort(r.full_oi), r.delta.grid_oi_pct, signedPct(r.delta.grid_oi_pct, 1)) },
     { label: "异动里 Call 占比", cls: "r", render: (r) => cell(isNum(r.call_pct) ? `${num(r.call_pct, 1)}%` : "—", r.delta.call_pct, signed(r.delta.call_pct, 1)) },
     { label: "变化提示", render: (r) => (r.alerts.length
       ? h("span", {}, r.alerts.map((a) => h("div", { class: "small" }, a.text)))
@@ -72,7 +72,7 @@ function drawOverview(root, d, pick) {
   const withAlerts = d.rows.filter((r) => r.alert_count).length;
   fill(root, head, unreadableNote(d),
     panel(`${d.rows.length} 只标的 · ${withAlerts} 只有变化提示`,
-      { sub: "小字是相对上一次有这只票的扫描的变化；上一次不是紧挨着的那个扫描日时，详情页会写明" },
+      { sub: "小字是相对上一次有这只票的扫描的变化；P/C 与 OI 的变化只在两天都覆盖到的同一批合约上算（现价大动时全链总量会因合约进出覆盖范围而假跳）；上一次不是紧挨着的那个扫描日时，详情页会写明" },
       table(cols, d.rows, { onRow: (r) => go(`#/compare/${encodeURIComponent(r.ticker)}`) })),
     h("p", { class: "note small muted" }, CAVEAT));
 }
@@ -105,13 +105,15 @@ function drawTicker(root, d, pick) {
     return;
   }
   const t = d.today, p = d.prev, dl = d.delta, fs = t.flow_summary;
+  const g = (dl && dl.grid) || {};
+  const gridNote = g.available ? `同一批合约 ${num(g.strike_lo, 0)}–${num(g.strike_hi, 0)}、${g.n_expiries} 个到期日` : null;
   const was = (v, dp = 2) => (p && isNum(v) ? `上一次 ${num(v, dp)}` : null);
   const kpis = h("div", { class: "kpis" },
     kpi("方向", dirChip(t.direction), p ? `上一次 ${DIR[p.direction] || p.direction || "—"}` : null, dl.direction_flipped ? "down" : ""),
     kpi("综合分", num(t.score, 2), isNum(dl.score) ? `${signed(dl.score, 2)}（${was(p.score)}）` : null, tone(dl.score)),
     kpi("现价", num(t.spot, 2), isNum(dl.spot_pct) ? `${signedPct(dl.spot_pct, 2)}（${was(p.spot)}）` : null, tone(dl.spot_pct)),
-    kpi("P/C（全链）", num(t.full_pc_ratio, 2), isNum(dl.full_pc_ratio) ? `${signed(dl.full_pc_ratio, 2)}（${was(p.full_pc_ratio)}）` : null, tone(dl.full_pc_ratio)),
-    kpi("全链 OI", oiShort(t.full_oi), isNum(dl.full_oi_pct) ? `${signedPct(dl.full_oi_pct, 1)}（上一次 ${oiShort(p.full_oi)}）` : null, tone(dl.full_oi_pct)),
+    kpi("P/C（全链）", num(t.full_pc_ratio, 2), isNum(dl.grid_pc_ratio) ? `${signed(dl.grid_pc_ratio, 2)}（${gridNote}：${num(g.pc_prev, 2)} → ${num(g.pc_now, 2)}）` : null, tone(dl.grid_pc_ratio)),
+    kpi("全链 OI", oiShort(t.full_oi), isNum(dl.grid_oi_pct) ? `${signedPct(dl.grid_oi_pct, 1)}（${gridNote}）` : null, tone(dl.grid_oi_pct)),
     kpi("IV Rank", h("span", {}, isNum(t.iv_rank) ? num(t.iv_rank, 0) : "—",
       t.iv_rank_source === "hv_proxy" ? h("span", { class: "chip warn", title: "用历史波动率的分位顶替，不是真正的 IV Rank" }, "HV 代") : null),
       dl.available && dl.iv_rank_comparable === false ? "两天口径不同，不比" : (isNum(dl.iv_rank) ? `${signed(dl.iv_rank, 0)}（${was(p.iv_rank, 0)}）` : null), tone(dl.iv_rank)),
@@ -147,13 +149,13 @@ function drawTicker(root, d, pick) {
     mk("综合分", [{ name: "综合分", data: hist.map((r) => r.score) }], (v) => num(v, 1)),
     mk("P/C", [{ name: "全链", data: hist.map((r) => r.full_pc_ratio) }, { name: "近端窗口", data: hist.map((r) => r.pc_ratio), dash: true }], (v) => num(v, 2)),
     mk("IV 与 IV Rank", [{ name: "IV", data: hist.map((r) => r.iv_current) }, { name: "IV Rank", data: hist.map((r) => r.iv_rank), dash: true }], (v) => num(v, 0)),
-    mk("OI", [{ name: "全链", data: hist.map((r) => r.full_oi) }, { name: "近端窗口（4 个到期日）", data: hist.map((r) => r.total_oi), dash: true }], oiShort),
+    mk("OI（总量随现价覆盖范围移动，大跌大涨时会假跳）", [{ name: "全链", data: hist.map((r) => r.full_oi) }, { name: "近端窗口（4 个到期日）", data: hist.map((r) => r.total_oi), dash: true }], oiShort),
   ] : [];
 
   fill(root, head, unreadableNote(d),
     panel("今天 vs 上一次", { sub: prevNote(d) }, kpis,
       t.options_available ? null : h("p", { class: "callout warn" }, "这一天这只标的没有期权分析记录，期权读数都是空的。"),
-      h("p", { class: "note small muted" }, "「近端窗口」的两项只数扫描选中的 4 个到期日。月度到期日进出这个窗口时它们会大幅跳变（窗口换了，不是持仓变了），所以只摆出来、不算变化也不挂提示；看变化请看「全链」。")),
+      h("p", { class: "note small muted" }, "「近端窗口」的两项只数扫描选中的 4 个到期日。月度到期日进出这个窗口时它们会大幅跳变（窗口换了，不是持仓变了），所以只摆出来、不算变化也不挂提示。「全链」也只收行权价在现价 0.6–1.45 倍之间的合约，所以全链的变化只在两天都覆盖到的同一批合约上算。")),
     (d.readings || []).length ? panel("逐项解读", { sub: "每个读数现在是多少、和上一次比怎么变、这个数怎么读；只陈述量的变化，不解读成看涨 / 看跌" },
       table([{ label: "读数", render: (r) => h("b", {}, r.label) },
         { label: "现在", render: (r) => r.now || "—" },
