@@ -522,7 +522,7 @@ class TestDisplayOnly:
             elif isinstance(n, ast.ImportFrom):
                 mods.add((n.module or "").split(".")[0])
         assert mods <= {"__future__", "math", "datetime", "typing", "alphabot", "yf_daily", "yfinance", "yf_gate",
-                        "json", "urllib", "treasury_yields", "zoneinfo"}, mods
+                        "json", "urllib", "treasury_yields", "zoneinfo", "re", "html"}, mods
 
     def test_never_writes_config(self):
         src = Path(TA.__file__).read_text(encoding="utf-8") + (ROOT / "alphabot/service.py").read_text(encoding="utf-8")
@@ -625,3 +625,139 @@ def test_frontend_keeps_unchecked_rows_out_of_the_auto_table():
     """条件原文改过 / 配置里没有的那几条没核对：页面不许把它们放进「自动核对」表、算成「判不了」。"""
     js = (ROOT / "alphabot/static/pages/deep.js").read_text(encoding="utf-8")
     assert 'new Set(["trigger_changed", "not_in_config"])' in js and "!NOT_CHECKED.has(c.verdict?.reason)" in js
+
+
+# ───────────────────────────── v0.45.796 毛利率：Yahoo 最新一季空着时用 SEC 8-K 财报新闻稿补
+
+PR_HTML = """<html><body><p>NVIDIA ANNOUNCES ... Revenue $115.8 billion</p>
+<table><tr><td>NVIDIA CORPORATION</td></tr><tr><td>CONDENSED CONSOLIDATED STATEMENTS OF INCOME</td></tr>
+<tr><td>(In millions, except per share data)</td></tr><tr><td>(Unaudited)</td></tr>
+<tr><td>Three Months Ended</td><td>Nine Months Ended</td></tr>
+<tr><td>October 25,</td><td>October 26,</td><td>October 25,</td><td>October 26,</td></tr>
+<tr><td>2026</td><td>2025</td><td>2026</td><td>2025</td></tr>
+<tr><td>Revenue</td><td>$</td><td>115,844</td><td>$</td><td>57,006</td><td>$</td><td>293,681</td><td>$</td><td>147,811</td></tr>
+<tr><td>Cost of revenue</td><td>29,168</td><td>15,157</td><td>73,705</td><td>45,441</td></tr>
+<tr><td>Gross profit</td><td>86,676</td><td>41,849</td><td>219,976</td><td>102,370</td></tr>
+<tr><td>Research and development</td><td>7,454</td><td>4,705</td></tr></table></body></html>"""
+
+SUBMISSIONS = {"filings": {"recent": {
+    "form": ["8-K", "8-K", "10-Q", "8-K"],
+    "filingDate": ["2026-11-17", "2026-11-12", "2026-08-27", "2026-08-27"],
+    "items": ["2.02,9.01", "5.02,9.01", "", "2.02,9.01"],
+    "accessionNumber": ["0001045810-26-000088", "0001045810-26-000082", "0001045810-26-000070", "0001045810-26-000069"],
+    "primaryDocument": ["nvda-20261117.htm", "nvda-20261111.htm", "nvda-20260726.htm", "nvda-20260827.htm"]}}}
+INDEX = {"directory": {"item": [{"name": n} for n in (
+    "0001045810-26-000088-index.html", "R1.htm", "nvda-20261117.htm", "q3fy27cfocommentary.htm", "q3fy27pr.htm")]}}
+
+
+def sec_fake(*, html=PR_HTML, subs=SUBMISSIONS, calls=None):
+    def get(url):
+        if calls is not None:
+            calls.append(url)
+        if "submissions" in url:
+            return json.dumps(subs).encode()
+        if url.endswith("index.json"):
+            assert "000104581026000088" in url        # 取的是 11-17 那份财报 8-K，不是 11-12 那份人事 8-K
+            return json.dumps(INDEX).encode()
+        if url.endswith("q3fy27pr.htm"):
+            return html.encode()
+        return b"<html>CFO commentary, no income statement table</html>"
+    return get
+
+
+def nvda_rows(cur_rev=None, cur_gp=None):
+    return [q("2026-10-31", cur_gp, cur_rev), q("2026-07-31", 72142e6, 96221e6), q("2026-04-30", 61157e6, 81615e6),
+            q("2026-01-31", 51093e6, 68127e6), q("2025-10-31", 41849e6, 57006e6)]
+
+
+class TestPressReleaseFill:
+    def test_parse_first_column_in_dollars(self):
+        pr = TA.parse_press_income(PR_HTML)
+        assert pr["end"] == "2026-10-25" and pr["revenue"] == 115844e6 and pr["gross_profit"] == 86676e6
+        assert pr["ya_revenue"] == 57006e6 and pr["ya_gross_profit"] == 41849e6
+
+    def test_parse_other_labels_and_thousands(self):
+        page = ("Consolidated Statements of Operations (in thousands) Three Months Ended September 30, 2026 2025 "
+                "Total revenues $ 1,000 $ 900 Total cost of revenues 600 500 Gross profit 400 400")
+        pr = TA.parse_press_income(page)
+        assert pr["end"] == "2026-09-30" and pr["revenue"] == 1_000_000 and pr["cost"] == 600_000 and pr["gross_profit"] == 400_000
+
+    def test_parse_refuses_without_table_unit_or_date(self):
+        assert TA.parse_press_income("Revenue $115.8 billion, up 103%") is None
+        assert TA.parse_press_income(PR_HTML.replace("(In millions, except per share data)", "")) is None
+        assert TA.parse_press_income(PR_HTML.replace("Three Months Ended", "")) is None
+
+    def test_fills_missing_latest_quarter(self):
+        rows = TA.fill_income_from_press(nvda_rows(), "NVDA", sec_fake())
+        assert rows[0]["revenue"] == 115844e6 and rows[0]["gross_profit"] == 86676e6 and "q3fy27pr.htm" in rows[0]["source"]
+        assert rows[1:] == nvda_rows()[1:]
+        v = TA.judge_gm_qoq_drop(rows, 2.0, date(2026, 11, 20))
+        assert v["status"] == "not_fired" and "74.82%" in v["facts"] and "SEC 8-K" in v["facts"]
+
+    def test_complete_yahoo_row_never_asks_sec(self):
+        calls = []
+        rows = TA.fill_income_from_press(nvda_rows(115000e6, 86000e6), "NVDA", sec_fake(calls=calls))
+        assert calls == [] and "source" not in rows[0]
+
+    def _note(self, rows):
+        v = TA.judge_gm_qoq_drop(rows, 2.0, date(2026, 11, 20))
+        assert v["status"] == "unjudgeable" and v["reason"] == "insufficient" and "SEC 新闻稿也没补上" in v["reason_zh"]
+        return rows[0]["fill_note"]
+
+    def test_arithmetic_mismatch_not_filled(self):
+        rows = TA.fill_income_from_press(nvda_rows(), "NVDA", sec_fake(html=PR_HTML.replace("86,676", "86,000")))
+        assert "毛利" in self._note(rows) and rows[0]["revenue"] is None
+
+    def test_year_ago_mismatch_not_filled(self):
+        rows = nvda_rows()
+        rows[4] = q("2025-10-31", 41849e6, 50000e6)
+        out = TA.fill_income_from_press(rows, "NVDA", sec_fake())
+        assert "去年同季" in self._note(out)
+
+    def test_quarter_end_mismatch_not_filled(self):
+        rows = nvda_rows()
+        rows[0] = q("2027-01-31", None, None)
+        subs = json.loads(json.dumps(SUBMISSIONS))
+        subs["filings"]["recent"]["filingDate"][0] = "2027-02-25"
+        out = TA.fill_income_from_press(rows, "NVDA", sec_fake(subs=subs))
+        assert "对不上" in self._note(out)
+
+    def test_no_earnings_8k_yet(self):
+        subs = json.loads(json.dumps(SUBMISSIONS))
+        subs["filings"]["recent"]["items"][0] = "7.01"
+        out = TA.fill_income_from_press(nvda_rows(), "NVDA", sec_fake(subs=subs))
+        assert "还没有" in self._note(out)
+
+    def test_sec_error_is_visible_not_raised(self):
+        def boom(url):
+            raise OSError("down")
+        rows, meta = TA.fetch_part("income", "NVDA", today=TODAY, yf_module=YahooBlank(), sec_get=boom)
+        assert meta["reason"] is None and "OSError" in rows[0]["fill_note"]
+
+    def test_fetch_part_wires_sec_get(self):
+        rows, meta = TA.fetch_part("income", "NVDA", today=date(2026, 11, 20), yf_module=YahooBlank(), sec_get=sec_fake())
+        assert meta["reason"] is None and rows[0]["source"].startswith("SEC 8-K")
+
+    def test_injected_yahoo_without_sec_get_stays_offline(self, monkeypatch):
+        def no_net(url):
+            raise AssertionError("不该出网")
+        monkeypatch.setattr(TA, "_default_sec_get", no_net)
+        rows, meta = TA.fetch_part("income", "NVDA", today=TODAY, yf_module=YahooBlank())
+        assert rows[0]["revenue"] is None and "fill_note" not in rows[0]
+
+    def test_every_margin_ticker_has_a_cik(self):
+        assert {t for (t, _), s in TA.CHECKS.items() if s["kind"] == "gm_qoq_drop"} == set(TA.SEC_CIK)
+
+    def test_user_agent_carries_no_personal_contact(self):
+        assert "@" not in TA.SEC_UA
+
+
+class YahooBlank:
+    """Yahoo 新一季那一列只建了框、收入 / 毛利是 NaN（2026-11-17 NVDA 实测）。"""
+    def Ticker(self, t):
+        nan = float("nan")
+        class T:
+            quarterly_income_stmt = FakeFrame({
+                "Gross Profit": {"2026-10-31": nan, "2026-07-31": 72142e6, "2025-10-31": 41849e6},
+                "Total Revenue": {"2026-10-31": nan, "2026-07-31": 96221e6, "2025-10-31": 57006e6}})
+        return T()
