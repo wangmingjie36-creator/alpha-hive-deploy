@@ -515,6 +515,12 @@ def _closes(hist, key: str) -> List[dict]:
     return [{key: str(i) if key == "t" else str(i)[:10], "close": _num(c)} for i, c in zip(hist.index, hist["Close"])]
 
 
+def _et_today() -> date:
+    """美东今天（与 `treasury_yields._et_month` 同一时区口径；测试可替换）。"""
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/New_York")).date()
+
+
 def _fetch_ust10(treasury_get: Optional[Callable[[Optional[str]], Optional[dict]]], today: date) -> Optional[dict]:
     """财政部最新的 10 年期官方值 `{date, y10}`；取不到 → None。`treasury_get(date|None)` 只给测试注入。"""
     if treasury_get is None:
@@ -523,8 +529,11 @@ def _fetch_ust10(treasury_get: Optional[Callable[[Optional[str]], Optional[dict]
     r = treasury_get(None)
     if not r or _num(r.get("y10")) is None:
         # 月初本月还没有官方值（1 号落在周末、或第一个交易日还没发布）时本月那份是空的 ⇒ 补问一次上月最后一个工作日。
-        # 只问一次：取不到时 treasury_yields 不缓存失败，逐日回找会把一次断网放大成好几次 30 秒超时
-        d = today.replace(day=1) - timedelta(days=1)
+        # 只问一次：取不到时 treasury_yields 不缓存失败，逐日回找会把一次断网放大成好几次 30 秒超时。
+        # 「本月」按**美东**算（v0.45.790 修）：`get_yield_curve(None)` 取的是美东当月；本机在太平洋，月末那天 21 点后美东已进下个月，
+        # 按本机日期算「上月」会问到上上个月（超过 7 天 ⇒ 根本不问），每月末晚上 3 小时取不到
+        ref = max(today, _et_today())
+        d = ref.replace(day=1) - timedelta(days=1)
         while d.weekday() >= 5:
             d -= timedelta(days=1)
         r = treasury_get(d.isoformat()) if (today - d).days <= RULES["max_yield_age_days"] else None

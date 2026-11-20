@@ -351,8 +351,9 @@ class TestFetch:
         got, meta = TA.fetch_part("@ust10", "NEE", today=TODAY, treasury_get=tg)
         assert meta["reason"] is None and got == {"date": "2026-11-13", "y10": 5.15} and asked == [None]
 
-    def test_ust10_month_start_asks_previous_month_once(self):
+    def test_ust10_month_start_asks_previous_month_once(self, monkeypatch):
         """本月还没有官方值（11-01 是周日）⇒ 只补问一次上月最后一个工作日（10-30 周五），不逐日回找。"""
+        monkeypatch.setattr(TA, "_et_today", lambda: date(2026, 11, 1))
         asked = []
 
         def tg(d):
@@ -361,7 +362,19 @@ class TestFetch:
         got, meta = TA.fetch_part("@ust10", "NEE", today=date(2026, 11, 1), treasury_get=tg)
         assert got == {"date": "2026-10-30", "y10": 4.94} and asked == [None, "2026-10-30"]
 
-    def test_ust10_unavailable_is_empty(self):
+    def test_ust10_month_end_evening_uses_et_month(self, monkeypatch):
+        """本机（太平洋）11-30 晚 21 点后美东已是 12-01：本月（12 月）还空 ⇒ 该问 11 月最后一个工作日 11-30，不是 10 月的。"""
+        monkeypatch.setattr(TA, "_et_today", lambda: date(2026, 12, 1))
+        asked = []
+
+        def tg(d):
+            asked.append(d)
+            return {"date": "2026-11-30", "y10": 5.02} if d == "2026-11-30" else None
+        got, meta = TA.fetch_part("@ust10", "NEE", today=date(2026, 11, 30), treasury_get=tg)
+        assert got == {"date": "2026-11-30", "y10": 5.02} and asked == [None, "2026-11-30"]
+
+    def test_ust10_unavailable_is_empty(self, monkeypatch):
+        monkeypatch.setattr(TA, "_et_today", lambda: TODAY)   # 钉住美东钟：不钉的话真实日期到下个月初会触发补问
         asked = []
         got, meta = TA.fetch_part("@ust10", "NEE", today=TODAY, treasury_get=lambda d: asked.append(d))
         assert got is None and meta["reason"] == "empty" and asked == [None]
@@ -509,7 +522,7 @@ class TestDisplayOnly:
             elif isinstance(n, ast.ImportFrom):
                 mods.add((n.module or "").split(".")[0])
         assert mods <= {"__future__", "math", "datetime", "typing", "alphabot", "yf_daily", "yfinance", "yf_gate",
-                        "json", "urllib", "treasury_yields"}, mods
+                        "json", "urllib", "treasury_yields", "zoneinfo"}, mods
 
     def test_never_writes_config(self):
         src = Path(TA.__file__).read_text(encoding="utf-8") + (ROOT / "alphabot/service.py").read_text(encoding="utf-8")
