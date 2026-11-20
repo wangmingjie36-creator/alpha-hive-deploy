@@ -89,7 +89,8 @@ function claudePart(cl, onStart) {
     { label: "条件", render: (r) => h("div", {}, h("b", {}, r.label || r.id), h("div", { class: "small muted" }, r.trigger || "")) },
     { label: "核对结果", render: (r) => h("div", { class: "small" }, r.finding || "—",
       r.ambiguity ? h("div", { class: "muted" }, `措辞歧义：${r.ambiguity}`) : null, src(r),
-      h("div", { class: "muted" }, `依据截至 ${r.as_of || "—"}，把握${conf[r.confidence] || "未注明"}，这条花了 ${usd2(r.cost_usd)}`)) },
+      h("div", { class: "muted" }, `依据截至 ${r.as_of || "—"}，把握${conf[r.confidence] || "未注明"}，这条花了 ${usd2(r.cost_usd)}`),
+      r.from_previous ? h("div", { class: "muted" }, `这条是之前 ${etTime(r.checked_at)}（美东）那次核对的结果，最近一次没跑出结论`) : null) },
     { label: "状态", render: (r) => { const c = CL_CHIP[r.status];
       if (!c) return "—";
       return c[0] === "sub" ? h("span", { class: "sub" }, c[1]) : c[0] ? h("span", { class: `chip ${c[0]}` }, c[1]) : c[1]; } },
@@ -189,16 +190,18 @@ function risks(d) {
   ].filter(Boolean);
   const tbBox = h("div", {}, thesisBlock(d, null));
   // 两份结果各自回来就整块重画；Claude 核对在跑时每 5 秒问一次本机进度（只问本机、不花钱），页面离开就停
-  const st = { auto: null, cl: null, err: null };
+  // err：点按钮没开始的原因（下次点再清）；pollErr：读进度失败（下一次读成功就清，v0.45.794 二次检查）
+  const st = { auto: null, cl: null, err: null, pollErr: null };
   const clUrl = `/api/thesis-claude/${encodeURIComponent(d.ticker)}?date=${encodeURIComponent(d.date)}`;
   const redraw = () => {
     if (!tbBox.isConnected) return;
-    fill(tbBox, thesisBlock(d, st.auto, st.cl, start), st.err ? h("p", { class: "callout warn" }, st.err) : null);
+    const warn = [st.err, st.pollErr].filter(Boolean).join("；");
+    fill(tbBox, thesisBlock(d, st.auto, st.cl, start), warn ? h("p", { class: "callout warn" }, warn) : null);
   };
   const pollCl = () => api(clUrl).then((c) => {
-    st.cl = c; redraw();
+    st.cl = c; st.pollErr = null; redraw();
     if (c.running && tbBox.isConnected) setTimeout(pollCl, 5000);
-  }).catch((e) => { st.err = `读 Claude 核对状态失败（${e.message || e}）`; redraw(); });
+  }).catch((e) => { st.pollErr = `读 Claude 核对状态失败（${e.message || e}）`; redraw(); });
   async function start(n, est, rules, spent) {
     const ok = confirm(`让 Claude（${rules.model || "Opus 5.5"}）联网核对 ${d.ticker} 的 ${n} 条人工证伪条件？\n\n`
       + `· 每条一个请求，最多联网搜 ${rules.web_search_max_uses ?? "—"} 次，按实际用量收 API 费用\n`

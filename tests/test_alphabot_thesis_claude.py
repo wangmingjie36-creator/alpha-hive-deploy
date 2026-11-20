@@ -9,6 +9,7 @@ import ast
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 import ledger_io
@@ -47,6 +48,20 @@ class FakeEngine:
 
     def status(self):
         return {"spent_today": self.spent, "cap_usd": 3.0}
+
+
+def sdk_client(*script):
+    """真 anthropic SDK + httpx MockTransport：每次请求取下一项（dict ⇒ 200 回复，异常 ⇒ 抛），不出网。
+    要测「断线可能已计费」必须走真 SDK——SDK 把 httpx 超时包成 APITimeoutError，分类器认的是那个。"""
+    import anthropic
+    items = list(script)
+
+    def handler(request):
+        item = items.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return httpx.Response(200, json=item)
+    return anthropic.Anthropic(api_key="sk-test-offline", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
 
 
 @pytest.fixture
@@ -207,6 +222,49 @@ class TestRun:
         assert st["last"] is None and "读不了" in st["load_error"]
 
 
+    # —— v0.45.794 二次检查 ——
+    def test_rerun_that_stops_early_keeps_previous_paid_results(self, svc):
+        """新一次第一条就撞额度：上次付过钱的两条结论照旧显示，标明是之前那次的（此前整份被空结果覆盖）。"""
+        tc, _ = make(svc, FakeEngine(verdict("fired"), verdict("not_fired")))
+        tc.start("NVDA", True)
+        tc.chat = FakeEngine(C.BudgetExceeded("超上限"))
+        tc.start("NVDA", True)
+        rows = [r for r in tc.status("NVDA")["last"]["results"] if r.get("status")]
+        assert [r["status"] for r in rows] == ["fired", "not_fired"]
+        assert all(r["from_previous"] and r["checked_at"] for r in rows)
+
+    def test_fresh_result_replaces_carried_one(self, svc):
+        tc, _ = make(svc, FakeEngine(verdict("fired"), verdict("fired")))
+        tc.start("NVDA", True)
+        tc.chat = FakeEngine(verdict("not_fired"), C.BudgetExceeded("超上限"))
+        tc.start("NVDA", True)
+        rows = {r["id"]: r for r in tc.status("NVDA")["last"]["results"] if r.get("status")}
+        assert rows["competitor_threat"]["status"] == "not_fired" and not rows["competitor_threat"].get("from_previous")
+        assert rows["export_ban"]["status"] == "fired" and rows["export_ban"]["from_previous"]
+        tc.chat = FakeEngine(C.BudgetExceeded("超上限"))           # 再跑一次：带过来的照样带下去，不只隔一代
+        tc.start("NVDA", True)
+        assert sorted(r["status"] for r in tc.status("NVDA")["last"]["results"] if r.get("status")) == ["fired", "not_fired"]
+
+    def test_carried_result_with_changed_trigger_is_still_voided(self, svc):
+        tc, box = make(svc, FakeEngine(verdict("fired"), verdict("fired")))
+        tc.start("NVDA", True)
+        box["conds"] = [CONDS[0], CONDS[1] | {"trigger": "改过的原文"}]
+        tc.chat = FakeEngine(C.BudgetExceeded("超上限"))
+        tc.start("NVDA", True)
+        rows = {r["id"]: r for r in tc.status("NVDA")["last"]["results"] if r.get("status")}
+        assert rows["export_ban"]["stale"] == "trigger_changed" and rows["competitor_threat"]["stale"] is None
+
+    def test_maybe_billed_disconnect_cost_is_shown(self, svc):
+        """断线可能已计费 ⇒ 额度里按最坏情况记了一笔；结果页的「共花」与那条的花费都要算上（此前写 $0）。"""
+        client = sdk_client(httpx.ReadTimeout("read timed out"))
+        tc, _ = make(svc, C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: T0))
+        tc.start("NVDA", True)
+        booked = round(sum(r["usd"] for r in spend_lines(svc)), 4)
+        last = tc.status("NVDA")["last"]
+        assert booked > 0 and last["spent_usd"] == booked
+        assert last["results"][0]["cost_usd"] == booked and last["results"][0]["status"] is None
+
+
 class TestOneShotUsesTheSameGate:
     """真 ChatEngine + 假客户端：one_shot 走 `_gated_call`——同一个上限、同一份 spend.jsonl。"""
 
@@ -236,6 +294,20 @@ class TestOneShotUsesTheSameGate:
         with pytest.raises(C.BudgetExceeded):
             eng.one_shot("问", tag="t", system="s")
         assert client.requests == [] and spend_lines(svc) == []
+
+    def test_error_after_paid_pause_turn_carries_total_spent(self, svc):
+        """前一次已成功计费、续发时断线：异常带上这一条一共算进额度的钱（成功的 + 断线按最坏情况记的）。"""
+        client = sdk_client(resp([text("…")], stop="pause_turn"), httpx.ReadTimeout("t"))
+        eng = C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: T0)
+        with pytest.raises(C.ChatError) as ei:
+            eng.one_shot("问", tag="t", system="s")
+        assert ei.value.spent_usd == round(sum(r["usd"] for r in spend_lines(svc)), 4) > 0
+
+    def test_error_that_was_not_billed_carries_zero(self, svc):
+        eng, _ = self._eng(svc, resp([text("x")]), cap_usd=0.01)
+        with pytest.raises(C.BudgetExceeded) as ei:
+            eng.one_shot("问", tag="t", system="s")
+        assert ei.value.spent_usd == 0.0
 
     def test_demo_never_calls(self, tmp_path):
         s = _demo_service(state_dir=tmp_path / "s", demo=True)

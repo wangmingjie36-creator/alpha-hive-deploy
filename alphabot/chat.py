@@ -758,8 +758,11 @@ class ChatEngine:
                     if v.outcome == MAYBE_BILLED:
                         booking = self._write_spend(lambda bid: self._record(
                             tag, reserve, estimated=True, error=v.label, booking_id=bid), reserve)
-                    raise _explain(v, retries=attempt, fresh=fresh, booked=reserve, booking=booking,
-                                   detail=str(exc) if v.reason == "unreadable" else "") from exc
+                    err = _explain(v, retries=attempt, fresh=fresh, booked=reserve, booking=booking,
+                                   detail=str(exc) if v.reason == "unreadable" else "")
+                    # 这次失败算进额度的钱（可能已计费 ⇒ 最坏情况；其余没计费 ⇒ 0）：「让 Claude 核对」据此记这条花了多少（v0.45.794 二次检查）
+                    err.booked_usd = reserve if v.outcome == MAYBE_BILLED else 0.0
+                    raise err from exc
             # 先记账、再释放预留（finally）：中间不留「预留已撤、花费未记」的空档，并发的另一问预检才看得到这笔
             cost = self._book(tag, resp, reserve)
         finally:
@@ -784,9 +787,14 @@ class ChatEngine:
             try:
                 resp, cost = self._gated_call(client, tag, messages, fresh=True, system=system, tools=ONE_SHOT_TOOLS)
             except ChatError as exc:
+                # `spent_usd`：这一条一共算进额度多少（前面成功的 + 失败那次按最坏情况记的），调用方据此记账给人看
+                spent = round(out["cost_usd"] + float(getattr(exc, "booked_usd", 0.0) or 0.0), 4)
                 if not out["calls"]:
+                    exc.spent_usd = spent
                     raise
-                raise type(exc)(f"{exc}（这一条前面 {out['calls']} 次 API 调用已花 ${out['cost_usd']:.3f}、已记账）") from exc
+                new = type(exc)(f"{exc}（这一条前面 {out['calls']} 次 API 调用已花 ${out['cost_usd']:.3f}、已记账）")
+                new.spent_usd = spent
+                raise new from exc
             out["calls"] += 1
             out["cost_usd"] += cost["usd"]
             out["searches"] += cost["searches"]

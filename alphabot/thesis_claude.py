@@ -179,8 +179,12 @@ class ThesisClaude:
         if last and last.get("state") == "running" and progress is None:
             last = last | {"state": "interrupted"}      # 落盘时还在跑、进程里却没有 ⇒ Alpha Bot 中途重启过
         current = {c["id"]: c for c in conds}
+        rows = list((last or {}).get("results") or [])
+        fresh = {r.get("id") for r in rows if r.get("status")}
+        # 这一次没跑出结论的条件：照旧显示上次付过钱的结论，标 from_previous（页面写明是哪次核对的）
+        rows += [r | {"from_previous": True} for r in (last or {}).get("carried") or [] if r.get("id") not in fresh]
         results = []
-        for r in (last or {}).get("results") or []:
+        for r in rows:
             c = current.get(r.get("id"))
             stale = None if c and c["trigger"] == r.get("trigger") else ("trigger_changed" if c else "not_in_config")
             results.append(r | {"stale": stale})
@@ -223,7 +227,8 @@ class ThesisClaude:
     def _run(self, t: str, conds: List[dict]) -> None:
         today_et = self._now().astimezone(ET).date().isoformat()
         doc = {"ticker": t, "state": "running", "started_at": self._now().isoformat(timespec="seconds"),
-               "finished_at": None, "stopped_zh": None, "spent_usd": 0.0, "results": [], "not_run": []}
+               "finished_at": None, "stopped_zh": None, "spent_usd": 0.0, "results": [], "not_run": [],
+               "carried": self._previous_valid(t)}
         try:
             self._save_quietly(t, doc)
             for i, c in enumerate(conds):
@@ -234,8 +239,11 @@ class ThesisClaude:
                 try:
                     r = self.chat.one_shot(prompt(t, c, today_et), tag=f"thesis:{t}:{c['id']}", system=SYSTEM)
                 except ChatError as exc:
-                    # 额度不够 / 可能已计费 / 连不上 / 被拒：后面的不再发（重发可能再付一次，或者同样失败）
-                    row.update(status=None, error_zh=str(exc))
+                    # 额度不够 / 可能已计费 / 连不上 / 被拒：后面的不再发（重发可能再付一次，或者同样失败）。
+                    # 断线可能已计费的那笔按最坏情况记进了额度（`spent_usd`），这里同样算进去——不然页面写「共花 $0」（v0.45.794 二次检查）
+                    spent = getattr(exc, "spent_usd", None)
+                    doc["spent_usd"] = round(doc["spent_usd"] + float(spent or 0.0), 4)
+                    row.update(status=None, error_zh=str(exc), cost_usd=spent)
                     doc["results"].append(row)
                     doc["not_run"] = [x["id"] for x in conds[i + 1:]]
                     doc["stopped_zh"] = f"核对「{c['label'] or c['id']}」时出错，后面 {len(conds) - i - 1} 条没发请求"
@@ -259,6 +267,21 @@ class ThesisClaude:
             self._save_quietly(t, doc)
             with self._lock:
                 self._running.pop(t, None)
+
+    def _previous_valid(self, t: str) -> List[dict]:
+        """上一次（含它带过来的）有结论的结果：新一次没跑出结论的条件照旧显示它们，标明是哪次核对的（v0.45.794 二次检查：
+        此前新一次一开跑就用空结果覆盖，第一条就撞额度时上次付过钱的结论全丢）。读不了 ⇒ []（文件坏了另有 load_error 显示）。"""
+        with self._lock:
+            unsaved = self._unsaved.get(t)
+        try:
+            prev = unsaved[0] if unsaved else self._load(t)
+        except Exception:  # noqa: BLE001 - 读不了上次的就不带；坏文件在 status() 里照实显示
+            return []
+        if not prev:
+            return []
+        rows = {r["id"]: r for r in prev.get("carried") or [] if isinstance(r, dict) and r.get("id") and r.get("status")}
+        rows.update({r["id"]: r for r in prev.get("results") or [] if isinstance(r, dict) and r.get("id") and r.get("status")})
+        return list(rows.values())
 
     def _save_quietly(self, t: str, doc: dict) -> None:
         try:
