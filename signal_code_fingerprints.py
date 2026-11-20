@@ -399,6 +399,14 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "函数本身不换——末根就是最近一场的正常日子，交给下游的值逐位不变（tests/test_yf_latest_session.py::test_aligned_bar_is_used，"
      "既有 YFinanceSource 测试 269 条不改照绿）。11-03 那天是否隔离另由人定（坏日子走 QUARANTINE）。"
      "**用户 2026-11-04 在对话里选 measurement_fix**；不登记边界"),
+    # v0.45.788：CBOE 请求头加 Referer（_CBOE_HEADERS 在 _fetch_cboe_payload 的依赖闭包里）
+    ("price.fields",    "3854255751b3e0d3", "no_value_change",
+     "v0.45.788：_CBOE_HEADERS 加 Referer: https://www.cboe.com/。2026-11-19 晚 20:05（本机）起 cdn.cboe.com 的 "
+     "delayed_quotes/* 被 307 跳到 cdn-api.cboe.com，后者的 Cloudflare 规则对不带 Referer 的请求一律 403，"
+     "_fetch_cboe_payload 出口 None。只改放行条件，取到的文件与解析不变：2026-11-20 盘中经生产路径取 SPY，"
+     "旧域名跟跳转与新域名直取的 data 段 SHA-256 相同（12766 个合约）；重试、陈旧判定、进程缓存、_cboe_symbol、URL 不变。"
+     "403 起于 11-19 扫描（15:23 完成、CBOE 抓取 39 次全成）之后，无扫描日受影响。"
+     "**用户 2026-11-20 在对话里选 no_value_change**；不登记边界"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change", "coverage"})
