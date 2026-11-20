@@ -107,6 +107,14 @@ h3 { font: 600 13px/1.3 var(--sans); margin: 0 0 8px; color: var(--ink-2); lette
 .chart { width: 100%; height: 420px; }
 .chart.tall { height: 560px; }
 .chart.short { height: 280px; }
+/* 板块热力图（v0.45.783）：尽量占满一屏；色块可点 */
+.chart.sector-map { height: max(520px, calc(100vh - 330px)); cursor: pointer; }
+.sector-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+.sector-strip .chip { font-variant-numeric: tabular-nums; }
+.sector-strip .chip b { font-weight: 600; margin-left: 6px; }
+.sector-legend { display: flex; align-items: center; margin-top: 12px; font-size: 12px; color: var(--ink-3); flex-wrap: wrap; }
+.sector-legend i { display: inline-block; width: 46px; height: 14px; }
+.sector-legend span { margin: 0 8px; }
 
 /* ── 侧栏标的列表 */
 .side { position: sticky; top: 76px; align-self: start; max-height: calc(100vh - 100px); overflow: auto; padding-right: 4px; }
@@ -282,6 +290,7 @@ details.sd-why p { font-size: 13px; color: var(--ink-2); margin: 6px 0 0; }
 .howto .howto-steps { margin-top: 4px; }
 /* 价位列别折行（日期 / 带单位的价格） */
 .howto td.r { white-space: nowrap; }
+table.flow td { white-space: nowrap; }
 tr.spot-row td { background: var(--sunk); font-weight: 600; }
 
 /* 「不可报价」原因着色（v0.45.519）：点差过宽 = 流动性不够（黄），其余 = 报价本身有问题（灰） */

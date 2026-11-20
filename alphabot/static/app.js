@@ -9,6 +9,7 @@ import { renderStraddle } from "./pages/straddle.js";
 import { renderHedge } from "./pages/hedge.js";
 import { renderWheel } from "./pages/wheel.js";
 import { renderCompare } from "./pages/compare.js";
+import { renderSectors } from "./pages/sectors.js";
 import { renderDeep } from "./pages/deep.js";
 import { renderWheelScreen } from "./pages/wheel_screen.js";
 import { renderResults } from "./pages/results.js";
@@ -152,6 +153,7 @@ async function route() {
       await renderDeep(app, dt, alive);
     }
     else if (page === "compare") await renderCompare(app, a ? a.toUpperCase() : null, alive);
+    else if (page === "sectors") await renderSectors(app, alive);
     else if (page === "results") await renderResults(app, a, alive);
     else if (page === "method") await renderMethod(app, alive);
     else if (page === "help") await renderHelp(app, a, alive);

@@ -5,7 +5,13 @@
 每一行是**一个合约当天到此刻的成交合计**，不是一笔订单：
 - 分不出买卖方向、分不出开仓还是平仓（CBOE 延迟快照没有这些信息）——Call 成交多 ≠ 看涨，价差 / 跨式的每条腿各算各的；
 - CBOE 行情约延迟 15 分钟；开盘前、刚开盘时绝大多数合约成交量是 0（是真 0，不是缺数据）；
-- 「约成交额」= 成交量 × 现在的中间价 × 100，**是估算**：实际成交价不在链里，盘中价格变过、价差宽时偏差可以很大；
+- 「约时间价值额」= 成交量 ×（现在的中间价 − 内在价值）× 100，**是估算**（v0.45.786 起只算时间价值）：
+  内在价值 = 立刻行权能拿到的部分（call 为 max(现价 − 行权价, 0)，put 反之）。不扣掉它，深度实值的长期合约（一张 $190 多、
+  几乎全是内在价值，多是替代持股 / 对冲 / 组合的一条腿）会把整侧的「成交额」撑大——2026-11-16 NVDA 实测 Put 侧 $1.01B 里 63%
+  来自实值合约，看上去像钱都去了 Put。
+  中间价比内在价值还低（延迟的现价与报价对不上、深度实值报价偏低）⇒ 这张的时间价值记 0、计数（`n_time_value_below_intrinsic`）。
+  实际成交价不在链里：**当天到期（0DTE）的合约价格一天里变很多**，按此刻的中间价算会和早些时候的成交价差很远——这一项扣不掉，
+  汇总里另给「其中当天到期的占比」让人知道有多少受它影响；
 - 「成交 / OI」的 OI 是前一交易日收盘的，0 时不算（写「—」，不当无穷大），成交量太小时不参与这一列的排序（噪声）。
 只展示，不进评分、不写账本、未经任何检验。
 
@@ -25,7 +31,7 @@ RULES = {
     "vol_oi_min_volume": 100,       # 成交量低于它的合约不参与「成交 / OI」排序（几手成交对 1 手 OI 的比值没有意义）
 }
 
-SORTS = {"volume": "成交量", "notional": "约成交额", "vol_oi": "成交 / OI"}
+SORTS = {"volume": "成交量", "time_value": "约时间价值额", "vol_oi": "成交 / OI"}
 SIDES = {"all": "全部", "call": "Call", "put": "Put"}
 DEFAULTS = {"side": "all", "sort": "volume", "limit": RULES["limit_default"], "expiry": None}
 
@@ -38,7 +44,8 @@ REASONS = {
 }
 
 DISCLAIMER = ("每行是一个合约当天到此刻的成交合计，不是一笔订单；分不出买卖方向与开平仓，Call 成交多不等于看涨。"
-              "约成交额按现在的中间价估算，不是实际成交额。只展示，不进评分，未经检验。")
+              "约时间价值额 = 成交量 ×（现在的中间价 − 内在价值）× 100，只算时间价值、是估算，不是实际成交额；"
+              "当天到期的合约价格一天里变很多，偏差最大。只展示，不进评分，未经检验。")
 
 
 class ParamError(ValueError):
@@ -95,6 +102,11 @@ def _mid(bid, ask) -> Optional[float]:
     return (bid + ask) / 2.0
 
 
+def intrinsic_value(side: str, strike: float, S: float) -> float:
+    """立刻行权能拿到的部分（每股）。"""
+    return max(S - strike, 0.0) if side == "call" else max(strike - S, 0.0)
+
+
 def _row(c: dict, S: float) -> Optional[dict]:
     cp, k, exp = c.get("cp"), _num(c.get("strike")), c.get("expiry")
     if cp not in ("C", "P") or k is None or k <= 0 or not isinstance(exp, str) or not exp:
@@ -106,12 +118,19 @@ def _row(c: dict, S: float) -> Optional[dict]:
     side = "call" if cp == "C" else "put"
     # 虚值程度：正 = 虚值（call 在现价上方 / put 在现价下方），负 = 实值
     otm = (k / S - 1.0) if side == "call" else (1.0 - k / S)
+    intr = intrinsic_value(side, k, S)
+    tv = (mid - intr) if mid is not None else None
+    below = tv is not None and tv < 0
+    if below:
+        tv = 0.0
     return {
         "symbol": c.get("symbol"), "side": side, "expiry": exp, "dte": _num(c.get("dte")), "strike": k,
         "otm_pct": round(otm * 100, 2), "volume": vol, "oi": oi,
         "vol_oi": round(vol / oi, 2) if (vol is not None and oi is not None and oi > 0) else None,
         "bid": bid, "ask": ask, "mid": round(mid, 4) if mid is not None else None,
-        "notional_est": round(vol * mid * CONTRACT_MULT, 0) if (vol is not None and mid is not None) else None,
+        "intrinsic": round(intr, 4), "time_value": round(tv, 4) if tv is not None else None,
+        "time_value_below_intrinsic": below,
+        "tv_notional_est": round(vol * tv * CONTRACT_MULT, 0) if (vol is not None and tv is not None) else None,
         "iv": _num(c.get("iv")), "delta": _num(c.get("delta")), "last_trade_time": c.get("last_trade_time"),
     }
 
@@ -152,23 +171,27 @@ def build(raw: Optional[dict]) -> dict:
 def _summary(rows: List[dict]) -> dict:
     cv = sum(r["volume"] or 0.0 for r in rows if r["side"] == "call")
     pv = sum(r["volume"] or 0.0 for r in rows if r["side"] == "put")
-    cn = sum(r["notional_est"] or 0.0 for r in rows if r["side"] == "call")
-    pn = sum(r["notional_est"] or 0.0 for r in rows if r["side"] == "put")
+    cn = sum(r["tv_notional_est"] or 0.0 for r in rows if r["side"] == "call")
+    pn = sum(r["tv_notional_est"] or 0.0 for r in rows if r["side"] == "put")
+    zn = sum(r["tv_notional_est"] or 0.0 for r in rows if r["dte"] is not None and r["dte"] <= 0)
     tot = cv + pv
     return {"call_volume": cv, "put_volume": pv, "total_volume": tot,
             "put_call_volume": round(pv / cv, 2) if cv > 0 else None,
             "call_pct": round(cv / tot * 100, 1) if tot > 0 else None,
-            "call_notional_est": cn, "put_notional_est": pn,
+            "call_tv_notional_est": cn, "put_tv_notional_est": pn,
+            "zero_dte_tv_share_pct": round(zn / (cn + pn) * 100, 1) if (cn + pn) > 0 else None,
+            "n_time_value_below_intrinsic": sum(1 for r in rows if r["time_value_below_intrinsic"]
+                                                and (r["volume"] or 0) > 0),
             "n_traded": sum(1 for r in rows if (r["volume"] or 0) > 0)}
 
 
 def _sort_key(sort: str):
-    if sort == "notional":
-        return lambda r: (r["notional_est"] is None, -(r["notional_est"] or 0.0), -(r["volume"] or 0.0))
+    if sort == "time_value":
+        return lambda r: (r["tv_notional_est"] is None, -(r["tv_notional_est"] or 0.0), -(r["volume"] or 0.0))
     if sort == "vol_oi":
         lo = RULES["vol_oi_min_volume"]
         return lambda r: (r["vol_oi"] is None or (r["volume"] or 0) < lo, -(r["vol_oi"] or 0.0), -(r["volume"] or 0.0))
-    return lambda r: (-(r["volume"] or 0.0), -(r["notional_est"] or 0.0))
+    return lambda r: (-(r["volume"] or 0.0), -(r["tv_notional_est"] or 0.0))
 
 
 def select(full: dict, p: dict) -> dict:

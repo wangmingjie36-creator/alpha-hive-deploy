@@ -143,16 +143,22 @@ class TestDividends:
 
 class TestMarket:
     def test_yield_above(self):
-        v = TA.judge_yield_above([{"date": "2026-11-13", "close": 5.154}], 5.0, TODAY)
-        assert v["status"] == "fired" and "收盘" in v["facts"]
+        v = TA.judge_yield_above({"date": "2026-11-13", "y10": 5.15}, 5.0, TODAY)
+        assert v["status"] == "fired" and "财政部" in v["facts"] and "5.15%" in v["facts"]
 
-    def test_same_day_value_is_not_called_close(self):
-        v = TA.judge_yield_above([{"date": "2026-11-16", "close": 4.9}], 5.0, TODAY)
-        assert v["status"] == "not_fired" and "盘中" in v["facts"]
+    def test_yield_below(self):
+        assert TA.judge_yield_above({"date": "2026-11-13", "y10": 4.99}, 5.0, TODAY)["status"] == "not_fired"
+
+    def test_yield_rounding_band(self):
+        """官方只给两位小数：5.00 的真值在 4.995～5.005，分不出是否「高于 5.0」；5.01 一定高于。"""
+        v = TA.judge_yield_above({"date": "2026-11-13", "y10": 5.00}, 5.0, TODAY)
+        assert v["status"] == "unjudgeable" and v["reason"] == "borderline"
+        assert TA.judge_yield_above({"date": "2026-11-13", "y10": 5.01}, 5.0, TODAY)["status"] == "fired"
 
     def test_yield_stale_and_out_of_bounds(self):
-        assert TA.judge_yield_above([{"date": "2026-10-01", "close": 5.2}], 5.0, TODAY)["reason"] == "stale"
-        assert TA.judge_yield_above([{"date": "2026-11-13", "close": 51.5}], 5.0, TODAY)["reason"] == "out_of_bounds"
+        assert TA.judge_yield_above({"date": "2026-10-01", "y10": 5.2}, 5.0, TODAY)["reason"] == "stale"
+        assert TA.judge_yield_above({"date": "2026-11-13", "y10": 51.5}, 5.0, TODAY)["reason"] == "out_of_bounds"
+        assert TA.judge_yield_above(None, 5.0, TODAY)["reason"] == "insufficient"
 
     def hourly(self, closes):
         """逐小时递增、最后一根落在 TODAY（真实小时线的样子）。"""
@@ -169,15 +175,44 @@ class TestMarket:
         closes = [1.0] * 40 + [0.96] * 23 + [1.0] * 57
         assert TA.judge_usdc_depeg(self.hourly(closes), 0.97, 24, TODAY)["status"] == "not_fired"
 
+    def test_window_is_last_days_from_last_bar(self):
+        """多取的那两天不算：最早 30 小时里的脱钩落在窗口外，窗口里 120 根齐全 ⇒ 未触发（不是判不了）。"""
+        closes = [0.96] * 30 + [1.0] * 120
+        assert TA.judge_usdc_depeg(self.hourly(closes), 0.97, 24, TODAY)["status"] == "not_fired"
+
+    def test_coverage_is_counted_inside_window(self):
+        """取回的根数比窗口多，不代表窗口里齐：窗口内缺 20 小时 ⇒ 覆盖 83%，判不了。"""
+        rows = self.hourly([1.0] * 150)
+        rows = rows[:40] + rows[60:]
+        v = TA.judge_usdc_depeg(rows, 0.97, 24, TODAY)
+        assert v["status"] == "unjudgeable" and v["reason"] == "insufficient"
+
+    def test_fetch_takes_more_than_window(self):
+        src = Path(TA.__file__).read_text(encoding="utf-8")
+        assert "period=f\"{int(RULES['usdc_window_days']) + 2}d\"" in src
+
     def test_low_coverage_cannot_say_not_fired(self):
         """缺的那几小时可能正是脱钩：覆盖不够时不许写「未触发」。"""
         v = TA.judge_usdc_depeg(self.hourly([1.0] * 60), 0.97, 24, TODAY)
         assert v["status"] == "unjudgeable" and v["reason"] == "insufficient"
 
+    CIRCLE = {"usdc": 68.6e9, "chains": 39, "as_of": "2026-11-16"}
+
     def test_share(self):
-        assert TA.judge_usdc_share({"usdc": 69e9, "total": 287e9, "n_assets": 300}, 20)["status"] == "not_fired"
-        assert TA.judge_usdc_share({"usdc": 50e9, "total": 287e9, "n_assets": 300}, 20)["status"] == "fired"
-        assert TA.judge_usdc_share({"usdc": None, "total": 287e9}, 20)["reason"] == "insufficient"
+        st = {"usdc": 69e9, "total": 287e9, "n_assets": 300}
+        assert TA.judge_usdc_share(st, self.CIRCLE, 20, TODAY)["status"] == "not_fired"
+        assert TA.judge_usdc_share(st, {**self.CIRCLE, "usdc": 50e9}, 20, TODAY)["status"] == "fired"
+        assert TA.judge_usdc_share({"usdc": None, "total": 287e9}, self.CIRCLE, 20, TODAY)["reason"] == "insufficient"
+        assert TA.judge_usdc_share(st, None, 20, TODAY)["reason"] == "insufficient"
+
+    def test_share_swaps_llama_usdc_for_circle(self):
+        """分母 = DeFiLlama 合计里把它自己的 USDC 换成 Circle 的：(287 − 69) + 68.6 = 286.6。"""
+        v = TA.judge_usdc_share({"usdc": 69e9, "total": 287e9, "n_assets": 300}, self.CIRCLE, 20, TODAY)
+        assert "286.6" in v["facts"] and f"{68.6 / 286.6 * 100:.1f}%" in v["facts"] and "Circle" in v["facts"]
+
+    def test_share_stale_circle(self):
+        v = TA.judge_usdc_share({"usdc": 69e9, "total": 287e9}, {**self.CIRCLE, "as_of": "2026-11-01"}, 20, TODAY)
+        assert v["reason"] == "stale"
 
 
 # ───────────────────────────── 规则表与配置
@@ -294,6 +329,61 @@ class TestFetch:
                                     {"symbol": "X", "circulating": {"peggedUSD": None}}]}
         st, meta = TA.fetch_part("@stables", "CRCL", today=TODAY, http_get=lambda url: payload)
         assert meta["reason"] is None and st["usdc"] == 70e9 and st["total"] == 250e9 and st["n_assets"] == 2
+
+    def test_circle_parse(self):
+        payload = {"data": [{"symbol": "EURC", "totalAmount": "300000000"},
+                            {"symbol": "USDC", "totalAmount": "68622128844.16",
+                             "chains": [{"chain": "ETH", "amount": "1", "updateDate": "2026-11-15T03:00:00Z"},
+                                        {"chain": "SOL", "amount": "1", "updateDate": "2026-11-16T03:01:01.861Z"}]}]}
+        got, meta = TA.fetch_part("@circle", "CRCL", today=TODAY, http_get=lambda url: payload)
+        assert meta["reason"] is None and got == {"usdc": 68622128844.16, "chains": 2, "as_of": "2026-11-16"}
+
+    def test_circle_without_usdc_is_empty_not_success(self):
+        got, meta = TA.fetch_part("@circle", "CRCL", today=TODAY, http_get=lambda url: {"data": []})
+        assert got is None and meta["reason"] == "empty"
+
+    def test_ust10_latest(self):
+        asked = []
+
+        def tg(d):
+            asked.append(d)
+            return {"date": "2026-11-13", "y10": 5.15, "y2": 4.7, "source": "treasury_gov"}
+        got, meta = TA.fetch_part("@ust10", "NEE", today=TODAY, treasury_get=tg)
+        assert meta["reason"] is None and got == {"date": "2026-11-13", "y10": 5.15} and asked == [None]
+
+    def test_ust10_month_start_asks_previous_month_once(self, monkeypatch):
+        """本月还没有官方值（11-01 是周日）⇒ 只补问一次上月最后一个工作日（10-30 周五），不逐日回找。"""
+        monkeypatch.setattr(TA, "_et_today", lambda: date(2026, 11, 1))
+        asked = []
+
+        def tg(d):
+            asked.append(d)
+            return {"date": "2026-10-30", "y10": 4.94} if d == "2026-10-30" else None
+        got, meta = TA.fetch_part("@ust10", "NEE", today=date(2026, 11, 1), treasury_get=tg)
+        assert got == {"date": "2026-10-30", "y10": 4.94} and asked == [None, "2026-10-30"]
+
+    def test_ust10_month_end_evening_uses_et_month(self, monkeypatch):
+        """本机（太平洋）11-30 晚 21 点后美东已是 12-01：本月（12 月）还空 ⇒ 该问 11 月最后一个工作日 11-30，不是 10 月的。"""
+        monkeypatch.setattr(TA, "_et_today", lambda: date(2026, 12, 1))
+        asked = []
+
+        def tg(d):
+            asked.append(d)
+            return {"date": "2026-11-30", "y10": 5.02} if d == "2026-11-30" else None
+        got, meta = TA.fetch_part("@ust10", "NEE", today=date(2026, 11, 30), treasury_get=tg)
+        assert got == {"date": "2026-11-30", "y10": 5.02} and asked == [None, "2026-11-30"]
+
+    def test_ust10_unavailable_is_empty(self, monkeypatch):
+        monkeypatch.setattr(TA, "_et_today", lambda: TODAY)   # 钉住美东钟：不钉的话真实日期到下个月初会触发补问
+        asked = []
+        got, meta = TA.fetch_part("@ust10", "NEE", today=TODAY, treasury_get=lambda d: asked.append(d))
+        assert got is None and meta["reason"] == "empty" and asked == [None]
+
+    def test_ust10_exception_never_raises(self):
+        def tg(d):
+            raise OSError("down")
+        got, meta = TA.fetch_part("@ust10", "NEE", today=TODAY, treasury_get=tg)
+        assert got is None and meta == {"reason": "fetch_error", "detail": "OSError"}
 
 
 # ───────────────────────────── service
@@ -432,7 +522,7 @@ class TestDisplayOnly:
             elif isinstance(n, ast.ImportFrom):
                 mods.add((n.module or "").split(".")[0])
         assert mods <= {"__future__", "math", "datetime", "typing", "alphabot", "yf_daily", "yfinance", "yf_gate",
-                        "json", "urllib"}, mods
+                        "json", "urllib", "treasury_yields", "zoneinfo", "re", "html"}, mods
 
     def test_never_writes_config(self):
         src = Path(TA.__file__).read_text(encoding="utf-8") + (ROOT / "alphabot/service.py").read_text(encoding="utf-8")
@@ -516,9 +606,12 @@ class TestEmptyIsFailure:
         assert len(calls) > n
 
 
-def test_yield_negative_age_is_not_called_close():
-    v = TA.judge_yield_above([{"date": "2026-11-17", "close": 5.1}], 5.0, TODAY)
-    assert "收盘前是盘中值" in v["facts"]
+def test_yield_source_is_official_not_tnx():
+    """有权威值的量用权威源（v0.45.785）：收益率不再走 Yahoo ^TNX，USDC 流通量要 Circle 的数。"""
+    assert TA.NEEDS["yield_above"][0] == ("@ust10",) and "财政部" in TA.NEEDS["yield_above"][1]
+    assert "@circle" in TA.NEEDS["usdc_share"][0]
+    src = Path(TA.__file__).read_text(encoding="utf-8")
+    assert 'Ticker("^TNX"' not in src and "alphabot_thesis_tnx" not in src
 
 
 def test_no_scan_files_is_not_applicable_and_does_not_fetch(tmp_path):
@@ -532,3 +625,145 @@ def test_frontend_keeps_unchecked_rows_out_of_the_auto_table():
     """条件原文改过 / 配置里没有的那几条没核对：页面不许把它们放进「自动核对」表、算成「判不了」。"""
     js = (ROOT / "alphabot/static/pages/deep.js").read_text(encoding="utf-8")
     assert 'new Set(["trigger_changed", "not_in_config"])' in js and "!NOT_CHECKED.has(c.verdict?.reason)" in js
+
+
+# ───────────────────────────── v0.45.796 毛利率：Yahoo 最新一季空着时用 SEC 8-K 财报新闻稿补
+
+PR_HTML = """<html><body><p>NVIDIA ANNOUNCES ... Revenue $115.8 billion</p>
+<table><tr><td>NVIDIA CORPORATION</td></tr><tr><td>CONDENSED CONSOLIDATED STATEMENTS OF INCOME</td></tr>
+<tr><td>(In millions, except per share data)</td></tr><tr><td>(Unaudited)</td></tr>
+<tr><td>Three Months Ended</td><td>Nine Months Ended</td></tr>
+<tr><td>October 25,</td><td>October 26,</td><td>October 25,</td><td>October 26,</td></tr>
+<tr><td>2026</td><td>2025</td><td>2026</td><td>2025</td></tr>
+<tr><td>Revenue</td><td>$</td><td>115,844</td><td>$</td><td>57,006</td><td>$</td><td>293,681</td><td>$</td><td>147,811</td></tr>
+<tr><td>Cost of revenue</td><td>29,168</td><td>15,157</td><td>73,705</td><td>45,441</td></tr>
+<tr><td>Gross profit</td><td>86,676</td><td>41,849</td><td>219,976</td><td>102,370</td></tr>
+<tr><td>Research and development</td><td>7,454</td><td>4,705</td></tr></table></body></html>"""
+
+SUBMISSIONS = {"filings": {"recent": {
+    "form": ["8-K", "8-K", "10-Q", "8-K"],
+    "filingDate": ["2026-11-17", "2026-11-12", "2026-08-27", "2026-08-27"],
+    "items": ["2.02,9.01", "5.02,9.01", "", "2.02,9.01"],
+    "accessionNumber": ["0001045810-26-000088", "0001045810-26-000082", "0001045810-26-000070", "0001045810-26-000069"],
+    "primaryDocument": ["nvda-20261117.htm", "nvda-20261111.htm", "nvda-20260726.htm", "nvda-20260827.htm"]}}}
+INDEX = {"directory": {"item": [{"name": n} for n in (
+    "0001045810-26-000088-index.html", "R1.htm", "nvda-20261117.htm", "q3fy27cfocommentary.htm", "q3fy27pr.htm")]}}
+
+
+def sec_fake(*, html=PR_HTML, subs=SUBMISSIONS, calls=None):
+    def get(url):
+        if calls is not None:
+            calls.append(url)
+        if "submissions" in url:
+            return json.dumps(subs).encode()
+        if url.endswith("index.json"):
+            assert "000104581026000088" in url        # 取的是 11-17 那份财报 8-K，不是 11-12 那份人事 8-K
+            return json.dumps(INDEX).encode()
+        if url.endswith("q3fy27pr.htm"):
+            return html.encode()
+        return b"<html>CFO commentary, no income statement table</html>"
+    return get
+
+
+def nvda_rows(cur_rev=None, cur_gp=None):
+    return [q("2026-10-31", cur_gp, cur_rev), q("2026-07-31", 72142e6, 96221e6), q("2026-04-30", 61157e6, 81615e6),
+            q("2026-01-31", 51093e6, 68127e6), q("2025-10-31", 41849e6, 57006e6)]
+
+
+class TestPressReleaseFill:
+    def test_parse_first_column_in_dollars(self):
+        pr = TA.parse_press_income(PR_HTML)
+        assert pr["end"] == "2026-10-25" and pr["revenue"] == 115844e6 and pr["gross_profit"] == 86676e6
+        assert pr["ya_revenue"] == 57006e6 and pr["ya_gross_profit"] == 41849e6
+
+    def test_parse_other_labels_and_thousands(self):
+        page = ("Consolidated Statements of Operations (in thousands) Three Months Ended September 30, 2026 2025 "
+                "Total revenues $ 1,000 $ 900 Total cost of revenues 600 500 Gross profit 400 400")
+        pr = TA.parse_press_income(page)
+        assert pr["end"] == "2026-09-30" and pr["revenue"] == 1_000_000 and pr["cost"] == 600_000 and pr["gross_profit"] == 400_000
+
+    def test_parse_refuses_without_table_unit_or_date(self):
+        assert TA.parse_press_income("Revenue $115.8 billion, up 103%") is None
+        assert TA.parse_press_income(PR_HTML.replace("(In millions, except per share data)", "")) is None
+        assert TA.parse_press_income(PR_HTML.replace("Three Months Ended", "")) is None
+
+    def test_fills_missing_latest_quarter(self):
+        rows = TA.fill_income_from_press(nvda_rows(), "NVDA", sec_fake())
+        assert rows[0]["revenue"] == 115844e6 and rows[0]["gross_profit"] == 86676e6 and "q3fy27pr.htm" in rows[0]["source"]
+        assert rows[1:] == nvda_rows()[1:]
+        v = TA.judge_gm_qoq_drop(rows, 2.0, date(2026, 11, 20))
+        assert v["status"] == "not_fired" and "74.82%" in v["facts"] and "SEC 8-K" in v["facts"]
+
+    def test_complete_yahoo_row_never_asks_sec(self):
+        calls = []
+        rows = TA.fill_income_from_press(nvda_rows(115000e6, 86000e6), "NVDA", sec_fake(calls=calls))
+        assert calls == [] and "source" not in rows[0]
+
+    def _note(self, rows):
+        v = TA.judge_gm_qoq_drop(rows, 2.0, date(2026, 11, 20))
+        assert v["status"] == "unjudgeable" and v["reason"] == "insufficient" and "SEC 新闻稿也没补上" in v["reason_zh"]
+        return rows[0]["fill_note"]
+
+    def test_arithmetic_mismatch_not_filled(self):
+        rows = TA.fill_income_from_press(nvda_rows(), "NVDA", sec_fake(html=PR_HTML.replace("86,676", "86,000")))
+        assert "毛利" in self._note(rows) and rows[0]["revenue"] is None
+
+    def test_year_ago_mismatch_not_filled(self):
+        rows = nvda_rows()
+        rows[4] = q("2025-10-31", 41849e6, 50000e6)
+        out = TA.fill_income_from_press(rows, "NVDA", sec_fake())
+        assert "去年同季" in self._note(out)
+
+    def test_quarter_end_mismatch_not_filled(self):
+        rows = nvda_rows()
+        rows[0] = q("2027-01-31", None, None)
+        subs = json.loads(json.dumps(SUBMISSIONS))
+        subs["filings"]["recent"]["filingDate"][0] = "2027-02-25"
+        out = TA.fill_income_from_press(rows, "NVDA", sec_fake(subs=subs))
+        assert "对不上" in self._note(out)
+
+    def test_no_earnings_8k_yet(self):
+        subs = json.loads(json.dumps(SUBMISSIONS))
+        subs["filings"]["recent"]["items"][0] = "7.01"
+        out = TA.fill_income_from_press(nvda_rows(), "NVDA", sec_fake(subs=subs))
+        assert "还没有" in self._note(out)
+
+    def test_items_with_spaces_still_match(self):
+        subs = json.loads(json.dumps(SUBMISSIONS))
+        subs["filings"]["recent"]["items"][0] = "2.02, 9.01"
+        rows = TA.fill_income_from_press(nvda_rows(), "NVDA", sec_fake(subs=subs))
+        assert rows[0]["source"].startswith("SEC 8-K")
+
+    def test_sec_error_is_visible_not_raised(self):
+        def boom(url):
+            raise OSError("down")
+        rows, meta = TA.fetch_part("income", "NVDA", today=TODAY, yf_module=YahooBlank(), sec_get=boom)
+        assert meta["reason"] is None and "OSError" in rows[0]["fill_note"]
+
+    def test_fetch_part_wires_sec_get(self):
+        rows, meta = TA.fetch_part("income", "NVDA", today=date(2026, 11, 20), yf_module=YahooBlank(), sec_get=sec_fake())
+        assert meta["reason"] is None and rows[0]["source"].startswith("SEC 8-K")
+
+    def test_injected_yahoo_without_sec_get_stays_offline(self, monkeypatch):
+        def no_net(url):
+            raise AssertionError("不该出网")
+        monkeypatch.setattr(TA, "_default_sec_get", no_net)
+        rows, meta = TA.fetch_part("income", "NVDA", today=TODAY, yf_module=YahooBlank())
+        assert rows[0]["revenue"] is None and "fill_note" not in rows[0]
+
+    def test_every_margin_ticker_has_a_cik(self):
+        assert {t for (t, _), s in TA.CHECKS.items() if s["kind"] == "gm_qoq_drop"} == set(TA.SEC_CIK)
+
+    def test_user_agent_carries_no_personal_contact(self):
+        assert "@" not in TA.SEC_UA
+
+
+class YahooBlank:
+    """Yahoo 新一季那一列只建了框、收入 / 毛利是 NaN（2026-11-17 NVDA 实测）。"""
+    def Ticker(self, t):
+        nan = float("nan")
+        class T:
+            quarterly_income_stmt = FakeFrame({
+                "Gross Profit": {"2026-10-31": nan, "2026-07-31": 72142e6, "2025-10-31": 41849e6},
+                "Total Revenue": {"2026-10-31": nan, "2026-07-31": 96221e6, "2025-10-31": 57006e6}})
+        return T()

@@ -82,7 +82,30 @@ class TestRequestHeader:
         """Request 拿到的是副本：别让某次请求改写模块级常量。"""
         _install(monkeypatch, _BODY, None)
         co._fetch_cboe_payload("SPY", 5)
-        assert co._CBOE_HEADERS == {"User-Agent": "Mozilla/5.0", "Accept-Encoding": "gzip"}
+        assert co._CBOE_HEADERS == {"User-Agent": "Mozilla/5.0", "Accept-Encoding": "gzip",
+                                    "Referer": "https://www.cboe.com/"}
+
+
+class TestReferer:
+    """v0.45.788：`cdn-api.cboe.com`（`cdn.cboe.com/api/global/delayed_quotes/*` 307 跳过去）对不带
+    `Referer: https://www.cboe.com/` 的请求回 403。两条下载路径都要带上——任何一条漏了，期权链 / VIX 报价 /
+    收盘印证就全变成 payload_unavailable，扫描只能降级。变红的变异：`_CBOE_HEADERS` 去掉 Referer，或某条路径不用它。"""
+
+    @staticmethod
+    def _referer(req):
+        return {k.lower(): v for k, v in req.header_items()}.get("referer")
+
+    def test_payload_path_sends_referer(self, monkeypatch):
+        seen = _install(monkeypatch, _BODY, None)
+        assert co._fetch_cboe_payload("SPY", 5) is not None
+        (req,) = seen
+        assert self._referer(req) == "https://www.cboe.com/"
+
+    def test_bytes_path_sends_referer(self, monkeypatch):
+        seen = _install(monkeypatch, _BODY, None)
+        co.fetch_cboe_bytes("https://cdn.cboe.com/api/global/delayed_quotes/quotes/_VIX.json", 5)
+        (req,) = seen
+        assert self._referer(req) == "https://www.cboe.com/"
 
 
 class TestDecoding:

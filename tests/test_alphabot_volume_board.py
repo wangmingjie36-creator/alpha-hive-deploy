@@ -84,12 +84,35 @@ class TestSelect:
         assert [r["strike"] for r in out["rows"]][:2] == [104, 103]
         assert {r["strike"] for r in out["rows"][2:]} == {101, 102}
 
-    def test_notional_estimate_and_otm_sign(self):
-        out = VB.select(VB.build(_raw([_c("C", 110, 10, bid=2.0, ask=3.0), _c("P", 110, 5)])), P)
+    def test_time_value_estimate_and_otm_sign(self):
+        out = VB.select(VB.build(_raw([_c("C", 110, 10, bid=2.0, ask=3.0), _c("P", 110, 5, bid=11.0, ask=11.4)])), P)
         call = next(r for r in out["rows"] if r["side"] == "call")
         put = next(r for r in out["rows"] if r["side"] == "put")
-        assert call["notional_est"] == 10 * 2.5 * 100
+        assert call["intrinsic"] == 0 and call["tv_notional_est"] == 10 * 2.5 * 100      # 虚值：全是时间价值
+        assert put["intrinsic"] == 10.0 and put["time_value"] == 1.2                      # 实值：中间价 11.2 − 内在 10
+        assert put["tv_notional_est"] == 5 * 1.2 * 100
         assert call["otm_pct"] == 10.0 and put["otm_pct"] == -10.0      # 110 的 put 在 100 现价下是实值
+
+    def test_deep_itm_does_not_inflate_its_side(self):
+        """v0.45.786 的起因：深度实值长期 put 一张 $190 多、几乎全是内在价值；连内在价值一起算会让 Put 侧看上去钱多得多。"""
+        rows = [_c("C", 105, 1000, bid=1.0, ask=1.2),                       # 虚值 call：时间价值 1.1
+                _c("P", 300, 1000, bid=200.0, ask=201.0, exp="2028-12-15")]  # 深度实值 put：内在 200、时间价值 0.5
+        s = VB.select(VB.build(_raw(rows)), P)["summary"]
+        assert s["call_tv_notional_est"] == pytest.approx(1000 * 1.1 * 100)
+        assert s["put_tv_notional_est"] == 1000 * 0.5 * 100
+        assert s["put_tv_notional_est"] < s["call_tv_notional_est"]
+
+    def test_mid_below_intrinsic_counts_and_clamps_to_zero(self):
+        out = VB.select(VB.build(_raw([_c("P", 120, 50, bid=19.0, ask=19.6), _c("P", 120, 0, bid=19.0, ask=19.6,
+                                                                               exp="2026-10-16")])), P)
+        r = out["rows"][0]
+        assert r["time_value"] == 0 and r["time_value_below_intrinsic"] is True and r["tv_notional_est"] == 0
+        assert out["summary"]["n_time_value_below_intrinsic"] == 1        # 没成交的那张不计
+
+    def test_zero_dte_share(self):
+        rows = [_c("C", 105, 100, bid=1.0, ask=1.0, dte=0), _c("C", 105, 300, bid=1.0, ask=1.0, exp="2026-10-16")]
+        s = VB.select(VB.build(_raw(rows)), P)["summary"]
+        assert s["zero_dte_tv_share_pct"] == 25.0
 
     def test_no_volume_today_is_reported_not_empty_success(self):
         out = VB.select(VB.build(_raw([_c("C", 105, 0), _c("P", 95, 0)])), P)
@@ -105,8 +128,8 @@ class TestNoFakeZero:
     def test_zero_oi_ratio_and_missing_mid_are_none(self):
         out = VB.select(VB.build(_raw([_c("C", 105, 50, oi=0, bid=None), _c("P", 95, 20, bid=1.5, ask=1.0)])), P)
         r0, r1 = out["rows"]
-        assert r0["vol_oi"] is None and r0["notional_est"] is None
-        assert r1["notional_est"] is None                       # ask < bid：不是有效报价
+        assert r0["vol_oi"] is None and r0["tv_notional_est"] is None and r0["time_value"] is None
+        assert r1["tv_notional_est"] is None                    # ask < bid：不是有效报价
 
     @pytest.mark.parametrize("raw,reason", [(None, "no_chain"), ({"underlying_price": None, "contracts": [1]},
                                             "underlying_price_unavailable"), (_raw([]), "no_contracts")])
@@ -211,12 +234,12 @@ class TestParams:
 
     def test_http_route(self):
         c = _client(_svc())
-        r = c.get("/api/volume-board/NVDA?side=call&sort=notional&limit=25")
+        r = c.get("/api/volume-board/NVDA?side=call&sort=time_value&limit=25")
         assert r.status_code == 200
         body = r.json()
-        assert body["params"] == {"side": "call", "sort": "notional", "limit": 25, "expiry": None}
+        assert body["params"] == {"side": "call", "sort": "time_value", "limit": 25, "expiry": None}
         assert body["rows"] and all(x["side"] == "call" for x in body["rows"])
-        ests = [x["notional_est"] for x in body["rows"] if x["notional_est"] is not None]
+        ests = [x["tv_notional_est"] for x in body["rows"] if x["tv_notional_est"] is not None]
         assert ests == sorted(ests, reverse=True)
         bad = c.get("/api/volume-board/NVDA?sort=iv")
         assert bad.status_code == 400 and bad.json().get("param") == "sort"

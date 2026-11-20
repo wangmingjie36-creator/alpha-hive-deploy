@@ -226,7 +226,11 @@ _vintage_stats = {"checked": 0, "stale": 0}
 # v0.45.690：请求 gzip。CBOE 的文件不小（2026-10-29 curl 各测一次：SPY 未压缩 5.4MB / 26 秒、
 # 压缩 0.7MB / 13 秒；_SPX 12.8MB / 45 秒 → 1.66MB / 15 秒），此前一直在下载未压缩文件。
 # urllib 不会替我们解压，`Content-Encoding` 由 `_decode_cboe_body` 处理。
-_CBOE_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept-Encoding": "gzip"}
+# v0.45.788：加 Referer。2026-11-19 晚起 CBOE 把 `cdn.cboe.com/api/global/delayed_quotes/*` 307 跳到
+# `cdn-api.cboe.com`，后者的 Cloudflare 规则对不带 `Referer: https://www.cboe.com/` 的请求一律 403
+# （"Sorry, you have been blocked"，代理 / 直连同样；11-20 curl 逐头试过：只换完整浏览器 UA 或只加 Origin 仍 403，
+# 加 Referer 即 200）。`us_indices/*_History.csv` 不受影响。urllib 跟随 307 时原样带上请求头，故不改域名。
+_CBOE_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept-Encoding": "gzip", "Referer": "https://www.cboe.com/"}
 
 
 class CboeContentEncodingError(RuntimeError):

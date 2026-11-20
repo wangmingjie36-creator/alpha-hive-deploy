@@ -14,6 +14,8 @@ export async function volume(body, d, t, routeAlive) {
   let notice = null;
   let seq = 0;
   const saved = pref(PREF_KEY, {}) || {};
+  // v0.45.786：排序键 notional（约成交额）改名 time_value（只算时间价值）；本机记的旧键直接换过来
+  if (saved.sort === "notional") saved.sort = "time_value";
   let prefs = { side: saved.side || DEFAULT_PREFS.side, sort: saved.sort || DEFAULT_PREFS.sort,
     limit: saved.limit || DEFAULT_PREFS.limit };
   const isDefault = () => Object.keys(DEFAULT_PREFS).every((k) => String(prefs[k]) === String(DEFAULT_PREFS[k]));
@@ -69,7 +71,8 @@ export async function volume(body, d, t, routeAlive) {
       kpi("Call / Put 成交量", `${num(s.call_volume, 0)} / ${num(s.put_volume, 0)}`,
         isNum(s.call_pct) ? `Call 占 ${num(s.call_pct, 1)}%` : null),
       kpi("Put ÷ Call（成交量）", isNum(s.put_call_volume) ? num(s.put_call_volume, 2) : "—", "当日成交，不是 OI"),
-      kpi("约成交额 Call / Put", `${usdShort(s.call_notional_est)} / ${usdShort(s.put_notional_est)}`, "按现在的中间价估算"),
+      kpi("约时间价值额 Call / Put", `${usdShort(s.call_tv_notional_est)} / ${usdShort(s.put_tv_notional_est)}`,
+        "已扣内在价值" + (isNum(s.zero_dte_tv_share_pct) ? `；其中当天到期占 ${num(s.zero_dte_tv_share_pct, 0)}%（按此刻价算，偏差最大）` : "")),
       kpi("列出的占比", isNum(s.top_volume_share_pct) ? `${num(s.top_volume_share_pct, 1)}%` : "—",
         `列出的 ${num(s.n_listed, 0)} 个合约占这个范围总成交量`));
 
@@ -86,13 +89,16 @@ export async function volume(body, d, t, routeAlive) {
       { label: "OI（前一日）", cls: "r", render: (x) => num(x.oi, 0), csv: (x) => x.oi },
       { label: "成交 ÷ OI", cls: "r", render: (x) => (isNum(x.vol_oi) ? `${num(x.vol_oi, 2)}×` : "—"), csv: (x) => x.vol_oi },
       { label: "bid / ask", cls: "r", render: (x) => `${num(x.bid, 2)} / ${num(x.ask, 2)}`, csv: (x) => `${x.bid ?? ""}/${x.ask ?? ""}` },
-      { label: "约成交额", cls: "r", render: (x) => usdShort(x.notional_est), csv: (x) => x.notional_est },
+      { label: "时间价值 / 内在", cls: "r", render: (x) => `${num(x.time_value, 2)} / ${num(x.intrinsic, 2)}`,
+        csv: (x) => `${x.time_value ?? ""}/${x.intrinsic ?? ""}` },
+      { label: "约时间价值额", cls: "r", render: (x) => usdShort(x.tv_notional_est), csv: (x) => x.tv_notional_est },
       { label: "IV", cls: "r", render: (x) => (isNum(x.iv) ? `${num(x.iv * 100, 1)}%` : "—"), csv: (x) => x.iv },
       { label: "Δ", cls: "r", render: (x) => num(x.delta, 2), csv: (x) => x.delta },
     ];
     const missing = [
       c.n_volume_missing ? `${c.n_volume_missing} 个合约链里没有成交量，没进榜` : null,
       c.n_unparseable ? `${c.n_unparseable} 个合约认不出行权价 / 方向 / 到期日，没进榜` : null,
+      s.n_time_value_below_intrinsic ? `${s.n_time_value_below_intrinsic} 个有成交的合约中间价低于内在价值（延迟的现价与报价对不上，或深度实值报价偏低），时间价值按 0 算` : null,
     ].filter(Boolean).join("；");
     const sub = `链 ${ch.as_of || "—"} · 最后成交 ${(ch.payload_last_trade_time || "—").replace("T", " ")} · 链取于 ${timeAgo(r.chain_age_sec)}`
       + `${ch.session_live ? " · 盘中（行情延迟约 15 分钟）" : ""}`;

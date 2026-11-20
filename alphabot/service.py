@@ -36,8 +36,10 @@ from alphabot import howto as HW
 from alphabot import intraday_activity as IA
 from alphabot import intraday_heat as IH
 from alphabot import macos_app as MA
+from alphabot import money_flow as MF
 from alphabot import options_compare as OC
 from alphabot import premium as PM
+from alphabot import sector_map as SM
 from alphabot import price_intraday as PI
 from alphabot import straddle as SD
 from alphabot import strangle_compare as SC
@@ -225,6 +227,12 @@ def market_session(now: Optional[datetime] = None) -> dict:
             "close": close_t.isoformat(timespec="minutes"), "live": live, "calendar": calendar}
 
 
+def _is_trading_iso(day: str) -> bool:
+    """`YYYY-MM-DD` 是不是交易日（`is_trading_day`）。日历坏了就抛——调用方（`sector_map.lookback_change`）按「判不了、不出数」处理。"""
+    import is_trading_day as itd
+    return bool(itd.is_trading_day(datetime.fromisoformat(day).date())[0])
+
+
 def _atomic_write_json(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=str(path.parent))
@@ -281,7 +289,9 @@ class AlphaBotService:
                  straddle_root=None, straddle_quote_fn=None, now_fn: Optional[Callable[[], datetime]] = None,
                  premium_root=None, beta_long_fn=None, wheel_prices_fn=None,
                  completed_session_fn: Optional[Callable[[], Optional[str]]] = None, compare_root=None,
-                 ohlc_fn=None, minute_fn=None, thesis_fetch_fn=None, thesis_config_path=None):
+                 ohlc_fn=None, minute_fn=None, thesis_fetch_fn=None, thesis_config_path=None,
+                 sector_holdings_fn=None, sector_quotes_fn=None, sector_etf_fn=None,
+                 flow_stock_fn=None, flow_etf_fn=None):
         self.fetch_fn = fetch_fn
         self.bars_fn = bars_fn or _default_bars
         # 价格页 K 线的开高低（v0.45.762）：`ohlc_fn(标的) -> ({日期: {open, high, low, close}}, {n, reason, …})`。
@@ -305,6 +315,39 @@ class AlphaBotService:
         self._thesis_config_path = Path(thesis_config_path) if thesis_config_path else None
         self._thesis_config_cache: Optional[tuple] = None
         self._thesis_lock = threading.Lock()
+        # 「板块」页（v0.45.783）：`sector_holdings_fn() -> (成分表, meta)`、`sector_quotes_fn(代码表) -> (报价, meta)`。缺省接线规则同
+        # `ohlc_fn`（注入了日线而没给它们 ⇒ 不取，免得测试出网；演示 ⇒ 不取）。成分表落盘在状态目录（重启不用重下 12 份文件），
+        # 报价只在内存：`(取到的时刻, 报价, 美东时刻文本)`；`*_retry_at` = 上次失败后最早什么时候再试（self.clock() 时刻）
+        self.sector_holdings_fn = sector_holdings_fn
+        self.sector_quotes_fn = sector_quotes_fn
+        self._sector_default = bars_fn is None and not demo
+        self._sector_holdings: Optional[dict] = None
+        self._sector_holdings_note: Optional[dict] = None
+        self._sector_holdings_retry_at = 0.0
+        self._sector_quotes: Optional[tuple] = None
+        self._sector_quotes_fail: Optional[tuple] = None
+        # 顶部那排的 5 日 / 1 月（v0.45.792）：`sector_etf_fn(代码表) -> ({代码: {日期: 收盘}}, meta)`，接线规则同上。
+        # `_sector_etf` = `(已收盘场次, 日线, meta)`：场次没变就一直用（一天 12 个请求）；有基金没取到的那份与整体失败都过
+        # `etf_fail_ttl_sec` 再试
+        self.sector_etf_fn = sector_etf_fn
+        self._sector_etf: Optional[tuple] = None
+        self._sector_etf_note: Optional[dict] = None
+        self._sector_etf_retry_at = 0.0
+        self._sector_lock = threading.Lock()
+        # 「资金」子页（v0.45.795）：`flow_stock_fn(标的, known_market=) -> (逐日行, meta)`（东方财富）、
+        # `flow_etf_fn(代码表) -> ({代码: 净值历史}, meta)`（道富）。缺省接线规则同 `sector_*`（注入了日线而没给它们 ⇒ 不取，
+        # 免得测试出网；演示 ⇒ 不取）。只在内存：`_flow_stock = {标的: (取到的时刻, 逐日行, meta, 美东时刻文本)}`、
+        # `_flow_fail = {标的: (最早再试的时刻, meta)}`、`_flow_market = {标的: 东方财富市场代码}`（试中的记下，下次先试它）；
+        # `_flow_etf = (场次, 取到的时刻, 数据, meta, 美东时刻文本)`
+        self.flow_stock_fn = flow_stock_fn
+        self.flow_etf_fn = flow_etf_fn
+        self._flow_default = bars_fn is None and not demo
+        self._flow_stock: Dict[str, tuple] = {}
+        self._flow_fail: Dict[str, tuple] = {}
+        self._flow_market: Dict[str, int] = {}
+        self._flow_etf: Optional[tuple] = None
+        self._flow_etf_fail: Optional[tuple] = None
+        self._flow_lock = threading.Lock()
         # 盯盘（v0.45.764）：`{"ticker", "until"（self.clock() 时刻）}`；同一时刻只盯一只、后来的为准。只在内存里，重启即无。
         # `_watch_consumer`：有没有轮询线程在消费它（演示 / `--no-poll` 没有 ⇒ 续期照收，但如实回「不会拍」）
         self._watch: Optional[dict] = None
@@ -358,7 +401,10 @@ class AlphaBotService:
                       "beta_sens_computed": 0, "beta_sens_failures": 0, "yf_rate_limited": 0,
                       "activity_failures": 0, "ohlc_failures": 0,
                       "minute_fetches": 0, "minute_cache_hits": 0, "minute_failures": 0,
-                      "thesis_fetches": 0, "thesis_cache_hits": 0, "thesis_failures": 0}
+                      "thesis_fetches": 0, "thesis_cache_hits": 0, "thesis_failures": 0,
+                      "sector_quote_fetches": 0, "sector_cache_hits": 0, "sector_failures": 0,
+                      "sector_holdings_fetches": 0, "sector_etf_fetches": 0, "sector_etf_gaps": 0,
+                      "flow_stock_fetches": 0, "flow_etf_fetches": 0, "flow_cache_hits": 0, "flow_failures": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -549,6 +595,7 @@ class AlphaBotService:
             "compare": OC.public_rules(),
             "deep": DR.public_rules(),
             "volume_board": VB.public_rules() | {"raw_keep": RAW_KEEP},
+            "money_flow": MF.public_rules(),
             # 帮助页「程序类」里给人抄的命令：进本代码目录、用运行本服务的解释器（从 .app 打开时就是 .app 记下的那个），
             # 不写死缺省、不假设人站在代码目录里（v0.45.611）
             "app": {"launcher": MA.here_command("-m alphabot.launcher"),
@@ -665,6 +712,17 @@ class AlphaBotService:
         self._thesis_config_cache = (key, data)
         return data, None
 
+    def thesis_manual(self, ticker) -> Tuple[List[dict], Optional[str]]:
+        """「让 Claude 核对」的条件清单（v0.45.794）：这只票不归机器判据、也不归 `thesis_auto` 的人工条件 → `(条件, 出错原因)`。"""
+        from alphabot import thesis_claude as TC  # noqa: PLC0415 - 只有按钮那一页用到
+        t = self._local_name(norm_ticker(ticker)).upper()
+        cfg, err = self._thesis_config()
+        if err:
+            return [], err
+        block = cfg.get(t)
+        auto_ids = {i for (tk, i) in TA.CHECKS if tk == t}
+        return TC.manual_conditions(block if isinstance(block, dict) else {}, auto_ids), None
+
     def _thesis_part(self, part: str, t: str, today) -> Tuple[object, dict]:
         key = part if part in TA.GLOBAL_PARTS else f"{t}:{part}"
         ent = self._thesis_cache.get(key)
@@ -693,6 +751,305 @@ class AlphaBotService:
             meta["fetched_at"] = self.now_fn().isoformat(timespec="minutes")
         self._thesis_cache[key] = (self.clock() + ttl, data, meta)
         return data, meta
+
+    # ── 板块热力图（v0.45.783）
+    def _sector_holdings_path(self) -> Path:
+        return self.state_dir() / "sector_map" / "holdings.json"
+
+    def _sector_load_holdings(self) -> Tuple[Optional[dict], Optional[dict]]:
+        """成分表：内存 → 状态目录 → 现取。过期（`holdings_ttl_sec`）才重取；重取失败沿用旧的一份并说明（`note`）。
+        返回 `(成分表 | None, 失败说明 | None)`。"""
+        now = self.now_fn()
+        if self._sector_holdings is None:
+            try:
+                d = json.loads(self._sector_holdings_path().read_text(encoding="utf-8"))
+                if isinstance(d, dict) and isinstance(d.get("constituents"), list) and d["constituents"]:
+                    self._sector_holdings = d
+            except (OSError, ValueError):
+                pass                                    # 没有 / 读不了 = 没缓存，下面现取；取不到会照实报
+        cur = self._sector_holdings
+        age = None
+        if cur is not None:
+            try:
+                age = (now - datetime.fromisoformat(cur["fetched_at"])).total_seconds()
+            except (KeyError, TypeError, ValueError):
+                age = None
+        # 缺了板块文件的那一份只当临时的：过 `holdings_fail_ttl_sec` 就再取，不等一整天
+        ttl = SM.RULES["holdings_fail_ttl_sec"] if (cur or {}).get("failed_sectors") else SM.RULES["holdings_ttl_sec"]
+        if cur is not None and age is not None and 0 <= age < ttl:
+            return cur, None
+        if self.clock() < self._sector_holdings_retry_at:
+            return cur, self._sector_holdings_note
+        fn = self.sector_holdings_fn or (SM.fetch_holdings if self._sector_default else None)
+        if fn is None:
+            return cur, {"reason": "no_fetcher"}
+        self.stats["sector_holdings_fetches"] += 1
+        try:
+            data, meta = fn()
+        except Exception as e:  # noqa: BLE001 - 注入的取数函数也不许把页面打挂
+            data, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
+        if data is None:
+            self.stats["sector_failures"] += 1
+            self._sector_holdings_retry_at = self.clock() + SM.RULES["holdings_fail_ttl_sec"]
+            self._sector_holdings_note = dict(meta or {}) or {"reason": "holdings_unavailable"}
+            _log.warning("板块页：持仓文件刷新失败（%s）%s", self._sector_holdings_note,
+                         "，沿用旧的一份" if cur is not None else "")
+            return cur, self._sector_holdings_note
+        data = dict(SM.carry_sectors(data, cur)) | {"fetched_at": now.isoformat(timespec="seconds")}
+        self._sector_holdings, self._sector_holdings_note = data, None
+        try:
+            _atomic_write_json(self._sector_holdings_path(), data)
+        except OSError as e:                            # 落不了盘只是下次启动要重下，这一次照常用
+            _log.warning("板块页：成分表写不进状态目录（%s）", e)
+        return data, None
+
+    def _sector_etf_closes(self) -> Tuple[Optional[dict], Optional[dict]]:
+        """SPY + 板块基金的日线：`(日线 | None, 说明 | None)`。按**美东日期**缓存，一天取一次；取不到 / 缺了几只 ⇒ 说明里写原因，
+        冷却期内不再去撞（限流时按闸门冷却剩余）。日线没取到不影响色块图，只是那排的 5 日 / 1 月写不出来。
+
+        为什么按日期、不按「最近一场已收盘」（v0.45.797 二次检查）：只用「这一场之前」的收盘，早上取到的那份到收盘后照样够用，
+        收盘那一刻不必再取一遍；而每天换一份，除息日当天拿到的就是 Yahoo 已经按这次分红复权过的历史（否则那天的数会少一个股息率）。
+        「完整」只认 12 只都在——被限流时回来的半份不许当成完整的（原来只看有没有记 errors，限流那条路上 errors 是空的）。"""
+        key = market_session(self.now_fn())["date_et"]
+        want = {SM.BENCH, *SM.SECTORS}
+        ent, now = self._sector_etf, self.clock()
+        if ent is not None and ent[0] == key and want <= set(ent[1]):
+            return ent[1], None
+        # 手上那份：同一天的（缺了几只）可以拿来补；更早的只在这次整体取不到时顶一下——它少了最近的收盘，
+        # 往回数会差一天，由 `lookback_change` 的交易日数核对拦成 `bars_gap`，不会出错数
+        cur = ent[1] if ent is not None else None
+        same = ent is not None and ent[0] == key
+        note = self._sector_etf_note
+        if now < self._sector_etf_retry_at:
+            return cur, note
+        fn = self.sector_etf_fn or (SM.fetch_etf_closes if self._sector_default else None)
+        if fn is None:
+            return cur, {"reason": "no_fetcher"}
+        self.stats["sector_etf_fetches"] += 1
+        try:
+            data, meta = fn([SM.BENCH, *SM.SECTORS])
+        except Exception as e:  # noqa: BLE001 - 注入的取数函数也不许把页面打挂
+            data, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
+        meta = dict(meta or {})
+        if data is not None and cur and same:           # 这次缺的几只沿用同一天里先前取到的
+            data = {**cur, **data}
+            meta["errors"] = {s: e for s, e in (meta.get("errors") or {}).items() if s not in data}
+        if data is not None and want <= set(data):      # 补齐了：先前那次的限流 / 报错不再算数
+            meta["reason"], meta["errors"] = None, {}
+        elif data is not None:                          # 没点名的缺口（限流后没去取的那几只）也要写出来
+            meta["errors"] = {s: (meta.get("errors") or {}).get(s) or meta.get("reason") or "missing"
+                              for s in sorted(want - set(data))}
+        bad = data is None or not want <= set(data)
+        if bad:
+            self.stats["sector_failures"] += 1
+            wait = SM.RULES["etf_fail_ttl_sec"]
+            if meta.get("reason") == "rate_limited" and isinstance(meta.get("retry_after_sec"), (int, float)):
+                wait = float(meta["retry_after_sec"])
+            self._sector_etf_retry_at = now + wait
+            self._sector_etf_note = meta if (data is None or meta.get("reason")) else {"reason": None, "errors": meta["errors"]}
+            _log.warning("板块页：板块基金日线没取全（%s）", meta)
+        else:
+            self._sector_etf_note = None
+        if data is not None:
+            self._sector_etf = (key, data, meta)
+        return (data if data is not None else cur), self._sector_etf_note
+
+    def _sector_etf_gap_seen(self) -> None:
+        """这一份日线算出了 `bars_gap`（往回数的交易日数对不上——多半是取的时候 Yahoo 还没放出最近一场的那根）：
+        过冷却期后重取一次，别让那排的 5 日 / 1 月空一整天。真是日历对不上（临时休市）时会每个冷却期重取一次，页面照样写原因。"""
+        ent, now = self._sector_etf, self.clock()
+        if ent is None or ent[0] is None or now < self._sector_etf_retry_at:
+            return
+        self._sector_etf = (None, ent[1], ent[2])       # 键作废 ⇒ 冷却期后 `_sector_etf_closes` 会重取；期间沿用这一份
+        self._sector_etf_retry_at = now + SM.RULES["etf_fail_ttl_sec"]
+        self.stats["sector_etf_gaps"] += 1
+
+    def sector_map(self, refresh: bool = False) -> dict:
+        """标普 500 板块热力图：成分与面积取 SPY 持仓文件、板块取 11 只板块 SPDR 的持仓文件、涨跌取 Yahoo 报价
+        （`alphabot.sector_map`）。`refresh` 只是「别等缓存到期」——同一份报价 `quote_fail_ttl_sec` 内仍不重取。
+        报价刷新失败 ⇒ 沿用上一份并写明（`quotes.refresh_failed` + 真实年龄），一份都没有才 `available=False`。"""
+        base = {"available": False, "rules": SM.public_rules(), "disclaimer": SM.DISCLAIMER}
+
+        def fail(reason, **extra):
+            return clean_json(base | {"reason": reason, "reason_zh": SM.REASONS.get(reason, reason)} | extra)
+        if self.demo:
+            return fail("demo")
+        with self._sector_lock:
+            holdings, hnote = self._sector_load_holdings()
+            if holdings is None:
+                return fail((hnote or {}).get("reason") or "holdings_unavailable", detail=(hnote or {}).get("detail"))
+            sess = market_session(self.now_fn())
+            ttl = SM.RULES["quote_ttl_live_sec"] if sess["live"] else SM.RULES["quote_ttl_idle_sec"]
+            if refresh:
+                ttl = min(ttl, SM.RULES["quote_fail_ttl_sec"])
+            ent, now = self._sector_quotes, self.clock()
+            failed = None
+            if ent is not None and now - ent[0] < ttl:
+                self.stats["sector_cache_hits"] += 1
+            elif self._sector_quotes_fail is not None and now < self._sector_quotes_fail[0]:
+                failed = self._sector_quotes_fail[1]
+            else:
+                fn = self.sector_quotes_fn or (SM.fetch_quotes if self._sector_default else None)
+                if fn is None:
+                    failed = {"reason": "no_fetcher"}
+                else:
+                    self.stats["sector_quote_fetches"] += 1
+                    try:
+                        q, meta = fn(SM.symbols_for(holdings))
+                    except Exception as e:  # noqa: BLE001
+                        q, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
+                    if q is None:
+                        self.stats["sector_failures"] += 1
+                        failed = dict(meta or {}) or {"reason": "fetch_error"}
+                        wait = SM.RULES["quote_fail_ttl_sec"]
+                        if failed.get("reason") == "rate_limited" and isinstance(failed.get("retry_after_sec"), (int, float)):
+                            wait = float(failed["retry_after_sec"])
+                        self._sector_quotes_fail = (now + wait, failed)
+                    else:
+                        ent = self._sector_quotes = (now, q, self.now_fn().isoformat(timespec="seconds"))
+                        self._sector_quotes_fail = None
+            if ent is None:
+                failed = failed or {"reason": "fetch_error"}
+                return fail(failed["reason"], detail=failed.get("detail"), retry_after_sec=failed.get("retry_after_sec"))
+            if failed is not None and failed.get("reason") == "rate_limited":
+                failed = failed | {"retry_after_sec": max(0.0, round(self._sector_quotes_fail[0] - now, 0))}
+            closes, enote = self._sector_etf_closes()
+            body = SM.build(holdings, ent[1], watchlist=self.watchlist()["tickers"], etf_closes=closes,
+                            is_trading=_is_trading_iso)
+            blocks = [body["bench"], *(s["etf"] for s in body["sectors"] if s.get("etf"))]
+            if any(b.get(f"{SM.PERIODS[k]['field']}_reason") == "bars_gap" for b in blocks for k in SM.ETF_LOOKBACK):
+                self._sector_etf_gap_seen()
+            return clean_json(base | body | {
+                "available": True, "session": sess, "refresh_sec": SM.RULES["quote_ttl_live_sec"],
+                "quotes": {"fetched_at": ent[2], "age_sec": round(now - ent[0], 0),
+                           "refresh_failed": ({**failed, "reason_zh": SM.REASONS.get(failed.get("reason"), failed.get("reason"))}
+                                              if failed is not None else None)},
+                "etf_bars": {"available": closes is not None, "n": len(closes or {}),
+                             "errors": (enote or {}).get("errors") or {},
+                             "refresh_failed": ({**enote, "reason_zh": SM.REASONS.get(enote.get("reason"), enote.get("reason"))}
+                                                if enote and enote.get("reason") else None)},
+                "holdings": {"as_of": holdings.get("as_of"), "fetched_at": holdings.get("fetched_at"),
+                             "skipped": holdings.get("skipped") or [], "cash_weight": holdings.get("cash_weight"),
+                             "failed_sectors": holdings.get("failed_sectors") or [],
+                             "carried": holdings.get("carried") or 0,
+                             "multi_sector": holdings.get("multi_sector") or {},
+                             "refresh_failed": ({**hnote, "reason_zh": SM.REASONS.get(hnote.get("reason"), hnote.get("reason"))}
+                                                if hnote else None)}})
+
+    # ── 「资金」子页（v0.45.795）
+    def _flow_stock_part(self, t: str, sess: dict, refresh: bool) -> dict:
+        """个股资金流（东方财富）。成功按盘中 / 闲时 TTL 缓存；失败冷却 `stock_fail_ttl_sec` 内不再试（`refresh` 也不破冷却）。
+        刷新失败而手上有旧的一份 ⇒ 沿用旧的并写明（`refresh_failed` + 真实年龄），一份都没有才 `available=False`。"""
+        def fail(reason, **extra):
+            return {"available": False, "reason": reason, "reason_zh": MF.REASONS.get(reason, reason), **extra}
+        if t in INDEX_TICKERS:
+            return fail("index")
+        now = self.clock()
+        ttl = MF.RULES["stock_ttl_live_sec"] if sess["live"] else MF.RULES["stock_ttl_idle_sec"]
+        ent, failed = self._flow_stock.get(t), None
+        if ent is not None and now - ent[0] < ttl and not refresh:
+            self.stats["flow_cache_hits"] += 1
+        elif t in self._flow_fail and now < self._flow_fail[t][0]:
+            failed = self._flow_fail[t][1]
+        else:
+            fn = self.flow_stock_fn or (MF.fetch_stock_flow if self._flow_default else None)
+            if fn is None:
+                failed = {"reason": "no_fetcher"}
+            else:
+                self.stats["flow_stock_fetches"] += 1
+                try:
+                    rows, meta = fn(t, known_market=self._flow_market.get(t))
+                except Exception as e:  # noqa: BLE001 - 注入的取数函数也不许把页面打挂
+                    rows, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
+                meta = dict(meta or {})
+                if rows:
+                    ent = self._flow_stock[t] = (now, rows, meta, self.now_fn().isoformat(timespec="seconds"))
+                    self._flow_fail.pop(t, None)
+                    if isinstance(meta.get("market"), int):
+                        self._flow_market[t] = meta["market"]
+                else:
+                    self.stats["flow_failures"] += 1
+                    failed = meta if meta.get("reason") else {**meta, "reason": "empty"}
+                    self._flow_fail[t] = (now + MF.RULES["stock_fail_ttl_sec"], failed)
+                    _log.warning("[%s] 资金页：个股资金流取不到（%s）", t, failed)
+        if ent is None:
+            failed = failed or {"reason": "fetch_error"}
+            return fail(failed["reason"], detail=failed.get("detail"))
+        body = MF.build_stock(ent[1], today_et=sess["date_et"], live=sess["live"])
+        return {"available": True, **body, "market": ent[2].get("market"), "fetched_at": ent[3],
+                "age_sec": round(now - ent[0], 0),
+                "refresh_failed": ({**failed, "reason_zh": MF.REASONS.get(failed.get("reason"), failed.get("reason"))}
+                                   if failed is not None else None)}
+
+    def _flow_etf_part(self, refresh: bool) -> dict:
+        """SPY + 11 只板块 SPDR 的申赎（道富净值历史）。按「最近一场已收盘」缓存，同一场内最多 `etf_ttl_sec` 重取一次；
+        缺了几只照出其余的并点名（`errors`）；失败冷却 `etf_fail_ttl_sec`。"""
+        def fail(reason, **extra):
+            return {"available": False, "reason": reason, "reason_zh": MF.REASONS.get(reason, reason), **extra}
+        key = self._completed_session() or market_session(self.now_fn())["date_et"]
+        now, ent, failed = self.clock(), self._flow_etf, None
+        fresh = (ent is not None and ent[0] == key and now - ent[1] < MF.RULES["etf_ttl_sec"]
+                 and not (ent[3] or {}).get("errors"))
+        if fresh and not refresh:
+            self.stats["flow_cache_hits"] += 1
+        elif self._flow_etf_fail is not None and now < self._flow_etf_fail[0]:
+            failed = self._flow_etf_fail[1]
+        else:
+            fn = self.flow_etf_fn or ((lambda syms: MF.fetch_etf_navhist(syms, read_rows=SM.read_xlsx_rows))
+                                      if self._flow_default else None)
+            if fn is None:
+                failed = {"reason": "no_fetcher"}
+            else:
+                self.stats["flow_etf_fetches"] += 1
+                try:
+                    data, meta = fn(list(MF.ETFS))
+                except Exception as e:  # noqa: BLE001
+                    data, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
+                meta = dict(meta or {})
+                if data:
+                    # 这次缺的几只，同一场里先前已取到过 ⇒ 沿用那一份（不然一次临时失败就把已有的数从页面上抹掉）；
+                    # 换了场次不沿用：那是别的日子的数。沿用的照样记在 `errors` 里，过冷却期再取一次
+                    if ent is not None and ent[0] == key and meta.get("errors"):
+                        kept = {s: ent[2][s] for s in meta["errors"] if s in ent[2]}
+                        if kept:
+                            data = {**data, **kept}
+                            meta["kept_from_earlier"] = sorted(kept)
+                    ent = self._flow_etf = (key, now, data, meta, self.now_fn().isoformat(timespec="seconds"))
+                    self._flow_etf_fail = None
+                    if meta.get("errors"):           # 缺几只：照用这一份，但过冷却期再取一次补
+                        self.stats["flow_failures"] += 1
+                        self._flow_etf_fail = (now + MF.RULES["etf_fail_ttl_sec"], {"reason": None, "errors": meta["errors"]})
+                        _log.warning("资金页：板块基金净值历史缺了几只（%s）", meta["errors"])
+                else:
+                    self.stats["flow_failures"] += 1
+                    failed = meta if meta.get("reason") else {**meta, "reason": "fetch_error"}
+                    self._flow_etf_fail = (now + MF.RULES["etf_fail_ttl_sec"], failed)
+                    _log.warning("资金页：板块基金净值历史取不到（%s）", failed)
+        if ent is None:
+            failed = failed or {"reason": "fetch_error"}
+            return fail(failed["reason"], detail=failed.get("detail"), errors=failed.get("errors") or {})
+        body = MF.build_etf(ent[2], is_trading=_is_trading_iso)
+        errors = (ent[3] or {}).get("errors") or {}
+        return {"available": True, **body, "fetched_at": ent[4], "age_sec": round(now - ent[1], 0),
+                "errors": {s: {"code": c, "zh": MF.REASONS.get(str(c).split(":")[0], c)} for s, c in errors.items()},
+                "skipped": (ent[3] or {}).get("skipped") or {},
+                "kept_from_earlier": (ent[3] or {}).get("kept_from_earlier") or [],
+                "refresh_failed": ({**failed, "reason_zh": MF.REASONS.get(failed.get("reason"), failed.get("reason"))}
+                                   if failed is not None and failed.get("reason") else None)}
+
+    def money_flow(self, ticker, refresh: bool = False) -> dict:
+        """「资金」子页：个股按单笔金额分档的资金流（东方财富）+ 板块 SPDR 申赎（道富）。两半各自取、各自失败（`alphabot.money_flow`）。
+        只展示，不进评分。"""
+        t = norm_ticker(ticker)
+        base = {"ticker": t, "rules": MF.public_rules(), "disclaimer": MF.DISCLAIMER}
+        if self.demo:
+            off = {"available": False, "reason": "demo", "reason_zh": MF.REASONS["demo"]}
+            return clean_json(base | {"stock": off, "etf": off})
+        sess = market_session(self.now_fn())
+        with self._flow_lock:
+            stock = self._flow_stock_part(t, sess, refresh)
+            etf = self._flow_etf_part(refresh)
+        return clean_json(base | {"session": sess, "stock": stock, "etf": etf})
 
     def thesis_auto(self, ticker, date: Optional[str] = None) -> dict:
         """深度页「证伪条件」里登记过的几条人工条件的自动核对。只对**最新一天**（取到的是此刻的数据）。

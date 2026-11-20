@@ -49,7 +49,9 @@ budget，不需要额外的循环）。short 侧用权利金当上限只是因�
     as_of > earnings_date（exit_after_event） → post_event
     expiry − as_of ≤ expiry_buffer_days       → expiry_buffer
     到期后 write_off_days_after_expiry 天仍拿不到任何价格 → written_off（核销）
-出场价：报价 ok → 镜像成交价；**已到期**且报价取不到 → 用**到期那一场**的标的收盘算内在价值
+出场价：报价 ok → 镜像成交价（v0.45.787：**成交**只问「这一步成交得了吗」，不再借盯市的 `quote_ok`——short 一条腿 bid=0 但 ask > 0 时
+按 ask 买回，`exit_bid0_legs` 记下是哪条腿；没有 ask ⇒ 不可成交、照旧等，**不编价**，见 `_exit_executable`；该平仓却没有
+可成交的价的仓位记 `exit_blocked_since` / `exit_blocked_reason`、`run_for_date` 返回 `exit_blocked`、日报小节与 WARNING 可见）；**已到期**且报价取不到 → 用**到期那一场**的标的收盘算内在价值
 |S − K|，mark_source="intrinsic"（到期时内在价值就是合约的真实价值）。**未到期**报价取不到 → 等：
 报价恢复那天按报价平，一直没恢复就等到期这样结（v0.45.449 撤掉「事件后 stale 超过 3 天按内在价值平」：
 到期前内在价值把剩余时间价值算成 0，long 跨式系统性少算、short 多算，污染的正是这本账要测的样本；
@@ -263,11 +265,17 @@ class StraddlePosition:
     # 都不读它（`_attach_shadow_entry` 是唯一写者，tests/test_straddle_strangle_shadow.py 的 AST 读者白名单 + 开 / 关记录的
     # 行为差分钉住）。None（登记前入场 / 记录失败）⇒ 序列化时整键省略，旧记录逐字节不变。
     shadow_strangle: Optional[Dict] = None
+    # v0.45.787：该平仓（post_event / expiry_buffer 已触发）却平不了——某条腿没有可成交的价（见 `_exit_executable`）。
+    # since = 这一段连续「平不了」的第一天，reason = 最近一次的原因（人读的一句话）。只反映**最近一次运行**：平掉了 /
+    # 不再该平就清空。None ⇒ 序列化时整键省略（旧记录逐字节不变，同 shadow_strangle）。
+    exit_blocked_since: Optional[str] = None
+    exit_blocked_reason: Optional[str] = None
 
     def to_dict(self) -> Dict:
         d = asdict(self)
-        if d.get("shadow_strangle") is None:
-            d.pop("shadow_strangle", None)
+        for k in ("shadow_strangle", "exit_blocked_since", "exit_blocked_reason"):
+            if d.get(k) is None:
+                d.pop(k, None)
         return d
 
     @classmethod
@@ -308,11 +316,16 @@ class ClosedStraddle:
     settled_late_days: Optional[int] = None   # 平仓日晚于到期日的天数（正常为 None）
     # v0.45.586：影子宽跨记录（入场记录 + 平仓当天的假想盈亏）。只记录、不进任何判断（见 StraddlePosition 同名字段）。
     shadow_strangle: Optional[Dict] = None
+    # v0.45.787：平仓时 bid=0（没有 mid）、按 ask 买回的那几条腿（"call" / "put"）。None = 两腿都有正常双边报价（绝大多数）。
+    # **只记录、不进任何判断**；不另起 mark_source 值——成交约定没变（short 按 ask），影子宽跨的 `_attach_shadow_exit`
+    # 与 `exit_record` 因此都不用动。None ⇒ 序列化时整键省略（旧记录逐字节不变）。
+    exit_bid0_legs: Optional[List[str]] = None
 
     def to_dict(self) -> Dict:
         d = asdict(self)
-        if d.get("shadow_strangle") is None:
-            d.pop("shadow_strangle", None)
+        for k in ("shadow_strangle", "exit_bid0_legs"):
+            if d.get(k) is None:
+                d.pop(k, None)
         return d
 
 
@@ -551,6 +564,56 @@ def _quote_ok(q: Optional[dict]) -> bool:
             and _pos(q.get("bid")) is not None and _pos(q.get("ask")) is not None)
 
 
+def _bid_zero_ask_only(q: Optional[dict]) -> bool:
+    """这条腿**只缺买价**：bid 恰为 0（深度虚值最常见）、ask 有限且 > 0。bid 缺失 / 负数 / 布尔、ask 缺失或 ≤ 0 都不算——
+    那是坏数据或根本没有卖家，不是「买价为 0」。"""
+    if not isinstance(q, dict):
+        return False
+    bid = q.get("bid")
+    if isinstance(bid, bool) or _num(bid) != 0.0:
+        return False
+    return _pos(q.get("ask")) is not None
+
+
+def _exit_executable(side: str, qc: Optional[dict], qp: Optional[dict], *,
+                     allow_bid0: bool = True) -> Tuple[bool, List[str]]:
+    """平仓这一步**成交**得了吗（与盯市要不要 mid 是两回事，v0.45.787）。返回 (可成交, 按 ask 买回的 bid=0 腿)。
+
+    账本的成交约定本来就是镜像（`exit_fills`）：short 按 ask 买回、long 按 bid 卖出。short 买回只需要对手方的**卖价**，
+    所以一条腿 bid=0 但 ask > 0 时，按 ask 成交是一个真实可成交的价（不是 mid 的一半，也不是编的）；两腿都 `quote_ok`
+    ⇒ 与此前逐字节相同。此前平仓整个挂在 `_quote_ok(两腿)` 上（要 mid > 0、bid > 0）：深度虚值腿 bid=0 就永远等到到期
+    （NVDA 2026-11-18 / 19，见 experiments/ 与 memory `alpha-hive-straddle-entry-rules.md`）。
+
+    - 只放宽 **short**：现行规则不开 long（`trade_cheap=False`），long 的 bid=0 腿成交价是 0，语义另议，仍须 `quote_ok`。
+    - 只放宽**未到期**（`allow_bid0=False` ⇒ 退回两腿都须 `quote_ok`，v0.45.789）：v0.45.449 留下的缺口是「未到期取不到报价
+      一律等」；到期当天设计本来就有答案——到期那一场的收盘算内在价值（合约的真实结算价）。放宽到到期当天等于对一条没价值的腿
+      再付一次 ask、并把当晚无定稿收盘的「延期一天」变成当晚按 ask 平，是改口径不是补缺口（0.45.787 漏限定，探针实测 8.15 vs 8.0）。
+      调用方传 `allow_bid0=not expired`。
+    - 没有 ask（None / 0）⇒ 不可成交，照旧等待——**不编价**（不取 ask/2、不按 0 估）。
+    - `_quote_ok` 本身不动：盯市（mark）与入场的点差口径都建在它上面。"""
+    legs = (("call", qc), ("put", qp))
+    bid0: List[str] = []
+    for name, q in legs:
+        if _quote_ok(q):
+            continue
+        if allow_bid0 and side == "short" and _bid_zero_ask_only(q):
+            bid0.append(name)
+            continue
+        return False, []
+    return True, bid0
+
+
+def _exit_blocked_reason(side: str, qc: Optional[dict], qp: Optional[dict]) -> str:
+    """人读的一句话：哪条腿为什么没有可成交的价（日报 / 日志用）。"""
+    def one(q):
+        if not isinstance(q, dict):
+            return "无报价"
+        return f"bid={q.get('bid')} ask={q.get('ask')}"
+    bad = [f"{n} {one(q)}" for n, q in (("call", qc), ("put", qp))
+           if not (_quote_ok(q) or (side == "short" and _bid_zero_ask_only(q)))]
+    return "；".join(bad) or "未知"
+
+
 def _mark_value(pos: StraddlePosition) -> float:
     """持仓对 NAV 的贡献：long 为 +市值、short 为 −市值。"""
     v = pos.last_mark * 100.0 * pos.contracts
@@ -767,10 +830,13 @@ def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
     closed_today: List[Dict] = []
     deferred: List[Dict] = []
     invalid_expiry: List[Dict] = []
+    blocked: List[Dict] = []
     for pos in positions:
         # 延期字段只反映本次运行：先取出上一段的起始日再清空，本次真延期才写回（同日重跑 since 不变）
         deferred_since = pos.settle_deferred_since
         pos.settle_deferred_since = pos.settle_deferred_reason = None
+        blocked_since = pos.exit_blocked_since          # 同上：「平不了」只反映最近一次运行（v0.45.787）
+        pos.exit_blocked_since = pos.exit_blocked_reason = None
         try:
             quotes = quotes_fn(pos.ticker, [pos.call_symbol, pos.put_symbol]) or {}
         except Exception as exc:  # noqa: BLE001
@@ -813,10 +879,19 @@ def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
         reason = "post_event" if post_event else "expiry_buffer"
 
         rec = None
-        if ok:
+        # v0.45.787：成交约定本来就是镜像（short 按 ask 买回），不需要 mid——平仓只问「成交得了吗」，不再借盯市的 `ok`。
+        # 一条腿 bid=0 但有 ask 的 short：按 ask 平（`exit_bid0_legs` 记下是哪条腿）；没有 ask ⇒ 照旧等，不编价。
+        # v0.45.789：只放宽**未到期**——到期当天（to_expiry ≤ 0）仍须两腿 quote_ok，否则落到下面的内在价值结算。
+        # 到期日无法解析（to_expiry 为 None）⇒ 与下面 `expired` 一样视为未到期。
+        executable, bid0_legs = _exit_executable(pos.side, qc, qp,
+                                                 allow_bid0=not (to_expiry is not None and to_expiry <= 0))
+        if executable:
             xc, xp = exit_fills(pos.side, qc, qp)
             if xc is not None:
-                rec, delta = _close(pos, xc, xp, xc + xp, as_of, reason, "cboe_mid", None)
+                note = (f"bid=0 leg(s) {'+'.join(bid0_legs)}: bought back at ask (no mid exists)" if bid0_legs else "")
+                rec, delta = _close(pos, xc, xp, xc + xp, as_of, reason, "cboe_mid", None, note)
+                if bid0_legs:
+                    rec.exit_bid0_legs = list(bid0_legs)
         if rec is None:
             expired = to_expiry is not None and to_expiry <= 0
             if expired:
@@ -874,8 +949,16 @@ def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
                                      "since": pos.settle_deferred_since, "write_off_in_days": left})
             else:
                 # 未到期：等报价恢复（按报价平）或等到期（按到期那一场的收盘结算），不按内在价值提前平
-                _log.info("[OptionsPaperLeg] %s 该平仓（%s）但报价不可用，等待报价或到期（stale %d 天，到期 %s）",
-                          pos.ticker, reason, pos.stale_days, pos.expiry)
+                why = _exit_blocked_reason(pos.side, qc, qp)
+                pos.exit_blocked_since = blocked_since or as_of
+                pos.exit_blocked_reason = why
+                days_blocked = _days_between(pos.exit_blocked_since, as_of) or 0
+                # 连续平不了 ≥ 1 个日历日起升 WARNING（此前恒为 INFO，没人看得见——v0.45.787）
+                (_log.warning if days_blocked >= 1 else _log.info)(
+                    "[OptionsPaperLeg] %s 该平仓（%s）但没有可成交的价（%s），等待报价或到期（自 %s，stale %d 天，到期 %s）",
+                    pos.ticker, reason, why, pos.exit_blocked_since, pos.stale_days, pos.expiry)
+                blocked.append({"ticker": pos.ticker, "side": pos.side, "exit_reason": reason,
+                                "since": pos.exit_blocked_since, "reason": why, "expiry": pos.expiry})
         if rec is None:
             remaining.append(pos)
             continue
@@ -994,6 +1077,7 @@ def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
         "skipped": skipped, "equity_snapshot": snapshot,
         "settle_deferred": deferred,
         "invalid_expiry": invalid_expiry,
+        "exit_blocked": blocked,
     }
 
 
@@ -1131,6 +1215,11 @@ def render_markdown(as_of: str) -> str:
             lines += ["", f"> ⚠️ {len(bad)} 个持仓的到期日无法解析（"
                           + "、".join(f"{p.ticker} {p.expiry!r}" for p in bad)
                           + "）：判不了到期、算不出核销期限，报价取不到时不会自动了结——**需人工核对持仓记录**。"]
+        stuck = [p for p in positions if p.exit_blocked_since]
+        if stuck:
+            lines += ["", f"> ⏳ {len(stuck)} 个持仓**该平仓却没有可成交的价**（某条腿没有卖价 / 买价），未到期一律等、"
+                          "不编价，到期按到期那一场的收盘结算："
+                          + "；".join(f"{p.ticker}（自 {p.exit_blocked_since}）{p.exit_blocked_reason}" for p in stuck) + "。"]
         held = [p for p in positions if p.settle_deferred_since]
         if held:
             lines += ["", f"> ⏳ {len(held)} 个持仓该按内在价值结算，但拿不到结算那一场的 Twelve Data 收盘——"

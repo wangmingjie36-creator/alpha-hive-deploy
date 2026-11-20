@@ -24,11 +24,20 @@ USDC 价格与市场份额。其余照旧「未核对」——错的「未触发
 
 **只展示**：不进评分、不进账本、不写配置（配置还有一个外部的每周任务在写）、不改扫描记的 `thesis_break_evaluations`。
 判定函数是纯函数；取数在 `fetch_*`，取不到 / 被限流都带原因返回，永不抛。
+
+有权威值的量用权威源（v0.45.785，用户要求）
+--------------------------------------------
+· 10 年期国债收益率：**美国财政部每日收益率曲线**（经仓库已有的 `treasury_yields`，与扫描的宏观 10Y 同源）——
+  「10 年期国债收益率」通常指的就是这个数（FRED DGS10 转发的也是它）。此前用 Yahoo ^TNX：那是最近一只 10 年期新券的
+  实时收益率，与官方值实测差 0.02～0.03 个百分点，在阈值附近会与官方结论相反。官方只给两位小数 ⇒ 按 ±0.005 舍入区间判；
+· USDC 流通量：**发行方 Circle 的公开接口**（各链合计）。份额的分母没有权威定义，仍取 DeFiLlama 的美元稳定币合计，
+  但把其中 DeFiLlama 自己统计的 USDC 换成 Circle 的数，分子分母里的 USDC 是同一个数；
+· USDC 价格（脱钩）没有唯一真值（每个交易所不同），仍用 Yahoo 小时线。
 """
 from __future__ import annotations
 
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Callable, Dict, List, Optional, Tuple
 
 from alphabot import beta_long as BL
@@ -36,7 +45,9 @@ from alphabot import beta_long as BL
 #: 阈值以外的口径常量（条件里的阈值写在 CHECKS 里，与条件原文放一起）
 RULES = {
     "max_quarter_age_days": 200,     # 最近一季的季末早于今天这么多天 ⇒ 数据过旧（季报约在季末后 1～2 个月出，留一个季度的余量）
-    "max_yield_age_days": 7,         # 国债收益率最近一根的日期早于今天这么多天 ⇒ 过旧
+    "max_yield_age_days": 7,         # 国债收益率最近一个官方值的日期早于今天这么多天 ⇒ 过旧
+    "ust_round": 0.005,              # 财政部收益率只给 2 位小数 ⇒ 真值在 ±0.005 内
+    "max_supply_age_days": 3,        # Circle 各链流通量的最近更新早于今天这么多天 ⇒ 过旧
     "quarter_gap_days": (60, 120),   # 相邻两季的季末相隔多少天才算「连续的两季」
     "year_gap_days": (300, 430),     # 「一年前那次股息」的日期范围
     "dividend_round": 0.0005,        # Yahoo 股息给到 3 位小数 ⇒ 真值在 ±0.0005 内
@@ -58,7 +69,7 @@ REASONS = {
     "out_of_bounds": "取到的值不合常理，不用",
     "rate_limited": "Yahoo 限流",
     "fetch_error": "取数出错",
-    "empty": "Yahoo 返回了空表（可能是限流或临时故障，过一会儿会重取）",
+    "empty": "数据源返回了空结果（可能是限流、还没发布或临时故障，过一会儿会重取）",
     "trigger_changed": "条件原文与登记时不同（阈值可能改过），自动核对没对上",
     "not_in_config": "配置里没有这一条",
     "not_latest_date": "自动核对只对最新一天",
@@ -88,17 +99,17 @@ CHECKS: Dict[Tuple[str, str], dict] = {
 
 #: 每种判法要哪份数据（`票:份` 或全局的 `份`）、数据从哪来（页面照写）
 NEEDS = {
-    "gm_qoq_drop": (("income",), "Yahoo 季度利润表"),
+    "gm_qoq_drop": (("income",), "Yahoo 季度利润表（最新一季 Yahoo 还空着时，用 SEC 8-K 财报新闻稿补）"),
     "eps_miss": (("eps",), "Yahoo 盈利历史（实际 vs 预期）"),
     "fcf_neg_streak": (("cashflow",), "Yahoo 季度现金流量表"),
     "cash_runway": (("balance", "cashflow"), "Yahoo 季度资产负债表 + 现金流量表"),
     "dividend_cut": (("dividends",), "Yahoo 股息记录"),
     "dividend_growth": (("dividends",), "Yahoo 股息记录"),
-    "yield_above": (("@tnx",), "Yahoo ^TNX（10 年期美债收益率）"),
+    "yield_above": (("@ust10",), "美国财政部每日收益率曲线（10 年期，官方值）"),
     "usdc_depeg": (("@usdc",), "Yahoo USDC-USD 小时线"),
-    "usdc_share": (("@stables",), "DeFiLlama 稳定币流通量"),
+    "usdc_share": (("@circle", "@stables"), "Circle 公布的 USDC 流通量 + DeFiLlama 统计的其余美元稳定币"),
 }
-GLOBAL_PARTS = ("@tnx", "@usdc", "@stables")
+GLOBAL_PARTS = ("@ust10", "@usdc", "@stables", "@circle")
 #: 舍入区间比阈值时的浮点余量：1.339 + 0.001 在浮点下比 1.340 小一点点，没有它会把「差额正好等于舍入范围」判成已触发
 _EPS = 1e-9
 
@@ -172,7 +183,8 @@ def judge_gm_qoq_drop(income: List[dict], pp: float, today: date) -> dict:
         return _cant("insufficient", "不到两季")
     cur, prev = income[0], income[1]
     if not (ok(cur) and ok(prev)):
-        return _cant("insufficient", f"{cur.get('end')} 或 {prev.get('end')} 那季缺毛利或收入", as_of=cur.get("end"))
+        note = f"；SEC 新闻稿也没补上：{cur['fill_note']}" if cur.get("fill_note") else ""
+        return _cant("insufficient", f"{cur.get('end')} 或 {prev.get('end')} 那季缺毛利或收入{note}", as_of=cur.get("end"))
     bad = _fresh(cur["end"], today)
     if bad:
         return bad
@@ -181,6 +193,8 @@ def judge_gm_qoq_drop(income: List[dict], pp: float, today: date) -> dict:
     g1 = cur["gross_profit"] / cur["revenue"] * 100
     g0 = prev["gross_profit"] / prev["revenue"] * 100
     facts = f"截至 {cur['end']} 那季毛利率 {g1:.2f}%，上一季（{prev['end']}）{g0:.2f}%，变化 {_pp(g1 - g0)}；阈值：下降超过 {pp:g} 个百分点"
+    if cur.get("source"):
+        facts += f"（Yahoo 这一季的收入 / 毛利还是空的，取自 {cur['source']}）"
     return _verdict("fired" if g0 - g1 > pp else "not_fired", facts, as_of=cur["end"])
 
 
@@ -313,29 +327,39 @@ def judge_dividend_growth(divs: List[dict], pct: float, today: date) -> dict:
     return _cant("borderline", "舍入范围跨过了阈值，要看公司公告里的精确股息", facts, as_of=cur["date"])
 
 
-def judge_yield_above(tnx: List[dict], pct: float, today: date) -> dict:
-    """10 年期美债收益率（^TNX 最近一根收盘，单位 %）高于 `pct`。`tnx` = `[{date, close}]`。"""
-    rows = [r for r in tnx if _num(r.get("close")) is not None]
-    if not rows:
+def judge_yield_above(ust: Optional[dict], pct: float, today: date) -> dict:
+    """10 年期美债收益率（财政部每日收益率曲线的 10 年期，单位 %）高于 `pct`。`ust` = `{date, y10}`。
+
+    官方值只给两位小数 ⇒ 真值在 ±`ust_round` 内：区间整个在阈值上方才写已触发、整个不在上方才写未触发，正好压线 ⇒ 临界。"""
+    v = _num((ust or {}).get("y10"))
+    if v is None:
         return _cant("insufficient", "没有收益率数据")
-    r = rows[0]
-    a = _age(r["date"], today)
+    d = ust.get("date")
+    a = _age(d, today)
     if a is None or a > RULES["max_yield_age_days"]:
-        return _cant("stale", f"最近一根是 {r['date']}", as_of=r["date"])
-    if not 0 < r["close"] < 20:
-        return _cant("out_of_bounds", f"{r['close']}", as_of=r["date"])
-    # 当天那根在收盘前是盘中值（Yahoo 日线的末根会随盘中变），不写成「收盘」
-    when = f"{r['date']}（今天）的最新值，收盘前是盘中值" if a <= 0 else f"{r['date']} 收盘"
-    facts = f"{when} {r['close']:.3f}%；阈值：高于 {pct:g}%"
-    return _verdict("fired" if r["close"] > pct else "not_fired", facts, as_of=r["date"])
+        return _cant("stale", f"最近一个官方值是 {d}", as_of=d)
+    if not 0 < v < 20:
+        return _cant("out_of_bounds", f"{v}", as_of=d)
+    e = RULES["ust_round"]
+    facts = f"财政部公布的 {d} 10 年期收益率 {v:.2f}%（官方只给两位小数）；阈值：高于 {pct:g}%"
+    if v - e > pct + _EPS:
+        return _verdict("fired", facts, as_of=d)
+    if v + e <= pct + _EPS:
+        return _verdict("not_fired", facts, as_of=d)
+    return _cant("borderline", "官方值正好压在阈值上，两位小数分不出高低", facts, as_of=d)
 
 
 def judge_usdc_depeg(hourly: List[dict], price: float, hours: int, today: date) -> dict:
     """过去几天里 USDC 小时收盘连续低于 `price` 的最长时长是否达到 `hours` 小时。`hourly` = `[{t: ISO, close}]`（旧到新也行，这里自己排）。"""
-    rows = sorted((r for r in hourly if _num(r.get("close")) is not None and r.get("t")), key=lambda r: str(r["t"]))
+    rows = sorted((r for r in hourly if _num(r.get("close")) is not None and r.get("t") and _ts(r["t"])),
+                  key=lambda r: _ts(r["t"]))
     days = int(RULES["usdc_window_days"])
     if not rows:
         return _cant("insufficient", "没有小时线")
+    # 只看最后一根往前整 `days` 天（v0.45.785 修）：Yahoo 的 period="5d" 从 4 天前的 UTC 零点起算、不是往回整 120 小时，
+    # 原先拿它直接除以 120 ⇒ 晚上打开页面覆盖率只有八成多、天天「数据不够」。现在取数多取两天，这里截出完整窗口再算覆盖率
+    end = _ts(rows[-1]["t"])
+    rows = [r for r in rows if _ts(r["t"]) > end - timedelta(hours=days * 24)]
     cov = len(rows) / (days * 24)
     last = str(rows[-1]["t"])
     if _age(last, today) is None or _age(last, today) > 1:
@@ -364,16 +388,32 @@ def judge_usdc_depeg(hourly: List[dict], price: float, hours: int, today: date) 
     return _verdict("not_fired", facts, as_of=last[:10])
 
 
-def judge_usdc_share(st: Optional[dict], pct: float) -> dict:
-    """USDC 占全部美元稳定币流通量的份额低于 `pct`%。`st` = `{usdc, total, n_assets, as_of}`。"""
+def judge_usdc_share(st: Optional[dict], circle: Optional[dict], pct: float, today: date) -> dict:
+    """USDC 占全部美元稳定币流通量的份额低于 `pct`%。
+
+    分子 = Circle 公布的 USDC 流通量（`circle` = `{usdc, chains, as_of}`）；分母 = DeFiLlama 的美元稳定币合计里，
+    把 DeFiLlama 自己统计的 USDC 换成 Circle 的数（`st` = `{usdc, total, n_assets, as_of}`）——分子分母里的 USDC 是同一个数。"""
+    c = _num((circle or {}).get("usdc"))
+    if c is None or c <= 0:
+        return _cant("insufficient", "没有取到 Circle 公布的 USDC 流通量")
+    c_as_of = circle.get("as_of")
+    a = _age(c_as_of, today)
+    if a is None or a > RULES["max_supply_age_days"]:
+        return _cant("stale", f"Circle 的数最近更新于 {c_as_of or '未知'}", as_of=c_as_of)
     if not st or (_num(st.get("usdc")) or 0) <= 0 or (_num(st.get("total")) or 0) <= 0:
-        return _cant("insufficient", "没有取到 USDC 或总流通量")
-    share = st["usdc"] / st["total"] * 100
+        return _cant("insufficient", "没有取到 DeFiLlama 的稳定币合计（或其中没有 USDC）")
+    others = st["total"] - st["usdc"]
+    if others <= 0:
+        return _cant("out_of_bounds", "DeFiLlama 合计里除了 USDC 没有别的")
+    total = others + c
+    share = c / total * 100
     if not 0 < share <= 100:
         return _cant("out_of_bounds", f"{share:.1f}%")
-    facts = (f"USDC 流通 {st['usdc'] / 1e9:,.1f} 十亿美元，占 DeFiLlama 统计的 {st.get('n_assets', '—')} 种美元稳定币合计 "
-             f"{st['total'] / 1e9:,.1f} 十亿美元的 {share:.1f}%；阈值：低于 {pct:g}%")
-    return _verdict("fired" if share < pct else "not_fired", facts, as_of=st.get("as_of"))
+    n = st.get("n_assets")
+    n_others = f"{n - 1} 种" if isinstance(n, int) and n > 1 else "其余"
+    facts = (f"USDC 流通 {c / 1e9:,.1f} 十亿美元（Circle 公布，{circle.get('chains', '—')} 条链合计，更新于 {c_as_of}），"
+             f"占美元稳定币合计 {total / 1e9:,.1f} 十亿美元的 {share:.1f}%（其余 {n_others}取 DeFiLlama 统计）；阈值：低于 {pct:g}%")
+    return _verdict("fired" if share < pct else "not_fired", facts, as_of=c_as_of)
 
 
 def judge(spec: dict, data: Dict[str, object], today: date) -> dict:
@@ -392,11 +432,11 @@ def judge(spec: dict, data: Dict[str, object], today: date) -> dict:
     if k == "dividend_growth":
         return judge_dividend_growth(data["dividends"], spec["pct"], today)
     if k == "yield_above":
-        return judge_yield_above(data["@tnx"], spec["pct"], today)
+        return judge_yield_above(data["@ust10"], spec["pct"], today)
     if k == "usdc_depeg":
         return judge_usdc_depeg(data["@usdc"], spec["price"], spec["hours"], today)
     if k == "usdc_share":
-        return judge_usdc_share(data["@stables"], spec["pct"])
+        return judge_usdc_share(data["@stables"], data["@circle"], spec["pct"], today)
     raise KeyError(k)
 
 
@@ -478,35 +518,216 @@ def _closes(hist, key: str) -> List[dict]:
     return [{key: str(i) if key == "t" else str(i)[:10], "close": _num(c)} for i, c in zip(hist.index, hist["Close"])]
 
 
-def _fetch_tnx(yf_module, ensure: Callable[[], None]) -> List[dict]:
-    import yf_daily
-    ensure()
-    # source 必须是字面量（守卫按字面量核对注册表）；只用最近一根的日期与值，末段策略 = ignore（日期由 judge 另判新旧）
-    hist, _ = yf_daily.history(yf_module.Ticker("^TNX"), source="alphabot_thesis_tnx", period="1mo")
-    return sorted(_closes(hist, "date"), key=lambda r: r["date"], reverse=True)
+def _et_today() -> date:
+    """美东今天（与 `treasury_yields._et_month` 同一时区口径；测试可替换）。"""
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/New_York")).date()
+
+
+def _fetch_ust10(treasury_get: Optional[Callable[[Optional[str]], Optional[dict]]], today: date) -> Optional[dict]:
+    """财政部最新的 10 年期官方值 `{date, y10}`；取不到 → None。`treasury_get(date|None)` 只给测试注入。"""
+    if treasury_get is None:
+        import treasury_yields  # noqa: PLC0415 - 与扫描的宏观 10Y 同一个入口（按月整份取、自带缓存与重试）
+        treasury_get = treasury_yields.get_yield_curve
+    r = treasury_get(None)
+    if not r or _num(r.get("y10")) is None:
+        # 月初本月还没有官方值（1 号落在周末、或第一个交易日还没发布）时本月那份是空的 ⇒ 补问一次上月最后一个工作日。
+        # 只问一次：取不到时 treasury_yields 不缓存失败，逐日回找会把一次断网放大成好几次 30 秒超时。
+        # 「本月」按**美东**算（v0.45.790 修）：`get_yield_curve(None)` 取的是美东当月；本机在太平洋，月末那天 21 点后美东已进下个月，
+        # 按本机日期算「上月」会问到上上个月（超过 7 天 ⇒ 根本不问），每月末晚上 3 小时取不到
+        ref = max(today, _et_today())
+        d = ref.replace(day=1) - timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        r = treasury_get(d.isoformat()) if (today - d).days <= RULES["max_yield_age_days"] else None
+    if not r or _num(r.get("y10")) is None:
+        return None
+    return {"date": str(r.get("date"))[:10], "y10": float(r["y10"])}
 
 
 def _fetch_usdc(yf_module, ensure: Callable[[], None]) -> List[dict]:
     import yf_daily
     ensure()
     hist, _ = yf_daily.history(yf_module.Ticker("USDC-USD"), source="alphabot_thesis_usdc",
-                               period=f"{int(RULES['usdc_window_days'])}d", interval="1h")
+                               period=f"{int(RULES['usdc_window_days']) + 2}d", interval="1h")   # 多取两天，窗口由 judge 截
     return _closes(hist, "t")
 
 
+# ───────────────────────────── 毛利率的官方补数：SEC 8-K 财报新闻稿（v0.45.796）
+#
+# Yahoo 在财报刚出的那几天会先建出新一季那一列、只填 EPS，收入 / 毛利是空的（2026-11-17 NVDA Q3 FY27 实测：
+# 11-20 仍空）⇒ 毛利率那条「数据不够」好几天。10-Q 的 XBRL 要几周后才提交；**当天就有、且是公司官方数的**
+# 是随 8-K（Item 2.02「经营业绩」）提交的新闻稿附件 99.1，里面有 GAAP 简明合并利润表。
+# 只在 Yahoo 最新一季**缺收入或毛利**时才去取，只补那两格；对不上就不补（照旧「数据不够」，并写明为什么没补上）。
+
+#: 只收要判毛利率的票（`CHECKS` 里 kind = gm_qoq_drop 的那几只；测试核对两边一致）
+SEC_CIK = {"NVDA": 1045810, "TSLA": 1318605}
+SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
+SEC_INDEX_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/index.json"
+SEC_DOC_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/{name}"
+#: SEC 要求自报身份的 User-Agent；这里只写工具名，不带任何个人信息
+SEC_UA = "AlphaHive-AlphaBot/1.0 (local research tool)"
+PR_RULES = {
+    "max_docs": 4,              # 一份 8-K 里最多试几个附件找利润表
+    "end_tol_days": 10,         # 新闻稿的季末与 Yahoo 那一列的日期最多差几天（Yahoo 按月末记，NVDA 季末是月底前的周日）
+    "filed_within_days": 120,   # 8-K 要在季末之后这么多天内提交，才算这一季的财报
+    "year_ago_tol": 0.005,      # 新闻稿「去年同季」一列与 Yahoo 那一季的收入 / 毛利最多差 0.5%
+}
+_MONTHS = {m: i for i, m in enumerate(("january", "february", "march", "april", "may", "june", "july", "august",
+                                       "september", "october", "november", "december"), 1)}
+_REV_LABELS = r"(?:Total revenues?|Total net revenues?|Net revenues?|Revenues?)"
+_COST_LABELS = r"(?:Total cost of revenues?|Cost of revenues?|Cost of sales|Total cost of sales)"
+
+
+def _default_sec_get(url: str) -> bytes:
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": SEC_UA, "Accept-Encoding": "identity"})
+    with urllib.request.urlopen(req, timeout=20) as r:   # noqa: S310 - 固定的 SEC 公开地址
+        return r.read()
+
+
+def _int(s: str) -> Optional[int]:
+    try:
+        return int(s.replace(",", ""))
+    except ValueError:
+        return None
+
+
+def parse_press_income(page: str) -> Optional[dict]:
+    """新闻稿 HTML → 利润表第一列（本季三个月）`{end, revenue, cost, gross_profit, ya_revenue, ya_gross_profit, unit}`。
+    金额已按表头的单位（百万 / 千）换成美元。找不到利润表、找不到三行、单位或日期认不出 ⇒ None（不猜）。纯函数。"""
+    import html as _html
+    import re
+    txt = re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", " ", page or "")))
+    m = re.search(r"(?i)statements? of (?:income|operations)", txt)
+    if not m:
+        return None
+    body = txt[m.end():m.end() + 6000]
+    unit = 1e6 if re.match(r"(?i)\s*\(\s*in millions", body) else 1e3 if re.match(r"(?i)\s*\(\s*in thousands", body) else None
+    hm = re.search(r"(?i)three months ended", body)
+    if unit is None or not hm:
+        return None
+    dm = re.search(r"(?i)\b(" + "|".join(_MONTHS) + r")\s+(\d{1,2}),", body[hm.end():])
+    ym = re.search(r"\b(20\d\d)\b", body[hm.end():])
+    if not dm or not ym:
+        return None
+    try:
+        end = date(int(ym.group(1)), _MONTHS[dm.group(1).lower()], int(dm.group(2)))
+    except ValueError:
+        return None
+    num = r"\$?\s*\(?([\d,]+)\)?"
+
+    def row(labels):
+        r = re.search(r"(?<![A-Za-z])" + labels + r"\s+" + num + r"\s+" + num, body)
+        return (_int(r.group(1)), _int(r.group(2))) if r else (None, None)
+
+    rev, cost, gp = row(_REV_LABELS), row(_COST_LABELS), row(r"Gross (?:profit|margin)")
+    if None in rev + cost + gp:
+        return None
+    return {"end": end.isoformat(), "revenue": rev[0] * unit, "cost": cost[0] * unit, "gross_profit": gp[0] * unit,
+            "ya_revenue": rev[1] * unit, "ya_gross_profit": gp[1] * unit, "unit": unit}
+
+
+def check_press_income(pr: dict, yahoo_end: str, year_ago: Optional[dict]) -> Optional[str]:
+    """新闻稿解析结果能不能用来补 Yahoo `yahoo_end` 那一季：能 ⇒ None；不能 ⇒ 原因（人话）。纯函数。"""
+    if abs(pr["revenue"] - pr["cost"] - pr["gross_profit"]) > pr["unit"]:   # 表里是取整到单位的数，允许差 1 个单位
+        return f"新闻稿里收入 − 成本 ≠ 毛利（{pr['revenue']:,.0f} − {pr['cost']:,.0f} ≠ {pr['gross_profit']:,.0f}），可能读错了行"
+    a, b = _d(pr["end"]), _d(yahoo_end)
+    if not (a and b) or abs((a - b).days) > PR_RULES["end_tol_days"]:
+        return f"新闻稿的季末 {pr['end']} 对不上 Yahoo 那一季 {yahoo_end}"
+    if not 0 < pr["gross_profit"] < pr["revenue"]:
+        return "新闻稿里的毛利不在 (0, 收入) 之间"
+    if year_ago:   # Yahoo 有去年同季就对一下新闻稿第二列：对上 ⇒ 读的是同一张表的同一口径
+        tol = PR_RULES["year_ago_tol"]
+        for k, ya in (("revenue", "ya_revenue"), ("gross_profit", "ya_gross_profit")):
+            y = _num(year_ago.get(k))
+            if y and abs(pr[ya] / y - 1) > tol:
+                return f"新闻稿「去年同季」的{'收入' if k == 'revenue' else '毛利'}与 Yahoo {year_ago['end']} 那季差了 {abs(pr[ya] / y - 1) * 100:.1f}%"
+    return None
+
+
+def _press_release(ticker: str, after: date, sec_get: Callable[[str], bytes]) -> Tuple[Optional[dict], Optional[str]]:
+    """季末 `after` 之后提交的最近一份 Item 2.02 8-K 里的利润表 → `(解析结果 + filed/doc, None)` 或 `(None, 原因)`。"""
+    import json
+    cik = SEC_CIK.get(ticker)
+    if cik is None:
+        return None, "这只票没登记 SEC 编号"
+    rec = (json.loads(sec_get(SEC_SUBMISSIONS_URL.format(cik=cik))).get("filings") or {}).get("recent") or {}
+    forms, dates, items, accs, prims = (list(rec.get(k) or []) for k in ("form", "filingDate", "items", "accessionNumber", "primaryDocument"))
+    hits = []
+    for i, form in enumerate(forms):
+        filed = _d(dates[i]) if i < len(dates) else None
+        its = [x.strip() for x in str(items[i] or "").split(",")] if i < len(items) else []
+        if form == "8-K" and "2.02" in its and filed and i < len(accs) and 0 <= (filed - after).days <= PR_RULES["filed_within_days"]:
+            hits.append((filed, accs[i], prims[i] if i < len(prims) else ""))
+    if not hits:
+        return None, f"SEC 上还没有 {after.isoformat()} 之后提交的财报 8-K"
+    filed, acc, primary = max(hits)
+    acc_dir = acc.replace("-", "")
+    names = [x.get("name", "") for x in (json.loads(sec_get(SEC_INDEX_URL.format(cik=cik, acc=acc_dir))).get("directory") or {}).get("item") or []]
+    import re
+    docs = [n for n in names if n.lower().endswith((".htm", ".html")) and n != primary
+            and not re.match(r"(?i)^r\d+\.htm$", n) and "index" not in n.lower()]
+    docs.sort(key=lambda n: (not re.search(r"(?i)(pr\b|pr\.|press|ex-?99)", n), n))   # 像新闻稿的先试
+    for name in docs[:PR_RULES["max_docs"]]:
+        pr = parse_press_income(sec_get(SEC_DOC_URL.format(cik=cik, acc=acc_dir, name=name)).decode("utf-8", "replace"))
+        if pr:
+            return pr | {"filed": filed.isoformat(), "doc": name, "accession": acc}, None
+    return None, f"{filed.isoformat()} 那份 8-K 的附件里没认出利润表"
+
+
+def fill_income_from_press(rows: List[dict], ticker: str, sec_get: Callable[[str], bytes]) -> List[dict]:
+    """Yahoo 最新一季缺收入或毛利 ⇒ 试着用 SEC 8-K 新闻稿补那两格。补上 ⇒ 那一行带 `source`；没补上 ⇒ 带 `fill_note`
+    （判定时写进「数据不够」的说明里，不让「为什么没补上」消失）。永不抛：取 SEC 出错同样记进 `fill_note`。"""
+    if not rows:
+        return rows
+    cur = rows[0]
+    if (_num(cur.get("revenue")) or 0) > 0 and _num(cur.get("gross_profit")) is not None:
+        return rows
+    end = _d(cur.get("end"))
+    if end is None:
+        return rows
+    try:
+        pr, why = _press_release(ticker, end - timedelta(days=PR_RULES["end_tol_days"]), sec_get)
+    except Exception as exc:  # noqa: BLE001 - 补不上照旧「数据不够」，原因写给页面
+        pr, why = None, f"取 SEC 出错（{type(exc).__name__}）"
+    if pr:
+        ya = next((r for r in rows[1:] if (d := _d(r.get("end"))) and 340 <= (end - d).days <= 390), None)
+        why = check_press_income(pr, cur["end"], ya)
+    if why:
+        return [cur | {"fill_note": why}] + rows[1:]
+    src = f"SEC 8-K 财报新闻稿（{pr['doc']}，{pr['filed']} 提交，季末 {pr['end']}）"
+    return [cur | {"revenue": pr["revenue"], "gross_profit": pr["gross_profit"], "source": src}] + rows[1:]
+
+
 STABLES_URL = "https://stablecoins.llama.fi/stablecoins?includePrices=false"
+#: 发行方 Circle 的公开接口：各链 USDC 流通量与合计（免 key）
+CIRCLE_URL = "https://api.circle.com/v1/stablecoins"
+
+
+def _default_http_get(url: str) -> dict:
+    import json
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "alpha-hive/1.0"})
+    with urllib.request.urlopen(req, timeout=20) as r:   # noqa: S310 - 固定的公开 https 地址
+        return json.load(r)
+
+
+def _circle(http_get: Optional[Callable[[str], dict]]) -> Optional[dict]:
+    """Circle 公布的 USDC 流通量 `{usdc, chains, as_of}`（`as_of` = 各链里最近一次更新的日期，UTC）；没有 USDC 这一项 → None。"""
+    d = (http_get or _default_http_get)(CIRCLE_URL)
+    for a in (d or {}).get("data") or []:
+        if (a or {}).get("symbol") != "USDC":
+            continue
+        v = _num(a.get("totalAmount"))
+        chains = [c for c in (a.get("chains") or []) if isinstance(c, dict)]
+        upd = max((str(c.get("updateDate") or "") for c in chains), default="")
+        return {"usdc": v, "chains": len(chains), "as_of": upd[:10] or None} if v and v > 0 else None
+    return None
 
 
 def _stables(http_get: Optional[Callable[[str], dict]], today: date) -> dict:
-    if http_get is None:
-        import json
-        import urllib.request
-
-        def http_get(url):  # noqa: E306
-            req = urllib.request.Request(url, headers={"User-Agent": "alpha-hive/1.0"})
-            with urllib.request.urlopen(req, timeout=20) as r:   # noqa: S310 - 固定的公开 https 地址
-                return json.load(r)
-    d = http_get(STABLES_URL)
+    d = (http_get or _default_http_get)(STABLES_URL)
     total, usdc, n = 0.0, None, 0
     for a in (d or {}).get("peggedAssets") or []:
         v = _num(((a or {}).get("circulating") or {}).get("peggedUSD"))
@@ -519,14 +740,21 @@ def _stables(http_get: Optional[Callable[[str], dict]], today: date) -> dict:
     return {"usdc": usdc, "total": total, "n_assets": n, "as_of": today.isoformat()}
 
 
-def fetch_part(part: str, ticker: str, *, today: date, yf_module=None, http_get=None) -> Tuple[object, dict]:
+def fetch_part(part: str, ticker: str, *, today: date, yf_module=None, http_get=None,
+               treasury_get=None, sec_get=None) -> Tuple[object, dict]:
     """`(数据, {reason, retry_after_sec?, detail?})`；`reason` 为 None = 取到了。永不抛。
-    `yf_module` / `http_get` 只给测试注入（注入 `yf_module` 时不装限流闸）。"""
+    `yf_module` / `http_get` / `treasury_get` / `sec_get` 只给测试注入（注入 `yf_module` 时不装限流闸；
+    注入了 `yf_module` 而没给 `sec_get` ⇒ 不去 SEC 补毛利，测试不出网）。"""
+    if sec_get is None and yf_module is None:
+        sec_get = _default_sec_get
     gated: Callable = lambda fn, what: fn()   # noqa: E731
     ensure: Callable[[], None] = lambda: None  # noqa: E731
     try:
         if part == "@stables":
             return _stables(http_get, today), {"reason": None}
+        if part in ("@circle", "@ust10"):
+            got = _circle(http_get) if part == "@circle" else _fetch_ust10(treasury_get, today)
+            return (got, {"reason": None}) if got else (None, {"reason": "empty"})
         if yf_module is None:
             import yfinance as yf_module  # noqa: PLC0415
             try:
@@ -534,12 +762,12 @@ def fetch_part(part: str, ticker: str, *, today: date, yf_module=None, http_get=
                 gated, ensure = yf_gate.gated_call, yf_gate.ensure
             except Exception:  # noqa: BLE001 - 闸门不可得不阻断（与 price_ohlc / beta_long 同）
                 pass
-        if part == "@tnx":
-            rows = _fetch_tnx(yf_module, ensure)
-        elif part == "@usdc":
+        if part == "@usdc":
             rows = _fetch_usdc(yf_module, ensure)
         else:
             rows = _part(yf_module, gated, part, ticker)
+            if part == "income" and sec_get is not None:
+                rows = fill_income_from_press(rows, ticker, sec_get)
         # 空表不当「取到了」：yfinance 被限流时有的成员不抛、只给空表——当成功缓存 6 小时，页面就一直「数据不够」
         return (rows, {"reason": None}) if rows else (None, {"reason": "empty"})
     except Exception as exc:  # noqa: BLE001 - 取不到只是这几条判不了，页面照实写

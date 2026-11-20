@@ -312,7 +312,7 @@ def _catalysts(r: dict, spot: Optional[float]) -> dict:
 def _options(r: dict, opt: dict) -> dict:
     """期权要点：读数本身在 `opt`（`options_compare.day_view`）；这里只补 gamma 环境。完整的日间对比在「对比」页，不在这里再摆一遍。"""
     gex = r.get("gex_state") if isinstance(r.get("gex_state"), dict) else {}
-    read = dict(opt) | {"flows": opt["flows"][: int(RULES["flows_shown"])]}
+    read = OC.public_view(opt) | {"flows": opt["flows"][: int(RULES["flows_shown"])]}
     return {"read": read,
             "gex": {"available": bool(gex.get("available")), "reason": gex.get("reason"), "regime": gex.get("regime"),
                     "flip": _num(gex.get("gex_flip")), "call_wall": _num(gex.get("largest_call_wall")),
