@@ -6,6 +6,7 @@ import { strikeBars, gammaCurve, lines, columns, payoff, candles, C } from "../c
 import { minutePrice } from "./price_minute.js";
 import { premium } from "./premium.js";
 import { volume } from "./volume.js";
+import { flow } from "./flow.js";
 import { howtoPanel } from "./howto.js";
 import { state, tickers, refreshMeta } from "../app.js";
 import { createRetryGate } from "../retry_gate.js";
@@ -16,8 +17,8 @@ const RETRY_NOTE = {
   manual: "过一会儿再点「重新拉取」。",
   none: "",
 };
-const TABS = [["levels", "水平"], ["greeks", "希腊值"], ["term", "期限"], ["sell", "卖权"], ["premium", "溢价"], ["volume", "成交"], ["price", "价格"]];
-const TAB_HELP = { levels: "levels", greeks: "greeks", term: "greeks", sell: "sell", premium: "premium", volume: "volume", price: "price" };
+const TABS = [["levels", "水平"], ["greeks", "希腊值"], ["term", "期限"], ["sell", "卖权"], ["premium", "溢价"], ["volume", "成交"], ["flow", "资金"], ["price", "价格"]];
+const TAB_HELP = { levels: "levels", greeks: "greeks", term: "greeks", sell: "sell", premium: "premium", volume: "volume", flow: "flow", price: "price" };
 const VIEWS = [["next_expiry", "下一到期"], ["le_45dte", "≤45 天（路由用）"], ["full", "全部到期"]];
 
 // Yahoo 限流时页面每一轮限流**自动重试一次**（等多久由服务端给的冷却剩余决定）：连着撞只会多挨几条 429，之后让用户自己点「重新拉取」。
@@ -74,7 +75,7 @@ export async function renderTicker(root, t, tab, alive, force = false) {
     TABS.map(([k, label]) => h("a", { href: `#/t/${t}/${k}`, "aria-current": k === tab ? "page" : null }, label)));
   const body = h("div", {});
   fill(main, head, tabs, body);
-  const draw = { levels, greeks, term, sell, premium, volume, price }[tab] || levels;
+  const draw = { levels, greeks, term, sell, premium, volume, flow, price }[tab] || levels;
   await draw(body, d, t, alive, force);
 }
 

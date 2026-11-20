@@ -150,6 +150,10 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         return svc.volume_board(request.path_params["ticker"], dict(request.query_params))
 
     @api
+    def money_flow(request):
+        return svc.money_flow(request.path_params["ticker"], refresh=_q(request, "refresh") == "1")
+
+    @api
     def sector_map(request):
         return svc.sector_map(refresh=_q(request, "refresh") == "1")
 
@@ -312,6 +316,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/premium/{ticker}", premium),
         Route("/api/volume-board/{ticker}", volume_board),
         Route("/api/sector-map", sector_map),
+        Route("/api/money-flow/{ticker}", money_flow),
         Route("/api/method", method),
         Route("/api/intraday/{ticker}", intraday),
         Route("/api/intraday-heat/{ticker}", intraday_heat),
