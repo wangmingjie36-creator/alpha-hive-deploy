@@ -575,7 +575,8 @@ def _bid_zero_ask_only(q: Optional[dict]) -> bool:
     return _pos(q.get("ask")) is not None
 
 
-def _exit_executable(side: str, qc: Optional[dict], qp: Optional[dict]) -> Tuple[bool, List[str]]:
+def _exit_executable(side: str, qc: Optional[dict], qp: Optional[dict], *,
+                     allow_bid0: bool = True) -> Tuple[bool, List[str]]:
     """平仓这一步**成交**得了吗（与盯市要不要 mid 是两回事，v0.45.787）。返回 (可成交, 按 ask 买回的 bid=0 腿)。
 
     账本的成交约定本来就是镜像（`exit_fills`）：short 按 ask 买回、long 按 bid 卖出。short 买回只需要对手方的**卖价**，
@@ -584,6 +585,10 @@ def _exit_executable(side: str, qc: Optional[dict], qp: Optional[dict]) -> Tuple
     （NVDA 2026-11-18 / 19，见 experiments/ 与 memory `alpha-hive-straddle-entry-rules.md`）。
 
     - 只放宽 **short**：现行规则不开 long（`trade_cheap=False`），long 的 bid=0 腿成交价是 0，语义另议，仍须 `quote_ok`。
+    - 只放宽**未到期**（`allow_bid0=False` ⇒ 退回两腿都须 `quote_ok`，v0.45.789）：v0.45.449 留下的缺口是「未到期取不到报价
+      一律等」；到期当天设计本来就有答案——到期那一场的收盘算内在价值（合约的真实结算价）。放宽到到期当天等于对一条没价值的腿
+      再付一次 ask、并把当晚无定稿收盘的「延期一天」变成当晚按 ask 平，是改口径不是补缺口（0.45.787 漏限定，探针实测 8.15 vs 8.0）。
+      调用方传 `allow_bid0=not expired`。
     - 没有 ask（None / 0）⇒ 不可成交，照旧等待——**不编价**（不取 ask/2、不按 0 估）。
     - `_quote_ok` 本身不动：盯市（mark）与入场的点差口径都建在它上面。"""
     legs = (("call", qc), ("put", qp))
@@ -591,7 +596,7 @@ def _exit_executable(side: str, qc: Optional[dict], qp: Optional[dict]) -> Tuple
     for name, q in legs:
         if _quote_ok(q):
             continue
-        if side == "short" and _bid_zero_ask_only(q):
+        if allow_bid0 and side == "short" and _bid_zero_ask_only(q):
             bid0.append(name)
             continue
         return False, []
@@ -876,7 +881,10 @@ def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
         rec = None
         # v0.45.787：成交约定本来就是镜像（short 按 ask 买回），不需要 mid——平仓只问「成交得了吗」，不再借盯市的 `ok`。
         # 一条腿 bid=0 但有 ask 的 short：按 ask 平（`exit_bid0_legs` 记下是哪条腿）；没有 ask ⇒ 照旧等，不编价。
-        executable, bid0_legs = _exit_executable(pos.side, qc, qp)
+        # v0.45.789：只放宽**未到期**——到期当天（to_expiry ≤ 0）仍须两腿 quote_ok，否则落到下面的内在价值结算。
+        # 到期日无法解析（to_expiry 为 None）⇒ 与下面 `expired` 一样视为未到期。
+        executable, bid0_legs = _exit_executable(pos.side, qc, qp,
+                                                 allow_bid0=not (to_expiry is not None and to_expiry <= 0))
         if executable:
             xc, xp = exit_fills(pos.side, qc, qp)
             if xc is not None:

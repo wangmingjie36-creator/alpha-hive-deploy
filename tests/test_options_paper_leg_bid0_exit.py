@@ -116,6 +116,57 @@ class TestNoExecutablePriceStillWaits:
         assert r["exit_blocked"][0]["since"] == "2026-09-21"
 
 
+class TestOnlyBeforeExpiry:
+    """v0.45.789：放宽只补「未到期取不到价就等」的缺口。到期当天设计本来就有答案——到期那一场的收盘算内在价值（真实结算价），
+    0.45.787 漏限定：到期当天 bid=0 腿也按 ask 平（探针 8.15 vs 内在价值 8.0），当晚无定稿收盘时还把「延期一天」变成当晚就平。
+    夹具：short K=100、到期 2026-10-02；看涨腿 bid=0 / ask=0.05，看跌腿 7.9 / 8.1；到期日收盘 92 ⇒ 内在价值 |92−100| = 8.0。"""
+
+    EXPIRY_DAY, DAY_BEFORE = "2026-10-02", "2026-10-01"
+    LEGS = {CALL: _q0(0.05), PUT: _q(7.9, 8.1)}
+
+    @staticmethod
+    def _final(tk, d):
+        return {"price": 92.0, "session": d, "source": "t", "reason": None}
+
+    @staticmethod
+    def _no_final(tk, d):
+        return {"price": None, "session": None, "source": None, "reason": "no_final_bar"}
+
+    def _go(self, day, closes_fn, legs=None):
+        _open_short()
+        return opl.run_for_date(day, quotes_fn=_quotes_fn(legs or self.LEGS), signals=[], closes_fn=closes_fn)
+
+    def test_day_before_expiry_still_closes_at_ask(self):
+        r = self._go(self.DAY_BEFORE, self._final)
+        (t,) = r["closed_today"]
+        assert t["mark_source"] == "cboe_mid" and t["exit_premium"] == pytest.approx(0.05 + 8.1)
+        assert t["exit_bid0_legs"] == ["call"]
+
+    def test_expiry_day_goes_to_intrinsic_not_ask(self):
+        r = self._go(self.EXPIRY_DAY, self._final)
+        (t,) = r["closed_today"]
+        assert t["mark_source"] == "intrinsic" and t["exit_premium"] == pytest.approx(8.0)
+        assert "exit_bid0_legs" not in t and t["exit_underlying"] == 92.0
+
+    def test_expiry_evening_without_final_close_defers_like_before(self):
+        """到期当晚本源无定稿收盘（设计内）：延期一天，不是当晚就按 ask 平。"""
+        r = self._go(self.EXPIRY_DAY, self._no_final)
+        assert r["closed_today"] == [] and len(r["positions"]) == 1
+        assert len(r["settle_deferred"]) == 1 and r["exit_blocked"] == []
+
+    def test_expiry_day_with_two_good_legs_is_unchanged(self):
+        """存量行为：到期当天两腿都有正常双边报价照旧按报价平（本版不统一到期当天口径）。"""
+        r = self._go(self.EXPIRY_DAY, self._final, legs={CALL: _q(0.04, 0.06), PUT: _q(7.9, 8.1)})
+        (t,) = r["closed_today"]
+        assert t["mark_source"] == "cboe_mid" and t["exit_premium"] == pytest.approx(0.06 + 8.1)
+        assert "exit_bid0_legs" not in t
+
+    def test_allow_bid0_false_falls_back_to_quote_ok(self):
+        assert opl._exit_executable("short", _q0(0.05), GOOD_PUT, allow_bid0=False) == (False, [])
+        assert opl._exit_executable("short", _q0(0.05), GOOD_PUT, allow_bid0=True) == (True, ["call"])
+        assert opl._exit_executable("short", _q(0.9, 1.1), GOOD_PUT, allow_bid0=False) == (True, [])
+
+
 class TestScopeIsNarrow:
     def test_not_yet_due_is_neither_closed_nor_flagged(self):
         """事件前 bid=0（平仓条件没触发）：不平、不记 blocked——盯市的事，行为与此前相同。"""
