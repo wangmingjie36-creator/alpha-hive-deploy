@@ -387,7 +387,7 @@ class AlphaBotService:
                       "minute_fetches": 0, "minute_cache_hits": 0, "minute_failures": 0,
                       "thesis_fetches": 0, "thesis_cache_hits": 0, "thesis_failures": 0,
                       "sector_quote_fetches": 0, "sector_cache_hits": 0, "sector_failures": 0,
-                      "sector_holdings_fetches": 0, "sector_etf_fetches": 0}
+                      "sector_holdings_fetches": 0, "sector_etf_fetches": 0, "sector_etf_gaps": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -786,14 +786,18 @@ class AlphaBotService:
         return data, None
 
     def _sector_etf_closes(self) -> Tuple[Optional[dict], Optional[dict]]:
-        """SPY + 板块基金的日线：`(日线 | None, 说明 | None)`。按「最近一场已收盘」缓存；取不到 / 缺了几只 ⇒ 说明里写原因，
-        冷却期内不再去撞（限流时按闸门冷却剩余）。日线没取到不影响色块图，只是那排的 5 日 / 1 月写不出来。"""
-        key = self._completed_session() or market_session(self.now_fn())["date_et"]
+        """SPY + 板块基金的日线：`(日线 | None, 说明 | None)`。按**美东日期**缓存，一天取一次；取不到 / 缺了几只 ⇒ 说明里写原因，
+        冷却期内不再去撞（限流时按闸门冷却剩余）。日线没取到不影响色块图，只是那排的 5 日 / 1 月写不出来。
+
+        为什么按日期、不按「最近一场已收盘」（v0.45.797 二次检查）：只用「这一场之前」的收盘，早上取到的那份到收盘后照样够用，
+        收盘那一刻不必再取一遍；而每天换一份，除息日当天拿到的就是 Yahoo 已经按这次分红复权过的历史（否则那天的数会少一个股息率）。
+        「完整」只认 12 只都在——被限流时回来的半份不许当成完整的（原来只看有没有记 errors，限流那条路上 errors 是空的）。"""
+        key = market_session(self.now_fn())["date_et"]
+        want = {SM.BENCH, *SM.SECTORS}
         ent, now = self._sector_etf, self.clock()
-        whole = ent is not None and ent[0] == key and not (ent[2] or {}).get("errors")
-        if whole:
+        if ent is not None and ent[0] == key and want <= set(ent[1]):
             return ent[1], None
-        # 手上那份：同一场次的（缺了几只）可以拿来补；更早场次的只在这次整体取不到时顶一下——它少了最近的收盘，
+        # 手上那份：同一天的（缺了几只）可以拿来补；更早的只在这次整体取不到时顶一下——它少了最近的收盘，
         # 往回数会差一天，由 `lookback_change` 的交易日数核对拦成 `bars_gap`，不会出错数
         cur = ent[1] if ent is not None else None
         same = ent is not None and ent[0] == key
@@ -809,10 +813,15 @@ class AlphaBotService:
         except Exception as e:  # noqa: BLE001 - 注入的取数函数也不许把页面打挂
             data, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
         meta = dict(meta or {})
-        if data is not None and cur and same:           # 这次缺的几只沿用同一场次里先前取到的
+        if data is not None and cur and same:           # 这次缺的几只沿用同一天里先前取到的
             data = {**cur, **data}
             meta["errors"] = {s: e for s, e in (meta.get("errors") or {}).items() if s not in data}
-        bad = data is None or meta.get("reason") or meta.get("errors")
+        if data is not None and want <= set(data):      # 补齐了：先前那次的限流 / 报错不再算数
+            meta["reason"], meta["errors"] = None, {}
+        elif data is not None:                          # 没点名的缺口（限流后没去取的那几只）也要写出来
+            meta["errors"] = {s: (meta.get("errors") or {}).get(s) or meta.get("reason") or "missing"
+                              for s in sorted(want - set(data))}
+        bad = data is None or not want <= set(data)
         if bad:
             self.stats["sector_failures"] += 1
             wait = SM.RULES["etf_fail_ttl_sec"]
@@ -826,6 +835,16 @@ class AlphaBotService:
         if data is not None:
             self._sector_etf = (key, data, meta)
         return (data if data is not None else cur), self._sector_etf_note
+
+    def _sector_etf_gap_seen(self) -> None:
+        """这一份日线算出了 `bars_gap`（往回数的交易日数对不上——多半是取的时候 Yahoo 还没放出最近一场的那根）：
+        过冷却期后重取一次，别让那排的 5 日 / 1 月空一整天。真是日历对不上（临时休市）时会每个冷却期重取一次，页面照样写原因。"""
+        ent, now = self._sector_etf, self.clock()
+        if ent is None or ent[0] is None or now < self._sector_etf_retry_at:
+            return
+        self._sector_etf = (None, ent[1], ent[2])       # 键作废 ⇒ 冷却期后 `_sector_etf_closes` 会重取；期间沿用这一份
+        self._sector_etf_retry_at = now + SM.RULES["etf_fail_ttl_sec"]
+        self.stats["sector_etf_gaps"] += 1
 
     def sector_map(self, refresh: bool = False) -> dict:
         """标普 500 板块热力图：成分与面积取 SPY 持仓文件、板块取 11 只板块 SPDR 的持仓文件、涨跌取 Yahoo 报价
@@ -879,6 +898,9 @@ class AlphaBotService:
             closes, enote = self._sector_etf_closes()
             body = SM.build(holdings, ent[1], watchlist=self.watchlist()["tickers"], etf_closes=closes,
                             is_trading=_is_trading_iso)
+            blocks = [body["bench"], *(s["etf"] for s in body["sectors"] if s.get("etf"))]
+            if any(b.get(f"{SM.PERIODS[k]['field']}_reason") == "bars_gap" for b in blocks for k in SM.ETF_LOOKBACK):
+                self._sector_etf_gap_seen()
             return clean_json(base | body | {
                 "available": True, "session": sess, "refresh_sec": SM.RULES["quote_ttl_live_sec"],
                 "quotes": {"fetched_at": ent[2], "age_sec": round(now - ent[0], 0),

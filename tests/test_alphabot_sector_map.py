@@ -394,27 +394,64 @@ class TestEtfBarsCache:
         def ef(symbols):
             calls.append(list(symbols))
             return results[min(len(calls), len(results)) - 1]
-        return env.svc(sector_etf_fn=ef, completed_session_fn=lambda: env.done), calls
+        return env.svc(sector_etf_fn=ef), calls
 
-    def test_one_fetch_per_completed_session(self, tmp_path):
+    ALL = [SM.BENCH, *SM.SECTORS]
+
+    def test_one_fetch_per_eastern_day(self, tmp_path):
         env = _Env(tmp_path)
-        env.done = "2026-11-18"
-        full = ({s: _bars() for s in [SM.BENCH, *SM.SECTORS]}, {"reason": None, "errors": {}})
+        full = ({s: _bars() for s in self.ALL}, {"reason": None, "errors": {}})
         svc, calls = self._svc(env, [full])
         r = svc.sector_map()
-        assert calls == [[SM.BENCH, *SM.SECTORS]] and r["etf_bars"] == {"available": True, "n": 12, "errors": {}, "refresh_failed": None}
+        assert calls == [self.ALL] and r["etf_bars"] == {"available": True, "n": 12, "errors": {}, "refresh_failed": None}
         assert r["bench"]["change_5d"] is not None
         env.t += 3 * 3600
+        env.now = datetime(2026, 11, 19, 16, 30, tzinfo=NY)      # 收盘后：只用「这一场之前」的收盘，早上那份照样够用
         svc.sector_map()
-        assert len(calls) == 1                                   # 同一场次：一整天不再取
-        env.done = "2026-11-19"
+        assert len(calls) == 1
+        env.t += 9 * 3600
+        env.now = datetime(2026, 11, 20, 8, 0, tzinfo=NY)        # 换了一天 ⇒ 取一次新的（除息日拿到的是复权过的历史）
         svc.sector_map()
-        assert len(calls) == 2                                   # 收盘换了场次 ⇒ 取一次新的
+        assert len(calls) == 2
+
+    def test_rate_limited_half_is_not_taken_for_whole(self, tmp_path):
+        """限流那条路回来的是「取到的几只 + reason」、errors 是空的——不许把这半份当成完整的一份用一整天。"""
+        env = _Env(tmp_path)
+        half = ({"SPY": _bars(), "XLK": _bars()}, {"reason": "rate_limited", "retry_after_sec": 180.0, "errors": {}})
+        full = ({s: _bars() for s in self.ALL}, {"reason": None, "errors": {}})
+        svc, calls = self._svc(env, [half, full])
+        r = svc.sector_map()
+        assert r["etf_bars"]["refresh_failed"]["reason"] == "rate_limited" and r["etf_bars"]["n"] == 2
+        assert set(r["etf_bars"]["errors"]) == set(self.ALL) - {"SPY", "XLK"}       # 没去取的那几只也点名
+        assert r["bench"]["change_5d"] is not None               # 取到的照常出数
+        env.t += 179
+        svc.sector_map()
+        assert len(calls) == 1                                   # 闸门冷却期内不去撞
+        env.t += 2
+        r = svc.sector_map()
+        assert len(calls) == 2 and r["etf_bars"] == {"available": True, "n": 12, "errors": {}, "refresh_failed": None}
+        env.t += 3600
+        svc.sector_map()
+        assert len(calls) == 2                                   # 补齐之后才算完整、不再取
+
+    def test_a_gap_triggers_one_refetch_per_cooldown(self, tmp_path):
+        """取的时候 Yahoo 还没放出最近一场那根 ⇒ `bars_gap`；过冷却期重取一次，别空一整天。"""
+        env = _Env(tmp_path)
+        stale = ({s: _bars(last="2026-11-17") for s in self.ALL}, {"reason": None, "errors": {}})
+        full = ({s: _bars() for s in self.ALL}, {"reason": None, "errors": {}})
+        svc, calls = self._svc(env, [stale, full])
+        r = svc.sector_map()
+        assert r["bench"]["change_5d"] is None and r["bench"]["change_5d_reason"] == "bars_gap"
+        env.t += SM.RULES["etf_fail_ttl_sec"] - 1
+        svc.sector_map()
+        assert len(calls) == 1
+        env.t += 2
+        r = svc.sector_map()
+        assert len(calls) == 2 and r["bench"]["change_5d"] is not None and svc.stats["sector_etf_gaps"] == 1
 
     def test_failure_is_visible_and_cools_down(self, tmp_path):
         env = _Env(tmp_path)
-        env.done = "2026-11-18"
-        part = ({"SPY": _bars()}, {"reason": None, "errors": {"XLK": "OSError"}})
+        part = ({s: _bars() for s in self.ALL if s != "XLK"}, {"reason": None, "errors": {"XLK": "OSError"}})
         svc, calls = self._svc(env, [(None, {"reason": "fetch_error", "detail": "x"}), part])
         r = svc.sector_map()
         assert r["available"] and r["etf_bars"]["available"] is False            # 色块图照画，只是那排的 5 日写不出来
