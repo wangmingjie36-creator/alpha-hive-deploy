@@ -458,7 +458,8 @@ export function sectorTreemap(el, { sectors, field, clamp, periodLabel, reasons 
     if (s) {
       return `<b>${esc(s.name)}</b><span class="tip-name"> ${esc(s.key === "_" ? "" : s.key)}</span>`
         + `<br>占标普 <b>${num(s.weight, 1)}%</b> · ${s.n} 只`
-        + (s.etf ? `<br>${esc(s.etf.symbol)} 今日 <b>${sgn(s.etf.change_1d)}</b> · 52 周 <b>${sgn(s.etf.change_52w, 1)}</b>` : "")
+        + (s.etf ? `<br>${esc(s.etf.symbol)} 今日 <b>${sgn(s.etf.change_1d)}</b> · 5 日 <b>${sgn(s.etf.change_5d)}</b>`
+          + `<br>1 月 <b>${sgn(s.etf.change_1m)}</b> · 52 周 <b>${sgn(s.etf.change_52w, 1)}</b>` : "")
         + `<br>成分加权今日 <b>${sgn(s.change_1d)}</b>`;
     }
     if (!k) return "";

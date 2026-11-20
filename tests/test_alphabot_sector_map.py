@@ -14,7 +14,7 @@ import ast
 import io
 import re
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -290,6 +290,151 @@ class TestFetch:
         assert data is None and meta["reason"] == "holdings_too_small"
 
 
+# ── 顶部那排的 5 日 / 1 月（v0.45.792）────────────────────────────────────────
+
+def _bars(last="2026-11-18", n=30, start=100.0, skip=()):
+    """到 `last` 为止的工作日收盘，共 n 个工作日、每天 +1（`last` 那天 = start + n − 1）；`skip` 里的日期不给（造缺口）。"""
+    out, d, v, seen = {}, datetime.fromisoformat(last).date(), start + n - 1, 0
+    while seen < n:
+        if d.weekday() < 5:
+            if d.isoformat() not in skip:
+                out[d.isoformat()] = v
+            v, seen = v - 1, seen + 1
+        d -= timedelta(days=1)
+    return out
+
+
+def _weekday(day):
+    return datetime.fromisoformat(day).weekday() < 5
+
+
+class TestLookback:
+    def test_counts_trading_days_back_from_the_session(self):
+        bars = _bars()                                           # 11-18 收 129，往前每个工作日少 1
+        v, base, why = SM.lookback_change(bars, 130.0, "2026-11-19", 5, _weekday)
+        assert (base, why) == ("2026-11-12", None) and v == pytest.approx((130 / 125 - 1) * 100, abs=0.01)
+        v, base, why = SM.lookback_change(bars, 130.0, "2026-11-19", 21, _weekday)
+        assert (base, why) == ("2026-10-21", None) and v == pytest.approx((130 / 109 - 1) * 100, abs=0.01)
+
+    def test_todays_forming_bar_is_not_the_base_or_counted(self):
+        bars = _bars() | {"2026-11-19": 999.0}                   # 盘中 Yahoo 会带上今天没走完的那根
+        assert SM.lookback_change(bars, 130.0, "2026-11-19", 5, _weekday)[1] == "2026-11-12"
+
+    def test_a_missing_bar_gives_no_number_instead_of_a_shifted_one(self):
+        bars = _bars(skip=("2026-11-16",))                     # 中间缺一根 ⇒ 按位置数会数到 11-11 去
+        assert SM.lookback_change(bars, 130.0, "2026-11-19", 5, _weekday) == (None, "2026-11-11", "bars_gap")
+        assert SM.lookback_change(bars, 130.0, "2026-11-19", 5, None)[2] is None      # 没给日历 ⇒ 核不了（服务一定给）
+        stale = _bars(last="2026-11-17")                         # 日线少了最近一场（沿用了旧的一份）
+        assert SM.lookback_change(stale, 130.0, "2026-11-19", 5, _weekday)[2] == "bars_gap"
+
+        def boom(day):
+            raise RuntimeError("calendar")
+        assert SM.lookback_change(_bars(), 130.0, "2026-11-19", 5, boom)[2] == "bars_gap"   # 日历坏了 ⇒ 不出数
+
+    def test_reasons_are_registered(self):
+        cases = [(None, 130.0, "2026-11-19", "no_bars"), (_bars(n=3), 130.0, "2026-11-19", "too_few_bars"),
+                 (_bars(), None, "2026-11-19", "bad_price"), (_bars(), 130.0, None, "session_unknown")]
+        for bars, price, session, want in cases:
+            assert SM.lookback_change(bars, price, session, 5, _weekday) == (None, None, want)
+            assert want in SM.REASONS
+        assert "bars_gap" in SM.REASONS
+
+    def test_build_puts_them_on_the_etf_blocks_only(self):
+        h = _holdings([("AAPL", 8.0, "XLK"), ("JPM", 1.5, "XLF")])
+        q = {"AAPL": _quote(101.0, 100.0), "JPM": _quote(49.0, 50.0), "XLK": _quote(130.0, 129.0),
+             "XLF": _quote(11.0, 10.0, t=T_OLD), "SPY": _quote(130.0, 131.0)}
+        r = SM.build(h, q, etf_closes={"XLK": _bars(), "SPY": _bars()}, is_trading=_weekday)
+        by = {s["key"]: s for s in r["sectors"]}
+        assert by["XLK"]["etf"]["change_5d"] == pytest.approx(4.0) and by["XLK"]["etf"]["change_5d_base"] == "2026-11-12"
+        assert by["XLK"]["etf"]["change_1m"] == pytest.approx((130 / 109 - 1) * 100, abs=0.01)
+        assert r["bench"]["change_5d"] == pytest.approx(4.0)
+        # 这一场的报价不可用 ⇒ 现价不可信，5 日也不出，原因跟着报价走
+        assert by["XLF"]["etf"]["change_5d"] is None and by["XLF"]["etf"]["change_5d_reason"] == "stale_quote"
+        assert not any("change_5d" in k for s in r["sectors"] for k in s["children"])      # 成分股没有这两个周期
+        none = SM.build(h, q)                                    # 没接日线 ⇒ 字段在、值是空
+        assert none["bench"]["change_5d"] is None and none["bench"]["change_1m"] is None
+        assert {k for k, v in SM.PERIODS.items() if not v["map"]} == set(SM.ETF_LOOKBACK)
+
+    def test_fetch_tolerates_one_bad_symbol_and_stops_on_rate_limit(self):
+        pd = pytest.importorskip("pandas")
+
+        class YF:
+            def __init__(self, bad=(), limit_at=None):
+                self.bad, self.limit_at, self.asked = set(bad), limit_at, []
+
+            def Ticker(self, t):  # noqa: N802 - yfinance 的写法
+                outer = self
+
+                class _T:
+                    def history(self, **kw):
+                        outer.asked.append(t)
+                        if t == outer.limit_at:
+                            raise RuntimeError("Too Many Requests. Rate limited. Try after a while.")
+                        if t in outer.bad:
+                            raise OSError("boom")
+                        b = dict(sorted(_bars().items()))
+                        c = list(b.values())
+                        return pd.DataFrame({"Open": c, "High": c, "Low": c, "Close": c, "Volume": 1000.0,
+                                             "Dividends": 0.0, "Stock Splits": 0.0}, index=pd.to_datetime(list(b)))
+                return _T()
+        yf = YF(bad={"XLU"})
+        data, meta = SM.fetch_etf_closes([SM.BENCH, *SM.SECTORS], yf_module=yf)
+        assert set(data) == {SM.BENCH, *SM.SECTORS} - {"XLU"} and meta == {"reason": None, "errors": {"XLU": "OSError"}}
+        assert data["SPY"]["2026-11-18"] == 129.0 and len(yf.asked) == 12
+        yf = YF(limit_at="XLF")
+        data, meta = SM.fetch_etf_closes([SM.BENCH, *SM.SECTORS], yf_module=yf)
+        assert meta["reason"] == "rate_limited" and yf.asked[-1] == "XLF" and len(yf.asked) == 3     # 其后的不再去撞
+        assert set(data) == {"SPY", "XLK"}
+
+
+class TestEtfBarsCache:
+    def _svc(self, env, results):
+        calls = []
+
+        def ef(symbols):
+            calls.append(list(symbols))
+            return results[min(len(calls), len(results)) - 1]
+        return env.svc(sector_etf_fn=ef, completed_session_fn=lambda: env.done), calls
+
+    def test_one_fetch_per_completed_session(self, tmp_path):
+        env = _Env(tmp_path)
+        env.done = "2026-11-18"
+        full = ({s: _bars() for s in [SM.BENCH, *SM.SECTORS]}, {"reason": None, "errors": {}})
+        svc, calls = self._svc(env, [full])
+        r = svc.sector_map()
+        assert calls == [[SM.BENCH, *SM.SECTORS]] and r["etf_bars"] == {"available": True, "n": 12, "errors": {}, "refresh_failed": None}
+        assert r["bench"]["change_5d"] is not None
+        env.t += 3 * 3600
+        svc.sector_map()
+        assert len(calls) == 1                                   # 同一场次：一整天不再取
+        env.done = "2026-11-19"
+        svc.sector_map()
+        assert len(calls) == 2                                   # 收盘换了场次 ⇒ 取一次新的
+
+    def test_failure_is_visible_and_cools_down(self, tmp_path):
+        env = _Env(tmp_path)
+        env.done = "2026-11-18"
+        part = ({"SPY": _bars()}, {"reason": None, "errors": {"XLK": "OSError"}})
+        svc, calls = self._svc(env, [(None, {"reason": "fetch_error", "detail": "x"}), part])
+        r = svc.sector_map()
+        assert r["available"] and r["etf_bars"]["available"] is False            # 色块图照画，只是那排的 5 日写不出来
+        assert r["etf_bars"]["refresh_failed"]["reason"] == "fetch_error" and r["bench"]["change_5d"] is None
+        env.t += SM.RULES["etf_fail_ttl_sec"] - 1
+        svc.sector_map()
+        assert len(calls) == 1                                   # 冷却期内不再去撞
+        env.t += 2
+        r = svc.sector_map()
+        assert len(calls) == 2 and r["etf_bars"]["errors"] == {"XLK": "OSError"} and r["etf_bars"]["refresh_failed"] is None
+        assert r["bench"]["change_5d"] is not None
+        env.t += SM.RULES["etf_fail_ttl_sec"] + 1
+        svc.sector_map()
+        assert len(calls) == 3                                   # 缺了几只的那份也只当临时的
+
+    def test_not_fetched_when_bars_are_injected_without_it(self, tmp_path):
+        r = _Env(tmp_path).svc().sector_map()
+        assert r["available"] and r["etf_bars"]["available"] is False and r["bench"]["change_5d"] is None
+
+
 # ── 服务：缓存与请求量上限 ─────────────────────────────────────────────────────
 
 class _Env:
@@ -465,10 +610,16 @@ class TestWiring:
             elif isinstance(node, ast.ImportFrom):
                 mods.add((node.module or "").split(".")[0])
         assert mods <= {"__future__", "io", "re", "zipfile", "xml", "collections", "concurrent", "datetime", "typing",
-                        "zoneinfo", "alphabot", "urllib", "yfinance", "yf_gate"}, mods
+                        "zoneinfo", "alphabot", "urllib", "yfinance", "yf_gate", "yf_daily"}, mods
         code = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith(("#", "·", "⚠")))
         body = code.split('"""', 2)[2]                           # 模块说明里讲了为什么不用，代码里不许出现
-        assert ".download(" not in body and ".history(" not in body
+        assert ".download(" not in body
+        # 日线只有一处、只给 12 只基金（v0.45.792 顶部那排的 5 日 / 1 月）：成分股逐只取日线是实测过不行的那条路
+        assert body.count(".history(") == 1 and 'source="alphabot_sector_etf"' in body
+        import yf_daily
+        assert "alphabot_sector_etf" in yf_daily.SOURCES
+        svc = (ROOT / "alphabot" / "service.py").read_text(encoding="utf-8")
+        assert svc.count("fetch_etf_closes") == 1 and "fn([SM.BENCH, *SM.SECTORS])" in svc
 
     def test_only_service_imports_it(self):
         offenders = []

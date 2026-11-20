@@ -226,6 +226,12 @@ def market_session(now: Optional[datetime] = None) -> dict:
             "close": close_t.isoformat(timespec="minutes"), "live": live, "calendar": calendar}
 
 
+def _is_trading_iso(day: str) -> bool:
+    """`YYYY-MM-DD` 是不是交易日（`is_trading_day`）。日历坏了就抛——调用方（`sector_map.lookback_change`）按「判不了、不出数」处理。"""
+    import is_trading_day as itd
+    return bool(itd.is_trading_day(datetime.fromisoformat(day).date())[0])
+
+
 def _atomic_write_json(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=str(path.parent))
@@ -283,7 +289,7 @@ class AlphaBotService:
                  premium_root=None, beta_long_fn=None, wheel_prices_fn=None,
                  completed_session_fn: Optional[Callable[[], Optional[str]]] = None, compare_root=None,
                  ohlc_fn=None, minute_fn=None, thesis_fetch_fn=None, thesis_config_path=None,
-                 sector_holdings_fn=None, sector_quotes_fn=None):
+                 sector_holdings_fn=None, sector_quotes_fn=None, sector_etf_fn=None):
         self.fetch_fn = fetch_fn
         self.bars_fn = bars_fn or _default_bars
         # 价格页 K 线的开高低（v0.45.762）：`ohlc_fn(标的) -> ({日期: {open, high, low, close}}, {n, reason, …})`。
@@ -318,6 +324,13 @@ class AlphaBotService:
         self._sector_holdings_retry_at = 0.0
         self._sector_quotes: Optional[tuple] = None
         self._sector_quotes_fail: Optional[tuple] = None
+        # 顶部那排的 5 日 / 1 月（v0.45.792）：`sector_etf_fn(代码表) -> ({代码: {日期: 收盘}}, meta)`，接线规则同上。
+        # `_sector_etf` = `(已收盘场次, 日线, meta)`：场次没变就一直用（一天 12 个请求）；有基金没取到的那份与整体失败都过
+        # `etf_fail_ttl_sec` 再试
+        self.sector_etf_fn = sector_etf_fn
+        self._sector_etf: Optional[tuple] = None
+        self._sector_etf_note: Optional[dict] = None
+        self._sector_etf_retry_at = 0.0
         self._sector_lock = threading.Lock()
         # 盯盘（v0.45.764）：`{"ticker", "until"（self.clock() 时刻）}`；同一时刻只盯一只、后来的为准。只在内存里，重启即无。
         # `_watch_consumer`：有没有轮询线程在消费它（演示 / `--no-poll` 没有 ⇒ 续期照收，但如实回「不会拍」）
@@ -374,7 +387,7 @@ class AlphaBotService:
                       "minute_fetches": 0, "minute_cache_hits": 0, "minute_failures": 0,
                       "thesis_fetches": 0, "thesis_cache_hits": 0, "thesis_failures": 0,
                       "sector_quote_fetches": 0, "sector_cache_hits": 0, "sector_failures": 0,
-                      "sector_holdings_fetches": 0}
+                      "sector_holdings_fetches": 0, "sector_etf_fetches": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -761,6 +774,48 @@ class AlphaBotService:
             _log.warning("板块页：成分表写不进状态目录（%s）", e)
         return data, None
 
+    def _sector_etf_closes(self) -> Tuple[Optional[dict], Optional[dict]]:
+        """SPY + 板块基金的日线：`(日线 | None, 说明 | None)`。按「最近一场已收盘」缓存；取不到 / 缺了几只 ⇒ 说明里写原因，
+        冷却期内不再去撞（限流时按闸门冷却剩余）。日线没取到不影响色块图，只是那排的 5 日 / 1 月写不出来。"""
+        key = self._completed_session() or market_session(self.now_fn())["date_et"]
+        ent, now = self._sector_etf, self.clock()
+        whole = ent is not None and ent[0] == key and not (ent[2] or {}).get("errors")
+        if whole:
+            return ent[1], None
+        # 手上那份：同一场次的（缺了几只）可以拿来补；更早场次的只在这次整体取不到时顶一下——它少了最近的收盘，
+        # 往回数会差一天，由 `lookback_change` 的交易日数核对拦成 `bars_gap`，不会出错数
+        cur = ent[1] if ent is not None else None
+        same = ent is not None and ent[0] == key
+        note = self._sector_etf_note
+        if now < self._sector_etf_retry_at:
+            return cur, note
+        fn = self.sector_etf_fn or (SM.fetch_etf_closes if self._sector_default else None)
+        if fn is None:
+            return cur, {"reason": "no_fetcher"}
+        self.stats["sector_etf_fetches"] += 1
+        try:
+            data, meta = fn([SM.BENCH, *SM.SECTORS])
+        except Exception as e:  # noqa: BLE001 - 注入的取数函数也不许把页面打挂
+            data, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
+        meta = dict(meta or {})
+        if data is not None and cur and same:           # 这次缺的几只沿用同一场次里先前取到的
+            data = {**cur, **data}
+            meta["errors"] = {s: e for s, e in (meta.get("errors") or {}).items() if s not in data}
+        bad = data is None or meta.get("reason") or meta.get("errors")
+        if bad:
+            self.stats["sector_failures"] += 1
+            wait = SM.RULES["etf_fail_ttl_sec"]
+            if meta.get("reason") == "rate_limited" and isinstance(meta.get("retry_after_sec"), (int, float)):
+                wait = float(meta["retry_after_sec"])
+            self._sector_etf_retry_at = now + wait
+            self._sector_etf_note = meta if (data is None or meta.get("reason")) else {"reason": None, "errors": meta["errors"]}
+            _log.warning("板块页：板块基金日线没取全（%s）", meta)
+        else:
+            self._sector_etf_note = None
+        if data is not None:
+            self._sector_etf = (key, data, meta)
+        return (data if data is not None else cur), self._sector_etf_note
+
     def sector_map(self, refresh: bool = False) -> dict:
         """标普 500 板块热力图：成分与面积取 SPY 持仓文件、板块取 11 只板块 SPDR 的持仓文件、涨跌取 Yahoo 报价
         （`alphabot.sector_map`）。`refresh` 只是「别等缓存到期」——同一份报价 `quote_fail_ttl_sec` 内仍不重取。
@@ -810,12 +865,18 @@ class AlphaBotService:
                 return fail(failed["reason"], detail=failed.get("detail"), retry_after_sec=failed.get("retry_after_sec"))
             if failed is not None and failed.get("reason") == "rate_limited":
                 failed = failed | {"retry_after_sec": max(0.0, round(self._sector_quotes_fail[0] - now, 0))}
-            body = SM.build(holdings, ent[1], watchlist=self.watchlist()["tickers"])
+            closes, enote = self._sector_etf_closes()
+            body = SM.build(holdings, ent[1], watchlist=self.watchlist()["tickers"], etf_closes=closes,
+                            is_trading=_is_trading_iso)
             return clean_json(base | body | {
                 "available": True, "session": sess, "refresh_sec": SM.RULES["quote_ttl_live_sec"],
                 "quotes": {"fetched_at": ent[2], "age_sec": round(now - ent[0], 0),
                            "refresh_failed": ({**failed, "reason_zh": SM.REASONS.get(failed.get("reason"), failed.get("reason"))}
                                               if failed is not None else None)},
+                "etf_bars": {"available": closes is not None, "n": len(closes or {}),
+                             "errors": (enote or {}).get("errors") or {},
+                             "refresh_failed": ({**enote, "reason_zh": SM.REASONS.get(enote.get("reason"), enote.get("reason"))}
+                                                if enote and enote.get("reason") else None)},
                 "holdings": {"as_of": holdings.get("as_of"), "fetched_at": holdings.get("fetched_at"),
                              "skipped": holdings.get("skipped") or [], "cash_weight": holdings.get("cash_weight"),
                              "failed_sectors": holdings.get("failed_sectors") or [],

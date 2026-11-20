@@ -8,7 +8,9 @@
   全部恰好落进一只、无遗漏无重复；哪天对不上 ⇒ 归「未归类」并在页面写数，不猜。
 · **涨跌**：Yahoo 报价接口（`v7/finance/quote`），一次请求带几百只票：503 只 = 2 个请求、约 3 秒。
   ⚠️ **别改成 `yf.download` 取日线**：那是每只票一个请求（503 个），实测一轮 3–4 分钟、第二轮缺 50 只。
-  代价是只有报价里现成的周期（今日、52 周），没有 5 日 / 1 月。
+  代价是色块图只有报价里现成的周期（今日、52 周），没有 5 日 / 1 月。
+· **顶部那排的 5 日 / 1 月**（v0.45.792，用户 2026-11-20 定「只加板块那一排」）：SPY + 11 只板块基金的复权日线
+  （`yf_daily`，一天 12 个请求），现价 ÷ 往回数第 5 / 21 个交易日的收盘。成分股没有这两个周期。
 
 纯函数（`read_xlsx_rows` / `parse_holdings` / `combine` / `build`）与取数（`fetch_holdings` / `fetch_quotes`）分开；
 取数永不抛、失败带原因码（唯一表 `REASONS`）。缓存、限频、落盘都在 `service.sector_map`。
@@ -21,7 +23,7 @@ import zipfile
 import xml.etree.ElementTree as ET  # noqa: S405 - 只解析道富官网的持仓表，且先过大小上限
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -51,14 +53,21 @@ RULES = {
     "max_xlsx_bytes": 5_000_000,    # 实测每份 2–6 万字节
     "max_xml_bytes": 40_000_000,
     "implausible_pct": 50.0,        # 标普成分一天 ±50% 以上按坏数据算，不上色
-    "session_min_share": 0.05,      # 至少这么大比例的票落在某个美东日上，那天才可能是「这一场」
+    "etf_period": "3mo",            # 板块基金日线取多长（1 月 = 21 根，留足余量）
+    "etf_fail_ttl_sec": 600,        # 板块基金日线取不到后多久内不再试
+    "session_min_share": 0.05,     # 至少这么大比例的票落在某个美东日上，那天才可能是「这一场」
     "min_spy_rows": 400,          # SPY 文件少于这么多行 ⇒ 当没取到（防半截文件）
 }
-#: 周期 → 页面名、色阶封顶（±这么多 % 及以上是最深的颜色）
+#: 周期 → 页面名、取哪个字段、色阶封顶（±这么多 % 及以上是最深的颜色）、色块图有没有这个周期。
+#: 5 日 / 1 月（v0.45.792）只有顶部那排板块基金有（`map=False`）：成分股要逐只取日线，见模块头。
 PERIODS = {
-    "1d": {"label": "今日", "clamp_pct": 3.0},
-    "52w": {"label": "52 周", "clamp_pct": 50.0},
+    "1d": {"label": "今日", "field": "change_1d", "clamp_pct": 3.0, "map": True},
+    "5d": {"label": "5 日", "field": "change_5d", "clamp_pct": 6.0, "map": False},
+    "1m": {"label": "1 月", "field": "change_1m", "clamp_pct": 12.0, "map": False},
+    "52w": {"label": "52 周", "field": "change_52w", "clamp_pct": 50.0, "map": True},
 }
+#: 板块基金的回看周期 → 往回数几个交易日的收盘当基准
+ETF_LOOKBACK = {"5d": 5, "1m": 21}
 REASONS = {
     "demo": "演示模式不取真实行情",
     "no_fetcher": "这个实例没接取数",
@@ -71,6 +80,10 @@ REASONS = {
     "bad_price": "现价或昨收缺失",
     "implausible": "涨跌幅异常，按坏数据处理",
     "stale_quote": "最后成交不在这一场（停牌或报价没更新）",
+    "no_bars": "这只基金的日线没取到",
+    "too_few_bars": "日线不够长",
+    "bars_gap": "日线中间缺了交易日，往回数会数错，不出数",
+    "session_unknown": "判不了这一场是哪天",
 }
 DISCLAIMER = ("面积 = 在 SPY 里的权重（流通市值占比），颜色 = 涨跌幅。行情来自 Yahoo，盘中约有 15 分钟延迟；"
               "只展示，不进评分，不构成投资建议。")
@@ -278,6 +291,48 @@ def fetch_quotes(symbols: Iterable[str], yf_data=None) -> Tuple[Optional[Dict[st
         return None, {"reason": "fetch_error", "detail": f"{type(exc).__name__}: {str(exc)[:80]}", "n_requests": n_req}
 
 
+def _fetch_closes(yf_module, symbol: str, ensure: Callable[[], None]) -> Dict[str, float]:
+    import yf_daily  # noqa: PLC0415
+    ensure()
+    # 末根是不是公司行动空行不用管：只按日期取「这一场之前」的收盘（登记的策略 = ignore）。source 必须是字面量（守卫按字面量核对注册表）
+    hist, _ = yf_daily.history(yf_module.Ticker(symbol), source="alphabot_sector_etf", period=RULES["etf_period"],
+                               auto_adjust=True)
+    return BL._closes_from_history(hist)
+
+
+def fetch_etf_closes(symbols: Iterable[str], yf_module=None) -> Tuple[Optional[Dict[str, Dict[str, float]]], dict]:
+    """SPY + 板块基金的复权日线 → `({代码: {日期: 收盘}}, {reason, errors, retry_after_sec?})`。一只一个请求（12 只）。
+    单只取不到不连坐（记进 `errors`，页面那一格写原因）；被限流 ⇒ 其后的不再去撞。一只都没有才整体失败。永不抛。"""
+    out: Dict[str, Dict[str, float]] = {}
+    errs: Dict[str, str] = {}
+    ensure: Callable[[], None] = lambda: None  # noqa: E731
+    try:
+        if yf_module is None:
+            import yfinance as yf_module  # noqa: PLC0415
+            try:
+                from yf_gate import ensure  # noqa: PLC0415
+            except Exception:  # noqa: BLE001 - 闸门不可得不阻断（与 beta_long / price_ohlc 同）
+                pass
+        for s in dict.fromkeys(symbols):
+            try:
+                c = _fetch_closes(yf_module, s, ensure)
+            except Exception as exc:  # noqa: BLE001 - 单只取不到不连坐其余
+                if BL._rate_limited(exc):
+                    meta = {"reason": "rate_limited", "retry_after_sec": BL._retry_after(), "errors": errs}
+                    return (out or None), meta
+                errs[s] = type(exc).__name__
+                continue
+            if c:
+                out[s] = c
+            else:
+                errs[s] = "empty"
+    except Exception as exc:  # noqa: BLE001 - 导入 yfinance 失败等
+        return None, {"reason": "fetch_error", "detail": type(exc).__name__, "errors": errs}
+    if not out:
+        return None, {"reason": "fetch_error", "detail": "一只都没取到", "errors": errs}
+    return out, {"reason": None, "errors": errs}
+
+
 # ── 排图（纯函数）────────────────────────────────────────────────────────────
 
 def _et_date(ts: Optional[float]) -> Optional[str]:
@@ -316,13 +371,45 @@ def pick_session(days: Counter) -> Optional[str]:
     return max(ok) if ok else days.most_common(1)[0][0]
 
 
+def lookback_change(closes: Optional[Dict[str, float]], price: Optional[float], session: Optional[str], n: int,
+                    is_trading: Optional[Callable[[str], bool]] = None) -> Tuple[Optional[float], Optional[str], Optional[str]]:
+    """`(n 个交易日的涨跌 %, 基准日, 原因码)`：现价 ÷「这一场」往回数第 n 个交易日的复权收盘 − 1（含分红）。
+
+    只用日期早于 `session` 的收盘（今天那根没走完的不算）。按位置往回数有个老毛病——日线中间缺一根就无声数错一天；
+    所以给了 `is_trading`（日期 → 是不是交易日）时，要求基准日之后到这一场之间**恰好** n 个交易日，对不上 ⇒ `bars_gap`、不出数。"""
+    if not session:
+        return None, None, "session_unknown"
+    if not closes:
+        return None, None, "no_bars"
+    if not (price and price > 0):
+        return None, None, "bad_price"
+    days = sorted(d for d in closes if d < session)
+    if len(days) < n:
+        return None, None, "too_few_bars"
+    base_day = days[-n]
+    base = closes[base_day]
+    if not (base and base > 0):
+        return None, base_day, "bad_price"
+    if is_trading is not None:
+        try:
+            d0, d1 = datetime.fromisoformat(base_day).date(), datetime.fromisoformat(session).date()
+            span = sum(1 for i in range(1, (d1 - d0).days + 1) if is_trading((d0 + timedelta(days=i)).isoformat()))
+        except Exception:  # noqa: BLE001 - 日历判不了 ⇒ 不出数，比数错一天好
+            return None, base_day, "bars_gap"
+        if span != n:
+            return None, base_day, "bars_gap"
+    return round((price / base - 1.0) * 100.0, 2), base_day, None
+
+
 def _wavg(pairs: List[Tuple[float, Optional[float]]]) -> Optional[float]:
     num = sum(w * v for w, v in pairs if v is not None)
     den = sum(w for w, v in pairs if v is not None)
     return round(num / den, 3) if den > 0 else None
 
 
-def build(holdings: dict, quotes: Dict[str, dict], *, watchlist: Iterable[str] = ()) -> dict:
+def build(holdings: dict, quotes: Dict[str, dict], *, watchlist: Iterable[str] = (),
+          etf_closes: Optional[Dict[str, Dict[str, float]]] = None,
+          is_trading: Optional[Callable[[str], bool]] = None) -> dict:
     """成分表 + 报价 → 页面要的树。「这一场」= 报价里最多的那个美东日（停牌的票停在更早的一天 ⇒ `stale_quote`、不上色）。
 
     板块今日涨跌给两个数：`change_1d`（成分按 SPY 权重加权，只算有报价的）与 `etf`（那只板块 SPDR 自己的报价）——
@@ -353,8 +440,17 @@ def build(holdings: dict, quotes: Dict[str, dict], *, watchlist: Iterable[str] =
     def etf_block(sym):
         q = quotes.get(sym)
         chg, why = _change(q, session)
-        return {"symbol": sym, "price": (q or {}).get("price"), "change_1d": chg, "reason": why,
-                "change_52w": None if why or not q or q.get("change_52w_pct") is None else round(q["change_52w_pct"], 2)}
+        out = {"symbol": sym, "price": (q or {}).get("price"), "change_1d": chg, "reason": why,
+               "change_52w": None if why or not q or q.get("change_52w_pct") is None else round(q["change_52w_pct"], 2)}
+        # 5 日 / 1 月：这一场的报价不可用（why）⇒ 现价不可信，也不出；日线没接（etf_closes is None）⇒ 整节由 `etf_periods` 说明
+        for key, n in ETF_LOOKBACK.items():
+            field = PERIODS[key]["field"]
+            if why or etf_closes is None:
+                out[field], out[f"{field}_base"], out[f"{field}_reason"] = None, None, (why or None)
+                continue
+            v, base_day, bad = lookback_change(etf_closes.get(sym), (q or {}).get("price"), session, n, is_trading)
+            out[field], out[f"{field}_base"], out[f"{field}_reason"] = v, base_day, bad
+        return out
 
     sectors = []
     for key in [*SECTORS, UNSORTED]:
@@ -409,5 +505,5 @@ def symbols_for(holdings: dict) -> List[str]:
 
 def public_rules() -> dict:
     return {"reasons": dict(REASONS), "periods": {k: dict(v) for k, v in PERIODS.items()},
-            "sectors": dict(SECTORS), "bench": BENCH, "quote_ttl_live_sec": RULES["quote_ttl_live_sec"],
+            "sectors": dict(SECTORS), "bench": BENCH, "etf_lookback": dict(ETF_LOOKBACK), "quote_ttl_live_sec": RULES["quote_ttl_live_sec"],
             "quote_ttl_idle_sec": RULES["quote_ttl_idle_sec"], "implausible_pct": RULES["implausible_pct"]}
