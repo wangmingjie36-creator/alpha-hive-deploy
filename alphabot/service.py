@@ -291,7 +291,7 @@ class AlphaBotService:
                  completed_session_fn: Optional[Callable[[], Optional[str]]] = None, compare_root=None,
                  ohlc_fn=None, minute_fn=None, thesis_fetch_fn=None, thesis_config_path=None,
                  sector_holdings_fn=None, sector_quotes_fn=None, sector_etf_fn=None,
-                 flow_stock_fn=None, flow_etf_fn=None):
+                 flow_stock_fn=None, flow_etf_fn=None, hedge_quotes_fn=None, wheel_quote_fn=None):
         self.fetch_fn = fetch_fn
         self.bars_fn = bars_fn or _default_bars
         # 价格页 K 线的开高低（v0.45.762）：`ohlc_fn(标的) -> ({日期: {open, high, low, close}}, {n, reason, …})`。
@@ -318,6 +318,20 @@ class AlphaBotService:
         # 「板块」页（v0.45.783）：`sector_holdings_fn() -> (成分表, meta)`、`sector_quotes_fn(代码表) -> (报价, meta)`。缺省接线规则同
         # `ohlc_fn`（注入了日线而没给它们 ⇒ 不取，免得测试出网；演示 ⇒ 不取）。成分表落盘在状态目录（重启不用重下 12 份文件），
         # 报价只在内存：`(取到的时刻, 报价, 美东时刻文本)`；`*_retry_at` = 上次失败后最早什么时候再试（self.clock() 时刻）
+        # 对冲页「此刻浮动」（v0.45.800）：`hedge_quotes_fn(代码表) -> (报价, meta)`，与板块页同一个 Yahoo 报价接口（一次请求带几只）。
+        # 缺省接线规则同 `ohlc_fn`（注入了日线而没给它 ⇒ 不取，免得测试出网；演示 ⇒ 合成报价）。
+        # `_hedge_quotes` = `(取到的时刻, {代码: 报价}, 美东时刻文本, 代码表)`；`_hedge_quotes_fail` = `(最早再试时刻, meta)`
+        self.hedge_quotes_fn = hedge_quotes_fn
+        self._hedge_quotes_default = bars_fn is None and not demo
+        self._hedge_quotes: Optional[tuple] = None
+        self._hedge_quotes_fail: Optional[tuple] = None
+        self._hedge_live_lock = threading.Lock()
+        # 接货页「此刻浮动」（v0.45.801）：`wheel_quote_fn(标的, OCC 符号表) -> cboe_options.quote_held 同形`。缺省接线规则同上
+        # （注入了日线而没给它 ⇒ 不取）。`_wheel_live` = `{标的: (取到的时刻, 报价, 美东时刻文本, 符号表)}`
+        self.wheel_quote_fn = wheel_quote_fn
+        self._wheel_quote_default = bars_fn is None and not demo
+        self._wheel_live: Dict[str, tuple] = {}
+        self._wheel_live_lock = threading.Lock()
         self.sector_holdings_fn = sector_holdings_fn
         self.sector_quotes_fn = sector_quotes_fn
         self._sector_default = bars_fn is None and not demo
@@ -404,7 +418,8 @@ class AlphaBotService:
                       "thesis_fetches": 0, "thesis_cache_hits": 0, "thesis_failures": 0,
                       "sector_quote_fetches": 0, "sector_cache_hits": 0, "sector_failures": 0,
                       "sector_holdings_fetches": 0, "sector_etf_fetches": 0, "sector_etf_gaps": 0,
-                      "flow_stock_fetches": 0, "flow_etf_fetches": 0, "flow_cache_hits": 0, "flow_failures": 0}
+                      "flow_stock_fetches": 0, "flow_etf_fetches": 0, "flow_cache_hits": 0, "flow_failures": 0,
+                      "wheel_live_failures": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -691,6 +706,68 @@ class AlphaBotService:
             _log.warning("接货型卖 put 账本不可得：%s: %s", type(exc).__name__, exc)
             state = {"available": False, "state_reason": f"{type(exc).__name__}: {exc}"}
         return clean_json(WH.build_overview(state, rules=rules))
+
+    # ── 接货页「此刻浮动」（v0.45.801，只读）：账本持仓 × 现取 CBOE 报价，只显示、不写账本
+    #: 同一只票的报价最多用多久（盘中 / 盘外）；「立即刷新」也至少隔 `WHEEL_LIVE_MIN_SEC`。CBOE 文件本身是延迟报价、
+    #: 进程缓存 120 秒——这里再短也拿不到更新的数，只会多下载（每只约 1.5MB）
+    WHEEL_LIVE_TTL_SEC = 90.0
+    WHEEL_LIVE_IDLE_TTL_SEC = 900.0
+    WHEEL_LIVE_MIN_SEC = 20.0
+    #: 页面盘中自动刷新的间隔（前端读这个，不另抄）
+    WHEEL_LIVE_REFRESH_SEC = 120
+
+    def _wheel_quote(self, t: str, symbols: List[str]) -> dict:
+        """一只票的此刻报价（`quote_held` 同形）。没有未到期合约、只持股的票走 Yahoo 报价只取标的现价（标明来源）。"""
+        if self.wheel_quote_fn is not None:
+            return self.wheel_quote_fn(t, symbols)
+        if not self._wheel_quote_default:
+            return {"available": False, "reason": "no_fetcher", "quotes": {s: None for s in symbols}}
+        if symbols:
+            import cboe_options
+            return {**cboe_options.quote_held(t, symbols), "source": "cboe"}
+        q, meta = SM.fetch_quotes([SM.yahoo_symbol(t)])
+        row = (q or {}).get(SM.yahoo_symbol(t).upper())
+        px = HG._num((row or {}).get("price"))
+        if px is None or px <= 0:
+            return {"available": False, "reason": (meta or {}).get("reason") or "price_unavailable", "quotes": {}}
+        return {"available": True, "reason": None, "underlying_price": px, "quotes": {}, "source": "yahoo_quote",
+                "session_live": market_session(self.now_fn())["live"]}
+
+    def wheel_live(self, force: bool = False) -> dict:
+        """接货型卖 put 账本此刻的浮动：每只有持仓的票取一份报价（串行），按账本同一口径重算（`alphabot.wheel.live_view`）。
+        取不到的票如实写原因，**不拿账本的收盘 mark 顶上**；演示模式不展示（同 `wheel()`）。"""
+        now_dt = self.now_fn()
+        sess = market_session(now_dt)
+        base = {"refresh_sec": self.WHEEL_LIVE_REFRESH_SEC, "session": sess}
+        if self.demo:
+            return clean_json({**base, "available": False, "state_reason": "demo"})
+        try:
+            import sell_put_wheel as spw
+            state = spw.load_state()
+        except Exception as exc:  # noqa: BLE001
+            return clean_json({**base, "available": False, "state_reason": f"{type(exc).__name__}: {exc}"})
+        want = WH.live_symbols(state)
+        quotes, fetched = {}, {}
+        with self._wheel_live_lock:
+            ttl = self.WHEEL_LIVE_TTL_SEC if sess["live"] else self.WHEEL_LIVE_IDLE_TTL_SEC
+            if force:
+                ttl = min(ttl, self.WHEEL_LIVE_MIN_SEC)
+            for t, syms in want.items():
+                ent = self._wheel_live.get(t)
+                if not (ent is not None and self.clock() - ent[0] < ttl and set(syms) <= set(ent[3])):
+                    try:
+                        q = self._wheel_quote(t, syms)
+                    except Exception as exc:  # noqa: BLE001 - 报价失败如实返回，不拿账本 mark 顶上
+                        q = {"available": False, "reason": f"exception:{type(exc).__name__}", "quotes": {}}
+                    if not q.get("available"):
+                        _log.warning("[%s] 接货页此刻报价不可得：%s", t, q.get("reason"))
+                        self.stats["wheel_live_failures"] += 1
+                    # 失败也记下（同样的 TTL）：免得一只票坏了，每次刷新都把它重下一遍
+                    ent = self._wheel_live[t] = (self.clock(), q, now_dt.isoformat(timespec="seconds"), list(syms))
+                quotes[t] = ent[1]
+                fetched[t] = {"fetched_at": ent[2], "age_sec": round(self.clock() - ent[0], 0), "source": ent[1].get("source")}
+        body = WH.live_view(state, quotes, today=sess["date_et"])
+        return clean_json({**base, **body, "fetched": fetched})
 
     # ── 深度页证伪条件的自动核对（v0.45.777，只展示）
     def _thesis_config(self) -> Tuple[Optional[dict], Optional[str]]:
@@ -1380,6 +1457,84 @@ class AlphaBotService:
     def hedge(self) -> dict:
         now = self.now_fn()
         return clean_json(HG.build_overview(self._hedge_view(now), now_et=now, stress_fn=self._stress_fn()))
+
+    # ── 对冲页「此刻浮动」（v0.45.800，只读）：现取报价 × 账本持仓，只显示、不写账本、不进对冲决定
+    #: 同一份报价最多用多久（盘中 / 盘外）；「立即刷新」也至少隔 `HEDGE_LIVE_MIN_SEC` 才真去取（一个按钮连点不该连撞 Yahoo）
+    HEDGE_LIVE_TTL_SEC = 30.0
+    HEDGE_LIVE_IDLE_TTL_SEC = 600.0
+    HEDGE_LIVE_MIN_SEC = 10.0
+    HEDGE_LIVE_FAIL_SEC = 60.0
+    #: 页面盘中自动刷新的间隔（前端读这个，不另抄）
+    HEDGE_LIVE_REFRESH_SEC = 60
+
+    def _demo_hedge_quotes(self, syms, view) -> Dict[str, dict]:
+        """演示：拿账本标记价按分钟摆动 ±0.4% 造一份「此刻」报价（确定性、零网络）。"""
+        import math
+        now = self.now_fn()
+        marks = {str(p.get("ticker")).upper(): HG._num(p.get("last_price"))
+                 for p in list(view.get("positions") or []) + list(view.get("delta_positions") or []) if isinstance(p, dict)}
+        wiggle = 0.004 * math.sin(now.hour * 60 + now.minute + now.second / 60.0)
+        return {s: {"price": round(m * (1 + wiggle), 2), "prev_close": m, "time": now.timestamp(), "state": "REGULAR",
+                    "delay_min": 0.0} for s, m in marks.items() if s in syms and m}
+
+    def hedge_live(self, force: bool = False) -> dict:
+        """对冲账本此刻的浮动盈亏：SPY 覆盖账 + 逐票对冲账的持仓 × 现取报价（`alphabot.hedge.live_marks`）。
+        报价取不到 ⇒ 有上一份就沿用并写明 `refresh_failed`（带真实年龄），一份都没有 ⇒ 各行 `no_quote`，**不拿收盘标记价顶上**。"""
+        now_dt = self.now_fn()
+        sess = market_session(now_dt)
+        view = self._hedge_view(now_dt)
+        base = {"refresh_sec": self.HEDGE_LIVE_REFRESH_SEC, "demo": self.demo}
+        if not view.get("exists"):
+            return clean_json({**base, "available": False, "reason": "no_ledger", "session": sess,
+                               "errors": dict(view.get("errors") or {})})
+        syms = HG.live_symbols(view)
+        failed = None
+        with self._hedge_live_lock:
+            ent, now = self._hedge_quotes, self.clock()
+            ttl = self.HEDGE_LIVE_TTL_SEC if sess["live"] else self.HEDGE_LIVE_IDLE_TTL_SEC
+            if force:
+                ttl = min(ttl, self.HEDGE_LIVE_MIN_SEC)
+            fresh = ent is not None and now - ent[0] < ttl and set(syms) <= set(ent[3])
+            if not syms:
+                ent = None
+            elif fresh:
+                pass
+            elif self._hedge_quotes_fail is not None and now < self._hedge_quotes_fail[0]:
+                failed = self._hedge_quotes_fail[1]
+            else:
+                if self.demo:
+                    q, meta = self._demo_hedge_quotes(syms, view), {"reason": None}
+                else:
+                    fn = self.hedge_quotes_fn or (SM.fetch_quotes if self._hedge_quotes_default else None)
+                    if fn is None:
+                        q, meta = None, {"reason": "no_fetcher"}
+                    else:
+                        try:
+                            q, meta = fn([SM.yahoo_symbol(x) for x in syms])
+                        except Exception as e:  # noqa: BLE001 - 取数函数不该抛；抛了也如实报
+                            q, meta = None, {"reason": "fetch_error", "detail": type(e).__name__}
+                if q is None:
+                    failed = dict(meta or {}) or {"reason": "fetch_error"}
+                    wait = self.HEDGE_LIVE_FAIL_SEC
+                    if failed.get("reason") == "rate_limited" and isinstance(failed.get("retry_after_sec"), (int, float)):
+                        wait = float(failed["retry_after_sec"])
+                    self._hedge_quotes_fail = (now + wait, failed)
+                    _log.warning("对冲页此刻浮动：报价取不到：%s", failed)
+                else:
+                    # 报价键换回账本代码：按请求时的映射认（BRK.B ↔ BRK-B），不靠猜「-」原来是不是「.」
+                    back = {SM.yahoo_symbol(x).upper(): x for x in syms}
+                    q = {back.get(str(k).upper(), str(k).upper()): v for k, v in q.items()}
+                    ent = self._hedge_quotes = (now, q, now_dt.isoformat(timespec="seconds"), list(syms))
+                    self._hedge_quotes_fail = None
+            if failed is not None and failed.get("reason") == "rate_limited" and self._hedge_quotes_fail is not None:
+                failed = failed | {"retry_after_sec": max(0.0, round(self._hedge_quotes_fail[0] - now, 0))}
+        body = HG.live_marks(view, ent[1] if ent else None, session=sess, tz=ET)
+        return clean_json({**base, **body, "available": True,
+                           "quotes": {"source": "demo" if self.demo else "yahoo_quote",
+                                      "fetched_at": ent[2] if ent else None,
+                                      "age_sec": round(self.clock() - ent[0], 0) if ent else None,
+                                      "refresh_failed": ({**failed, "reason_zh": SM.REASONS.get(failed.get("reason"), failed.get("reason"))}
+                                                         if failed is not None else None)}})
 
     # ── 尾部对冲候选（v0.45.643，只读）：SPY 认沽后比例价差叠到组合压力网格上
     def _tail_deps(self) -> "TH.Deps":

@@ -11,13 +11,15 @@
 口径
 ----
 起始现金 0，所以 **对冲腿净值 = 现金 + SPY 市值 = 开账以来的累计盈亏**（不是规模）。浮动 = (标记价 − 均价) × 股数，
-已实现 = 净值 − 浮动。标记价是扫描日收盘后的 SPY 收盘价（账本自己的 `last_price`），本页不现拉行情。
+已实现 = 净值 − 浮动。账户卡片的标记价是扫描日收盘后的 SPY 收盘价（账本自己的 `last_price`）。
+「此刻浮动」（v0.45.800，`live_marks`）另算一份：服务端现取报价（本模块不取数，只吃传进来的报价），
+按同一份持仓 / 均价 / 现金重算浮动与净值；**只显示、不写账本、不进任何对冲决定**（决定仍只在扫描日收盘后做）。
 账目核对：持仓文件算出的净值必须等于同一天净值行里的 `nav`（两个文件由同一轮扫描写出），对不上就报。
 """
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import tail_budget as TB
 from alphabot import straddle as SD
@@ -395,3 +397,104 @@ def build_overview(view: dict, *, now_et: datetime, stress_fn=None) -> dict:
             "before_measurement_start": [list(x) for x in hist.get("before_measurement_start") or []],
         },
     }
+
+
+# ── 此刻浮动（v0.45.800）：现取报价 × 账本里的持仓 —— 只显示，不写账本、不进对冲决定 ──────────────────────
+
+#: 报价离账本标记价超过这么多 ⇒ 当成坏报价，不拿它算（与板块页同一个量级的「不可信」阈值）
+LIVE_IMPLAUSIBLE_PCT = 25.0
+LIVE_REASONS = {
+    "no_quote": "没有报价", "bad_price": "报价不是正数", "stale_quote": "报价不是今天这一场的（停牌或报价没更新）",
+    "implausible": f"报价离账本标记价超过 {LIVE_IMPLAUSIBLE_PCT:.0f}%，不像真的",
+    "position_unknown": "持仓 / 均价读不出来",
+}
+
+
+def _quote_date_et(q: Optional[dict], tz) -> Optional[str]:
+    ts = _num((q or {}).get("time"))
+    if ts is None:
+        return None
+    try:
+        return datetime.fromtimestamp(ts, tz).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def live_row(pos: Optional[dict], q: Optional[dict], *, session: dict, tz) -> dict:
+    """一只持仓 + 一份报价 → 此刻的浮动。纯函数。`pos` 要 `ticker / shares / avg_price / last_price / last_mark_date`。
+    盘中且报价不是今天这一场 ⇒ `stale_quote`、不算（不能把昨天的价当此刻）；不在盘中 ⇒ 报价就是最近一次收盘，照算并写明。"""
+    tk = (pos or {}).get("ticker")
+    sh, avg, mark = _num((pos or {}).get("shares")), _num((pos or {}).get("avg_price")), _num((pos or {}).get("last_price"))
+    out = {"ticker": tk, "shares": sh, "avg_price": avg, "mark": mark, "mark_date": (pos or {}).get("last_mark_date"),
+           "price": None, "quote_time": (q or {}).get("time"), "quote_date": _quote_date_et(q, tz),
+           "delay_min": _num((q or {}).get("delay_min")), "market_state": (q or {}).get("state"),
+           "prev_close": _num((q or {}).get("prev_close")),
+           "market_value": None, "unrealized_usd": None, "since_mark_usd": None, "since_mark_pct": None,
+           "day_change_usd": None, "reason": None}
+    if sh is None or avg is None:
+        return {**out, "reason": "position_unknown"}
+    if not q:
+        return {**out, "reason": "no_quote"}
+    px = _num(q.get("price"))
+    if not px or px <= 0:
+        return {**out, "reason": "bad_price"}
+    if session.get("live") and out["quote_date"] != session.get("date_et"):
+        return {**out, "reason": "stale_quote"}
+    if mark and abs(px / mark - 1.0) * 100.0 > LIVE_IMPLAUSIBLE_PCT:
+        return {**out, "reason": "implausible", "price": px}
+    prev = out["prev_close"]
+    return {**out, "price": px, "market_value": round(sh * px, 2), "unrealized_usd": round((px - avg) * sh, 2),
+            "since_mark_usd": round((px - mark) * sh, 2) if mark is not None else None,
+            "since_mark_pct": round((px / mark - 1.0) * 100.0, 3) if mark else None,
+            # 今日涨跌带来的盈亏（对昨收）：持仓是昨晚收盘后的，今天盘中没变过（对冲只在收盘后成交）
+            "day_change_usd": round((px - prev) * sh, 2) if (prev and prev > 0) else None}
+
+
+def live_marks(view: dict, quotes: Optional[Dict[str, dict]], *, session: dict, tz) -> dict:
+    """对冲账本（SPY 覆盖 + 逐票对冲账）× 现取报价 → 「此刻浮动」。纯函数。
+    报价键用大写代码；某只缺报价只让那一只与它所在的账的合计变 None（不把缺的当 0）。"""
+    hist = view.get("history") or {}
+    equity = sorted(hist.get("equity") or [], key=lambda e: str(e.get("date")))
+    acct = account(view.get("positions"), view.get("meta"), equity)
+    q_of = lambda tk: (quotes or {}).get(str(tk or "").upper())   # noqa: E731
+    spy = None
+    if acct.get("ticker") and acct.get("shares"):
+        spy = live_row({"ticker": acct["ticker"], "shares": acct["shares"], "avg_price": acct["avg_price"],
+                        "last_price": acct["mark"], "last_mark_date": acct["mark_date"]}, q_of(acct["ticker"]),
+                       session=session, tz=tz)
+    cash = acct.get("cash")
+    flat = acct.get("shares") == 0
+    spy_ok = spy is not None and spy["reason"] is None
+    spy_book = {
+        "row": spy, "flat": flat, "cash": cash, "close_unrealized_usd": acct.get("unrealized_usd"),
+        "close_nav": acct.get("nav"), "mark_date": acct.get("mark_date"),
+        "unrealized_usd": spy["unrealized_usd"] if spy_ok else (0.0 if flat else None),
+        "nav": (round(cash + spy["market_value"], 2) if (spy_ok and cash is not None) else (cash if flat else None)),
+        "since_mark_usd": spy["since_mark_usd"] if spy_ok else (0.0 if flat else None),
+    }
+    spy_book["realized_usd"] = (round(spy_book["nav"] - spy_book["unrealized_usd"], 2)
+                                if (spy_book["nav"] is not None and spy_book["unrealized_usd"] is not None) else None)
+    rows = [live_row(p, q_of(p.get("ticker")), session=session, tz=tz)
+            for p in (view.get("delta_positions") or []) if isinstance(p, dict) and p.get("ticker") and _num(p.get("shares"))]
+    d_ok = all(r["reason"] is None for r in rows)
+    d_cash = _num((view.get("delta_meta") or {}).get("cash")) if isinstance(view.get("delta_meta"), dict) else None
+    delta_book = {
+        "opened": bool(view.get("delta_opened")), "rows": rows, "cash": d_cash,
+        "unrealized_usd": round(sum(r["unrealized_usd"] for r in rows), 2) if d_ok else None,
+        "since_mark_usd": (round(sum(r["since_mark_usd"] for r in rows), 2)
+                           if d_ok and all(r["since_mark_usd"] is not None for r in rows) else None),
+        "nav": (round(d_cash + sum(r["market_value"] for r in rows), 2) if (d_ok and d_cash is not None) else None),
+    }
+    return {"session": session, "spy": spy_book, "delta": delta_book,
+            "symbols": sorted({str(r["ticker"]).upper() for r in ([spy] if spy else []) + rows}),
+            "errors": {k: v for k, v in (view.get("errors") or {}).items() if k in ("positions", "meta") or k.startswith("delta_")},
+            "reasons": LIVE_REASONS, "implausible_pct": LIVE_IMPLAUSIBLE_PCT}
+
+
+def live_symbols(view: dict) -> List[str]:
+    """要取报价的代码：SPY 覆盖账的持仓 + 逐票对冲账的持仓（大写、去重、去 0 股）。纯函数。"""
+    out = []
+    for p in list(view.get("positions") or []) + list(view.get("delta_positions") or []):
+        if isinstance(p, dict) and p.get("ticker") and _num(p.get("shares")):
+            out.append(str(p["ticker"]).upper())
+    return sorted(set(out))

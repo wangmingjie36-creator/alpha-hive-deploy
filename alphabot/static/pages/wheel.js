@@ -2,6 +2,7 @@
 // 规则冻结在 experiments/sell_put_wheel_prereg.md；它是测量账本、不是检验——页面不给「推荐」「综合分」。
 // 数字（盈亏 / 基准 / 占用）全由服务端算好，前端只排版；会变的规则常量取自 /api/method 的 wheel.*（经 d.rules）。
 import { api, h, helpLink, num, money, panel, table, isNum, fill } from "../lib.js";
+import { renderWheelLive } from "./wheel_live.js";
 
 const sMoney = (v, dp = 0) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}$${num(Math.abs(v), dp)}` : "—");
 const sPct = (v, dp = 2) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}${num(Math.abs(v), dp)}%` : "—");
@@ -34,7 +35,7 @@ function lotsPanel(d) {
         + (isNum(r.call.iv_rv) ? ` · IV÷RV ${num(r.call.iv_rv, 2)}` : "")))
       : (r.shares && isNum(r.shares.call_trigger) ? h("span", { class: "sub" }, `收盘到 ${num(r.shares.call_trigger, 2)} 才卖`) : "—")) },
     { label: "累计权利金", cls: "r", render: (r) => money(r.premiums_collected_usd, 0) },
-    { label: "持股浮动", cls: "r", render: (r) => (r.shares ? h("span", { class: tone(r.shares.unrealized_usd) }, sMoney(r.shares.unrealized_usd)) : "—") },
+    { label: "持股浮动（收盘）", cls: "r", render: (r) => (r.shares ? h("span", { class: tone(r.shares.unrealized_usd) }, sMoney(r.shares.unrealized_usd)) : "—") },
   ];
   return panel("当前持仓", { sub: "每个循环一条（加仓后同一只会有多条，各自到期、各自结算）；put 作废或被叫走后那一圈结束" },
     d.lots.length ? table(cols, d.lots) : h("div", { class: "empty" }, "现在没有持仓（还没开过，或这一圈刚结束、下一个交易日再开）。"));
@@ -102,9 +103,11 @@ export async function renderWheel(root, alive) {
     kpi("收益", sPct(a.return_pct, 2), tone(a.return_pct)),
     kpi("现金", money(a.cash, 0)), kpi("put 担保占用", money(a.reserved_puts, 0)),
     kpi("持股市值", money(a.shares_value, 0)), kpi("累计权利金", money(d.kpis?.premium_collected_usd, 0)));
+  const liveHost = h("div");     // 此刻浮动（v0.45.801）：另一个接口、现取 CBOE 报价，盘中自动续刷，不阻塞本页其余部分
   fill(root, head, tabs, ...warns.map((w) => h("p", { class: "callout warn" }, w)), kpis,
     skippedBits.length ? h("p", { class: "small muted" }, `今天没开 / 没卖的：${skippedBits.join("；")}`) : null,
-    lotsPanel(d), benchmarkPanel(d), eventsPanel(d),
+    lotsPanel(d), liveHost, benchmarkPanel(d), eventsPanel(d),
     h("p", { class: "note small muted" }, "成交一律按 bid（保守）、未到期的腿按 mid 盯市，所以刚开仓那天净值会比起始略低（点差）。"
       + "美式提前行权、保证金、分红、手续费都不建模。"));
+  renderWheelLive(liveHost, alive);
 }
