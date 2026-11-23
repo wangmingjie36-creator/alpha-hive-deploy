@@ -6,7 +6,9 @@
   Yahoo 的 `marketCap` 对双重股权的公司（GOOGL / GOOG、FOX / FOXA…）每一类都报整家公司的市值，直接相加会算两遍。
 · **板块**：SPY 文件的板块列全是「-」（实测），所以板块 = 「它在 11 只板块 SPDR 里的哪一只」。实测 504 只成分
   全部恰好落进一只、无遗漏无重复；哪天对不上 ⇒ 归「未归类」并在页面写数，不猜。
-· **涨跌**：Yahoo 报价接口（`v7/finance/quote`），一次请求带几百只票：503 只 = 2 个请求、约 3 秒。
+· **涨跌**：Yahoo 报价接口（`v7/finance/quote`），一次请求带几百只票：全部 515 只（成分 + 12 只基金）一个请求、约 2 秒
+  （v0.45.805；取不全时退回每 250 只一批）。实测最后成交只落后几秒到十几秒；接口自报的 `exchangeDataDelayedBy`
+  （个股 15 / 20 分钟、基金 0）与实际不符，页面不引用它，只写每份报价里最晚一笔成交的时刻。
   ⚠️ **别改成 `yf.download` 取日线**：那是每只票一个请求（503 个），实测一轮 3–4 分钟、第二轮缺 50 只。
   代价是色块图只有报价里现成的周期（今日、52 周），没有 5 日 / 1 月。
 · **顶部那排的 5 日 / 1 月**（v0.45.792，用户 2026-11-20 定「只加板块那一排」）：SPY + 11 只板块基金的复权日线
@@ -43,11 +45,14 @@ HOLDINGS_URL = ("https://www.ssga.com/us/en/intermediary/library-content/product
 QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
 
 RULES = {
-    "quote_chunk": 250,             # 一次报价请求带几只票（实测 260 只一次返回齐）
+    "quote_single_max": 1000,       # 缺省一次请求取全（2026-11-23 实测 515 只一个请求全部返回、约 2 秒）
+    "quote_single_min_share": 0.9,  # 一次取全回来的不到这个比例 ⇒ 当成被截断，退回分批
+    "quote_chunk": 250,             # 退回分批时一次带几只（实测 260 只一次返回齐）
     "holdings_ttl_sec": 20 * 3600,  # 持仓文件一天一份
     "holdings_fail_ttl_sec": 600,   # 持仓刷新失败（或缺了几份板块文件）后多久内不再试
     "holdings_attempts": 2,         # 每份文件最多取几次
-    "quote_ttl_live_sec": 120,      # 盘中同一份报价最多用多久（也是请求量的硬上限：≤ 每 2 分钟 3 个请求）
+    "quote_ttl_live_sec": 30,       # 盘中同一份报价最多用多久（也是请求量的硬上限：≤ 每 30 秒 1 个请求，约占限流闸 7%；
+                                    # 用户 2026-11-23 定 30 秒。退回分批时是每 30 秒 3 个，约 20%）
     "quote_ttl_idle_sec": 900,
     "quote_fail_ttl_sec": 60,
     "max_xlsx_bytes": 5_000_000,    # 实测每份 2–6 万字节
@@ -85,7 +90,7 @@ REASONS = {
     "bars_gap": "日线中间缺了交易日，往回数会数错，不出数",
     "session_unknown": "判不了这一场是哪天",
 }
-DISCLAIMER = ("面积 = 在 SPY 里的权重（流通市值占比），颜色 = 涨跌幅。行情来自 Yahoo，盘中约有 15 分钟延迟；"
+DISCLAIMER = ("面积 = 在 SPY 里的权重（流通市值占比），颜色 = 涨跌幅。行情来自 Yahoo，新旧以页面写的「最后成交」时刻为准；"
               "只展示，不进评分，不构成投资建议。")
 
 _TICKER_OK = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
@@ -247,6 +252,10 @@ def _quote_row(q: dict) -> dict:
             "delay_min": _num(q.get("exchangeDataDelayedBy")), "name": q.get("shortName") or q.get("longName")}
 
 
+#: 报价是一次取全还是分批：一次取全失败过（非限流）就在本进程里改分批。只有 `fetch_quotes` 写它
+_QUOTE_MODE = {"chunked": False}
+
+
 def fetch_quotes(symbols: Iterable[str], yf_data=None) -> Tuple[Optional[Dict[str, dict]], dict]:
     """Yahoo 报价 → `({Yahoo 代码: {price, prev_close, …}}, {reason, retry_after_sec?, n_requests})`。
 
@@ -264,27 +273,50 @@ def fetch_quotes(symbols: Iterable[str], yf_data=None) -> Tuple[Optional[Dict[st
                 gated = yf_gate.gated_call
             except Exception:  # noqa: BLE001 - 闸门不可得不阻断（与 price_ohlc / beta_long 同）
                 pass
-        out: Dict[str, dict] = {}
-        size = int(RULES["quote_chunk"])
-        for i in range(0, len(syms), size):
-            part = syms[i:i + size]
+        def batch(size: int) -> Dict[str, dict]:
+            nonlocal n_req
+            got: Dict[str, dict] = {}
+            for i in range(0, len(syms), size):
+                part = syms[i:i + size]
 
-            def call(part=part):
-                r = yf_data.get(QUOTE_URL, params={"symbols": ",".join(part)}, timeout=20)
-                code = getattr(r, "status_code", 200)
-                if code == 429:
-                    raise RuntimeError("Too Many Requests")      # 闸门按这句话认限流并进冷却
-                if code != 200:
-                    raise RuntimeError(f"http_{code}")
-                return r.json()
-            js = gated(call, "sector_map.quote")
-            n_req += 1
-            for q in ((js or {}).get("quoteResponse") or {}).get("result") or []:
-                if isinstance(q, dict) and q.get("symbol"):
-                    out[str(q["symbol"]).upper()] = _quote_row(q)
+                def call(part=part):
+                    r = yf_data.get(QUOTE_URL, params={"symbols": ",".join(part)}, timeout=20)
+                    code = getattr(r, "status_code", 200)
+                    if code == 429:
+                        raise RuntimeError("Too Many Requests")      # 闸门按这句话认限流并进冷却
+                    if code != 200:
+                        raise RuntimeError(f"http_{code}")
+                    return r.json()
+                n_req += 1                                # 发出去就算一个（失败的也占额度）
+                js = gated(call, "sector_map.quote")
+                for q in ((js or {}).get("quoteResponse") or {}).get("result") or []:
+                    if isinstance(q, dict) and q.get("symbol"):
+                        got[str(q["symbol"]).upper()] = _quote_row(q)
+            return got
+
+        # 一次取全（v0.45.805，2026-11-23 实测 515 只一个请求全部返回）。哪天 Yahoo 给单次数量设了上限：非限流的报错、
+        # 被拒（4xx）或返回明显不全 ⇒ 退回分批并在本进程里记住（不每轮都先撞一次）；限流与一时的网络报错照旧直接失败、不多发请求
+        chunk, fallback = int(RULES["quote_chunk"]), None
+        if _QUOTE_MODE["chunked"] or len(syms) <= chunk:
+            out = batch(chunk)
+        else:
+            try:
+                out = batch(int(RULES["quote_single_max"]))
+                if len(out) < RULES["quote_single_min_share"] * len(syms):
+                    fallback = f"一次只回了 {len(out)} / {len(syms)} 只"
+            except Exception as exc:  # noqa: BLE001
+                # 只有「请求本身被拒」（4xx，如地址太长）才换分批并记住。超时、连接 / TLS 报错、5xx 是一时的网络问题
+                # （本机走代理，这类报错常见）：照常失败、下一轮再一次取全——否则一次抖动就把本进程永久改成三倍请求量
+                if BL._rate_limited(exc) or not re.match(r"http_4\d\d$", str(exc)):
+                    raise
+                fallback = f"{type(exc).__name__}: {str(exc)[:60]}"
+            if fallback is not None:
+                _QUOTE_MODE["chunked"] = True
+                out = batch(chunk)
+        extra = {"fallback": fallback} if fallback is not None else {}
         if not out:
-            return None, {"reason": "empty", "n_requests": n_req}
-        return out, {"reason": None, "n_requests": n_req}
+            return None, {"reason": "empty", "n_requests": n_req, **extra}
+        return out, {"reason": None, "n_requests": n_req, **extra}
     except Exception as exc:  # noqa: BLE001 - 取不到只是这张图画不出来，页面照实写
         if BL._rate_limited(exc):
             return None, {"reason": "rate_limited", "retry_after_sec": BL._retry_after(), "n_requests": n_req}
@@ -469,8 +501,9 @@ def build(holdings: dict, quotes: Dict[str, dict], *, watchlist: Iterable[str] =
         "session_date": session,
         "market_state": states.most_common(1)[0][0] if states else None,
         "delay_min": max(delays) if delays else None,
-        "last_trade_et": (datetime.fromtimestamp(last_ts, timezone.utc).astimezone(NY).isoformat(timespec="minutes")
+        "last_trade_et": (datetime.fromtimestamp(last_ts, timezone.utc).astimezone(NY).isoformat(timespec="seconds")
                           if last_ts else None),
+        "last_trade_ts": last_ts,
         "bench": etf_block(BENCH) | {"change_1d_weighted": _wavg([(k["weight"], k["change_1d"]) for k in leaves])},
         "sectors": sectors,
         "stats": {"n": len(leaves), "n_quoted": n_ok, "n_missing": len(leaves) - n_ok,

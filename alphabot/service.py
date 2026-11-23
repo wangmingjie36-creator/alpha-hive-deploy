@@ -227,6 +227,15 @@ def market_session(now: Optional[datetime] = None) -> dict:
             "close": close_t.isoformat(timespec="minutes"), "live": live, "calendar": calendar}
 
 
+def _lag_sec(fetched_at: Optional[str], last_trade_ts) -> Optional[float]:
+    """取数时刻（带时区的文本）− 最后成交（epoch 秒）。判不了 / 为负（钟不同步）⇒ None，不猜。"""
+    try:
+        lag = datetime.fromisoformat(fetched_at).timestamp() - float(last_trade_ts)
+    except (TypeError, ValueError):
+        return None
+    return round(lag, 0) if lag >= 0 else None
+
+
 def _is_trading_iso(day: str) -> bool:
     """`YYYY-MM-DD` 是不是交易日（`is_trading_day`）。日历坏了就抛——调用方（`sector_map.lookback_change`）按「判不了、不出数」处理。"""
     import is_trading_day as itd
@@ -417,7 +426,7 @@ class AlphaBotService:
                       "minute_fetches": 0, "minute_cache_hits": 0, "minute_failures": 0,
                       "thesis_fetches": 0, "thesis_cache_hits": 0, "thesis_failures": 0,
                       "sector_quote_fetches": 0, "sector_cache_hits": 0, "sector_failures": 0,
-                      "sector_holdings_fetches": 0, "sector_etf_fetches": 0, "sector_etf_gaps": 0,
+                      "sector_holdings_fetches": 0, "sector_etf_fetches": 0, "sector_etf_gaps": 0, "sector_quote_fallbacks": 0,
                       "flow_stock_fetches": 0, "flow_etf_fetches": 0, "flow_cache_hits": 0, "flow_failures": 0,
                       "wheel_live_failures": 0}
 
@@ -955,6 +964,8 @@ class AlphaBotService:
             holdings, hnote = self._sector_load_holdings()
             if holdings is None:
                 return fail((hnote or {}).get("reason") or "holdings_unavailable", detail=(hnote or {}).get("detail"))
+            # 日线先取、报价后取：日线每天首次要二十多秒，放在报价后面的话，页面拿到的报价一出来就已经旧了二十多秒
+            closes, enote = self._sector_etf_closes()
             sess = market_session(self.now_fn())
             ttl = SM.RULES["quote_ttl_live_sec"] if sess["live"] else SM.RULES["quote_ttl_idle_sec"]
             if refresh:
@@ -985,12 +996,14 @@ class AlphaBotService:
                     else:
                         ent = self._sector_quotes = (now, q, self.now_fn().isoformat(timespec="seconds"))
                         self._sector_quotes_fail = None
+                        if (meta or {}).get("fallback"):        # 一次取全没成、退回了分批：请求量变成三倍，要看得见
+                            self.stats["sector_quote_fallbacks"] += 1
+                            _log.warning("板块页：报价一次取全没成（%s），本进程改为分批取", meta["fallback"])
             if ent is None:
                 failed = failed or {"reason": "fetch_error"}
                 return fail(failed["reason"], detail=failed.get("detail"), retry_after_sec=failed.get("retry_after_sec"))
             if failed is not None and failed.get("reason") == "rate_limited":
                 failed = failed | {"retry_after_sec": max(0.0, round(self._sector_quotes_fail[0] - now, 0))}
-            closes, enote = self._sector_etf_closes()
             body = SM.build(holdings, ent[1], watchlist=self.watchlist()["tickers"], etf_closes=closes,
                             is_trading=_is_trading_iso)
             blocks = [body["bench"], *(s["etf"] for s in body["sectors"] if s.get("etf"))]
@@ -999,6 +1012,9 @@ class AlphaBotService:
             return clean_json(base | body | {
                 "available": True, "session": sess, "refresh_sec": SM.RULES["quote_ttl_live_sec"],
                 "quotes": {"fetched_at": ent[2], "age_sec": round(now - ent[0], 0),
+                           # 取到这份报价的那一刻，最晚一笔成交已经过去多久（实测的新旧，不引用接口自报的延迟）
+                           "trade_lag_sec": _lag_sec(ent[2], body.get("last_trade_ts")),
+                           "chunked": bool(SM._QUOTE_MODE["chunked"]),
                            "refresh_failed": ({**failed, "reason_zh": SM.REASONS.get(failed.get("reason"), failed.get("reason"))}
                                               if failed is not None else None)},
                 "etf_bars": {"available": closes is not None, "n": len(closes or {}),

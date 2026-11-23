@@ -16,12 +16,15 @@ export async function renderSectors(app, routeAlive) {
   const alive = () => routeAlive() && host.isConnected;
   let period = pref(PREF_KEY, "1d");
   let last = null, chart = null, timer = null, seq = 0, busy = false;
+  let chartEl = null, pending = null;             // 鼠标停在图上时到的新数据先存着（见 load 末尾）
 
-  async function load(refresh) {
+  // `manual`：用户点的「刷新」/「重试」。只有这时才先重画一遍让按钮变灰——自动续刷每 30 秒一次，每次都先画一遍旧的、
+  // 再画一遍新的，图会闪两下（v0.45.805 二次检查）
+  async function load(refresh, manual = false) {
     const mine = ++seq;
     clearTimeout(timer);
     busy = true;
-    if (last) draw(last);                         // 让「刷新」按钮立刻变灰
+    if (last && manual) draw(last);
     let r;
     try {
       r = await api(`/api/sector-map${refresh ? "?refresh=1" : ""}`);
@@ -31,22 +34,26 @@ export async function renderSectors(app, routeAlive) {
       again(last);                                // 一次没问到（本机服务重启等）不该让续刷从此停掉
       if (last) { last = { ...last, _error: e.message }; draw(last); } else {
         fill(host, head(null), h("div", { class: "empty err" }, `板块图取不到：${e.message}`),
-          h("p", { class: "c" }, h("button", { class: "btn", type: "button", onclick: () => { fill(host, loading()); load(true); } }, "重试")));
+          h("p", { class: "c" }, h("button", { class: "btn", type: "button", onclick: () => { fill(host, loading()); load(true, true); } }, "重试")));
       }
       return;
     }
     if (!alive() || mine !== seq) return;
     busy = false;
     last = r;
-    draw(r);
+    // 鼠标正停在图上（多半在看悬停提示）：这一份先存着，等鼠标离开再画——重画会把提示冲掉，30 秒一次就看不成了。
+    // 手动刷新、切周期不受影响（它们直接 draw，draw 会清掉存着的那份）
+    if (!manual && r.available && chartEl?.isConnected && chartEl.matches(":hover")) pending = r;
+    else draw(r);
     again(r);
   }
 
   // 下一次什么时候再问本机服务：盘中按 `refresh_sec`；不在交易时段按服务端的闲时缓存期（开盘前打开的页面要能自己接上开盘，
-  // 收盘前取的那一份也要换成真正的收盘价）。画不出来时也按闲时间隔再试。
+  // 收盘前取的那一份也要换成真正的收盘价）。画不出来 / 没问到时一分钟后再试——盘中第一次没取到不该等上一刻钟
+  // （真打不打 Yahoo 仍由服务端的失败冷却决定）。
   function again(r) {
     const idle = r?.rules?.quote_ttl_idle_sec;
-    const sec = r?.available && r.session?.live && isNum(r.refresh_sec) ? r.refresh_sec : isNum(idle) ? idle : 900;
+    const sec = !r?.available ? 60 : r.session?.live && isNum(r.refresh_sec) ? r.refresh_sec : isNum(idle) ? idle : 900;
     timer = setTimeout(() => { if (alive()) load(false); }, sec * 1000);
   }
 
@@ -56,10 +63,12 @@ export async function renderSectors(app, routeAlive) {
       h("div", {}, h("h1", {}, "板块", h("span", { class: "sub" }, "标普 500 热力图")), helpLink("sectors")),
       h("div", { class: "controls" },
         r?.available ? seg(Object.entries(P).map(([k, v]) => [k, v.label]), period, (v) => { period = v; setPref(PREF_KEY, v); draw(last); }, "周期") : null,
-        h("button", { class: "btn", type: "button", disabled: busy, onclick: () => load(true) }, busy ? "刷新中…" : "刷新")));
+        h("button", { class: "btn", type: "button", disabled: busy, onclick: () => load(true, true) }, busy ? "刷新中…" : "刷新")));
   }
 
   function draw(r) {
+    pending = null;
+    chartEl = null;
     if (chart) { release(chart); chart = null; }
     if (!r.available) {
       const wait = isNum(r.retry_after_sec) ? `，约 ${num(Math.max(r.retry_after_sec, 1), 0)} 秒后再试` : "";
@@ -69,6 +78,7 @@ export async function renderSectors(app, routeAlive) {
     }
     const P = r.rules.periods;
     if (!P[period]) period = "1d";
+    const scrollY = window.scrollY;                // 每 30 秒整页重画一次：重画后把滚动位置放回去，免得正在看的地方跳走
     // 顶部那排跟着选中的周期走；色块图只有 `map` 为真的周期（今日 / 52 周），选了 5 日 / 1 月时它仍画今日并写明
     const stripField = P[period].field;
     const mapKey = P[period].map === false ? "1d" : period;
@@ -100,12 +110,13 @@ export async function renderSectors(app, routeAlive) {
       h("span", {}, `+${clamp}% 及以上`),
       h("i", { style: { backgroundColor: heatColor(null, clamp) } }), h("span", {}, "无数据"));
 
-    const when = (r.last_trade_et || "").replace("T", " ").slice(0, 16);
+    // 新旧只写实测的：这份报价里最晚一笔成交的时刻，和取到它时那笔成交已过去多久。不引用 Yahoo 自报的延迟（与实际不符）
+    const when = (r.last_trade_et || "").replace("T", " ").slice(0, 19);
+    const every = (s) => (s >= 120 ? `${num(s / 60, 0)} 分钟` : `${num(s, 0)} 秒`);
     const sub = [`${STATE_ZH[r.market_state] || r.market_state || "状态未知"}`,
-      when ? `最后成交 ${when} ET` : null,
-      r.session?.live && isNum(r.delay_min) ? `行情约延迟 ${num(r.delay_min, 0)} 分钟` : null,
+      when ? `最后成交 ${when} ET${r.session?.live && isNum(q.trade_lag_sec) ? `（取到时是 ${num(q.trade_lag_sec, 0)} 秒前的）` : ""}` : null,
       `报价取于 ${timeAgo(q.age_sec) || "刚刚"}`,
-      r.session?.live ? `每 ${num(r.refresh_sec / 60, 0)} 分钟自动刷新` : `不在交易时段，每 ${num((r.rules.quote_ttl_idle_sec || 900) / 60, 0)} 分钟看一次`,
+      r.session?.live ? `每 ${every(r.refresh_sec)}自动刷新` : `不在交易时段，每 ${num((r.rules.quote_ttl_idle_sec || 900) / 60, 0)} 分钟看一次`,
       `成分与权重截至 ${hd.as_of || "—"}`].filter(Boolean).join(" · ");
 
     const notes = [
@@ -135,6 +146,9 @@ export async function renderSectors(app, routeAlive) {
       h("p", { class: "callout" }, r.disclaimer, " 点色块打开那只票的「标的」页。"));
     chart = sectorTreemap(el, { sectors: r.sectors, field, clamp, periodLabel: P[mapKey].label, reasons: r.rules.reasons,
       onPick: (k) => go(`#/t/${encodeURIComponent(k.ticker)}/levels`) });
+    if (scrollY > 0) window.scrollTo(0, scrollY);
+    chartEl = el;
+    el.addEventListener("mouseleave", () => { if (pending && alive()) draw(pending); });
   }
 
   fill(host, head(null), loading("取成分与报价…（每天第一次要下载 12 份持仓文件和 12 只基金的日线，约一分钟）"));
