@@ -2,14 +2,29 @@
 // 默认关：开启要人点确认（每问都花 API 费用、数据会发给 Anthropic）。回答一律当纯文本显示（不当 HTML）；
 // 搜索来源只显示网址文字、不做成链接——在桌面程序的窗口里点外链会把整个窗口带离 Alpha Bot。
 // 抽屉的三块（头 / 消息 / 输入）只建一次（v0.45.616）：每次重建输入框会丢焦点，发完一问还得再点一下才能接着打字。
+// 历史对话（v0.45.808，用户 11-23 定「像 Claude Code 一样保留，不要的我自己归档」）：对话存在服务端磁盘上，「历史」列出来、
+// 点开接着聊；归档只是从列表里藏起来，随时取消归档，没有删除。上次开着的对话记在 localStorage（只是方便，取不到就从新对话开始）。
 import { api, h, fill, money } from "./lib.js";
 
 const drawer = document.getElementById("chat-drawer");
 const toggle = document.getElementById("chat-toggle");
 let status = null;        // GET /api/chat
-let convId = null;        // 当前对话（历史存在服务端，关掉 Alpha Bot 就没了）
+let convId = null;        // 当前对话（存在服务端磁盘上，v0.45.808）
+let convArchived = false; // 当前对话是归档里点开的（再问一句服务端自动取消归档）
 let log = [];             // 抽屉里显示的消息
 let busy = false;
+let view = "chat";        // "chat" | "history"
+let showArchived = false; // 历史列表看的是不是「已归档」
+let hist = null;          // 历史列表：{ data } | { error } | null（加载中）
+let restored = false;     // 打开抽屉时是否已试过恢复上次的对话
+const LAST_KEY = "alphabot.chat.last";
+
+function remember(id) {
+  try { if (id) localStorage.setItem(LAST_KEY, id); else localStorage.removeItem(LAST_KEY); } catch { /* 存不了就不记 */ }
+}
+function recalled() {
+  try { return localStorage.getItem(LAST_KEY); } catch { return null; }
+}
 let headEl, bodyEl, formEl, ta, sendBtn;
 
 // 当前页面 ⇒ 随消息发给服务端的上下文（服务端只认登记过的页面名与合规代码）
@@ -55,7 +70,7 @@ async function send() {
   render();
   try {
     const r = await api("/api/chat", { method: "POST", body: { message: text, conversation_id: convId, page: pageContext() } });
-    convId = r.conversation_id;
+    convId = r.conversation_id; convArchived = false; remember(convId);
     log.pop(); log.push({ role: "bot", r });
     loadStatus();          // 今天已花 / spend_error 只认服务端那一处（v0.45.637；此前只抄回 spent_today，spend_error 留旧值）
   } catch (e) {
@@ -68,7 +83,83 @@ async function send() {
   if (!drawer.hidden) ta.focus();
 }
 
-function newConversation() { convId = null; log = []; render(); ta.focus(); }
+function newConversation() {
+  if (busy) return;
+  convId = null; convArchived = false; log = []; view = "chat"; remember(null);
+  render(); if (canAsk()) ta.focus();
+}
+
+// 打开一场历史对话：显示存下的每一问（用户原话 + 当时的结果）；接着问就接在它后面
+async function openConversation(id, { quiet = false } = {}) {
+  if (busy) return;
+  try {
+    const c = await api(`/api/chat/conversations/${encodeURIComponent(id)}`);
+    convId = c.id; convArchived = !!c.archived; remember(convId);
+    log = (c.display || []).map((d) => (d.role === "user" ? { role: "user", text: d.text } : { role: "bot", r: d.r || {} }));
+  } catch (e) {
+    if (quiet && e.status === 404) { remember(null); return; }      // 上次那场不在了：从新对话开始
+    convId = null; convArchived = false; remember(null);
+    log = [{ role: "err", text: `这场对话打不开：${e.message}` }];
+  }
+  view = "chat";
+  render();
+  if (canAsk()) ta.focus();
+}
+
+async function loadHistory() {
+  hist = null; render();
+  try { hist = { data: await api(`/api/chat/conversations${showArchived ? "?archived=1" : ""}`) }; }
+  catch (e) { hist = { error: e.message }; }
+  render();
+}
+
+async function setArchived(id, archived) {
+  try { await api(`/api/chat/conversations/${encodeURIComponent(id)}`, { method: "POST", body: { archived } }); }
+  catch (e) { alert(`${archived ? "归档" : "取消归档"}失败：${e.message}`); return; }
+  if (id === convId) {
+    if (archived) { convId = null; convArchived = false; log = []; remember(null); }   // 归档了正开着的那场 ⇒ 回到新对话
+    else convArchived = false;
+  }
+  loadHistory();
+}
+
+function showHistory(on) {
+  view = on ? "history" : "chat";
+  if (on) loadHistory(); else render();
+}
+
+function when(sec) {
+  if (!sec) return "—";
+  const d = new Date(sec * 1000), p = (n) => String(n).padStart(2, "0");
+  const md = `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return d.getFullYear() === new Date().getFullYear() ? md : `${d.getFullYear()}-${md}`;
+}
+
+function historyBody() {
+  const out = [h("div", { class: "chat-hist-bar" },
+    h("strong", {}, showArchived ? "已归档的对话" : "历史对话"),
+    hist && hist.data ? h("button", { class: "link-btn", type: "button",
+      onclick: () => { showArchived = !showArchived; loadHistory(); } },
+    showArchived ? `返回未归档（${hist.data.active_count}）` : `已归档（${hist.data.archived_count}）`) : null)];
+  if (!hist) return [...out, h("p", { class: "muted" }, "加载中…")];
+  if (hist.error) return [...out, h("p", { class: "chat-msg err" }, `读不到历史对话：${hist.error}`)];
+  const rows = hist.data.conversations || [];
+  if (!rows.length) {
+    out.push(h("p", { class: "muted" }, showArchived ? "没有已归档的对话。" : "还没有存下来的对话。问一句就会出现在这里。"));
+    return out;
+  }
+  for (const c of rows) {
+    const meta = c.error ? c.error : `${when(c.updated)} · ${c.turns} 问${c.unsaved ? " · 没存上盘" : ""}`;
+    out.push(h("div", { class: `chat-hist-row${c.id === convId ? " current" : ""}` },
+      h("button", { class: "chat-hist-open", type: "button", disabled: busy || !!c.error,
+        title: c.title, onclick: () => openConversation(c.id) },
+      h("span", { class: "chat-hist-title" }, c.title),
+      h("span", { class: c.error ? "chat-hist-meta warn" : "chat-hist-meta" }, meta)),
+      c.error ? null : h("button", { class: "link-btn", type: "button", onclick: () => setArchived(c.id, !showArchived) },
+        showArchived ? "取消归档" : "归档")));
+  }
+  return out;
+}
 
 function botMessage(r) {
   const meta = [`本问 ${money(r.cost_usd, 3)}`, `API ${r.api_calls} 次`];
@@ -107,23 +198,29 @@ function body() {
     return botMessage(m.r);
   });
   if (!msgs.length) msgs.push(h("p", { class: "muted" }, "例如：「NVDA 现在是什么 gamma 环境？月度路由为什么退到远档？」"));
+  if (convArchived) msgs.unshift(h("p", { class: "muted" }, "这场对话已归档；再问一句会自动取消归档。"));
   // 花费记录读不了：顶栏只能显示「—」，原因（与发送时被拒的那句相同）放在最上面（v0.45.637，635 二次检查 #2）
   if (s.spend_error) msgs.unshift(h("p", { class: "chat-msg err" }, s.spend_error));
   if (s.status_error) msgs.unshift(h("p", { class: "chat-msg err" }, `对话状态暂时取不到（${s.status_error}）：上面的「今天已花」可能不是最新的。`));
   return msgs;
 }
 
+const canBrowse = () => status && !status.error && !status.demo;
+
 function render() {
   const s = status || {};
   const spent = s.enabled ? `今天 ${s.spent_today == null ? "—" : money(s.spent_today, 2)} / ${money(s.cap_usd, 2)}` : "";
+  const inHistory = view === "history" && canBrowse();
   fill(headEl,
     h("strong", {}, "对话"),
     h("span", { class: "muted" }, spent),
-    canAsk() ? h("button", { class: "link-btn", type: "button", onclick: newConversation }, "新对话") : null,
+    canBrowse() ? h("button", { class: "link-btn", type: "button", "aria-pressed": inHistory ? "true" : "false",
+      onclick: () => showHistory(!inHistory) }, inHistory ? "返回" : "历史") : null,
+    canAsk() ? h("button", { class: "link-btn", type: "button", disabled: busy, onclick: newConversation }, "新对话") : null,
     h("button", { class: "link-btn", type: "button", "aria-label": "收起对话抽屉（Esc）", onclick: () => open(false) }, "收起"));
-  fill(bodyEl, ...body());
-  bodyEl.scrollTop = bodyEl.scrollHeight;
-  formEl.hidden = !canAsk();
+  fill(bodyEl, ...(inHistory ? historyBody() : body()));
+  bodyEl.scrollTop = inHistory ? 0 : bodyEl.scrollHeight;
+  formEl.hidden = inHistory || !canAsk();
   ta.disabled = busy;
   sendBtn.disabled = busy;
   sendBtn.textContent = busy ? "等待回答…" : "发送";
@@ -138,8 +235,11 @@ function placeBelowTopbar() {
 function open(on) {
   drawer.hidden = !on;
   toggle.setAttribute("aria-expanded", on ? "true" : "false");
-  if (on) { placeBelowTopbar(); render(); loadStatus(); }
-  else toggle.focus();
+  if (on) {
+    placeBelowTopbar(); render(); loadStatus();
+    // 第一次打开：接着上次开着的那场（服务端已存盘）；不在了就从新对话开始
+    if (!restored) { restored = true; const last = recalled(); if (last && !convId && !log.length) openConversation(last, { quiet: true }); }
+  } else toggle.focus();
 }
 
 export function initChat() {
