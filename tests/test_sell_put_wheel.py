@@ -501,6 +501,8 @@ class TestLifecycle:
         lot = _lot()["AAA"]
         assert lot["state"] == "shares" and lot["shares"]["n"] == 100 and lot["call"]["strike"] == 96.0
         assert lot["call"]["rule_version"] == W._VERSION
+        # v0.45.809：call 开仓同样记 bid / ask / mid（成交仍按 bid）：96 call bid 3.0、ask 3.12 ⇒ mid 3.06、多 $6
+        assert e["fill"] == {"bid": 3.0, "ask": 3.12, "mid": 3.06, "mid_gap_usd": 6.0} and lot["call"]["fill"] == e["fill"]
         # 现金：100000 + 200（put 权利金）− 9000（接货）+ 300（call 权利金）
         assert _state()["meta"]["cash"] == pytest.approx(100_000 + 200 - 9_000 + 300)
 
@@ -802,6 +804,275 @@ class TestLedgerSafety:
         assert "只记录，非检验" in md and "AAA" in md
 
 
+# ───────────────────────────── 盘中开仓（v0.45.810） ─────────────────────────────
+
+D_LIVE = "2026-12-01"            # ≥ OPEN_PHASE_FROM 的交易日（周二）：mark 阶段会核对盘中那一轮
+
+
+def live(spot, contracts, day=D_LIVE, live_=True, vintage=None):
+    return {"underlying_price": spot, "contracts": contracts, "session_live": live_,
+            "vintage_date": vintage or day, "payload_last_trade_time": f"{day}T15:14:00"}
+
+
+LIVE_PUTS = [put(90, 2.0, exp="2027-02-05", sym="AAA270205P00090000")]   # D_LIVE 起 66 天，落在夹具窗口 55~90
+
+
+class TestIntradayOpen:
+    """开仓只在 phase="open"（盘中）且报价是今天盘中的；收盘后 mark 只结算 + 盯市 + 净值，并核对盘中那一轮跑没跑。"""
+
+    def _open(self, chain_=None):
+        ch = chain_ or live(100.0, LIVE_PUTS)
+        return W.run_for_date(D_LIVE, contracts_fn=contracts_for({D_LIVE: {"AAA": ch}}),
+                              closes_fn=closes_for({}), phase="open")
+
+    def test_open_phase_sells_at_the_intraday_bid_and_writes_no_equity_row(self):
+        r = self._open()
+        assert [e["event"] for e in r["events"]] == ["put_sold"]
+        e = r["events"][0]
+        assert e["premium"] == 2.0 and e["phase"] == "open" and e["quote_time"] == f"{D_LIVE}T15:14:00"
+        assert e["rule_version"] == W._VERSION == "0.45.810"
+        st = _state()
+        assert st["equity"] == [] and st["meta"]["cash"] == 100_200.0
+        rec = st["meta"]["last_open_run"]
+        assert rec["date"] == D_LIVE and rec["outcome"] == "ran" and rec["stats"]["runs"] >= 1
+        assert st["meta"].get("last_run_date") is None                 # 收盘口径的「这天跑完了」只由 mark 写
+
+    @pytest.mark.parametrize("ch", [live(100.0, LIVE_PUTS, live_=False),
+                                    live(100.0, LIVE_PUTS, vintage="2026-11-30")])
+    def test_open_phase_refuses_a_quote_that_is_not_todays_intraday(self, ch):
+        r = self._open(ch)
+        assert r["events"] == [] and [x["reason"] for x in r["skipped"]] == ["quote_not_intraday"]
+
+    def test_mark_phase_never_opens_but_marks_and_writes_the_equity_row(self):
+        r = W.run_for_date(D_LIVE, contracts_fn=contracts_for({D_LIVE: {"AAA": live(100.0, LIVE_PUTS, live_=False)}}),
+                           closes_fn=closes_for({}), phase="mark")
+        assert r["events"] == [] and _state()["lots"] == []
+        assert [row["date"] for row in _state()["equity"]] == [D_LIVE]
+
+    def test_open_then_mark_the_same_day(self):
+        self._open()
+        closing = live(101.0, [put(90, 1.8, ask=1.9, exp="2027-02-05", sym="AAA270205P00090000")], live_=False)
+        r = W.run_for_date(D_LIVE, contracts_fn=contracts_for({D_LIVE: {"AAA": closing}}),
+                           closes_fn=closes_for({}), phase="mark")
+        assert r["events"] == []
+        lot = _lot()["AAA"]
+        assert lot["put"]["last_mark"] == pytest.approx(1.85) and lot["put"]["premium"] == 2.0
+        row = _state()["equity"][-1]
+        assert row["nav"] == pytest.approx(100_200.0 - 185.0) and row["n_events"] == 1   # 盘中那笔算进当天
+        assert W.stats()["open_missing"] == 0
+
+    def test_mark_reports_open_missing_when_the_intraday_run_left_no_record(self):
+        W.run_for_date(D_LIVE, contracts_fn=contracts_for({}), closes_fn=closes_for({}), phase="mark")
+        s = W.stats()
+        assert s["open_missing"] == 1 and any(i["kind"] == "open_missing" for i in s["items"])
+
+    @pytest.mark.parametrize("outcome", ["outside_window", "error"])
+    def test_mark_reports_open_missing_when_the_intraday_run_did_not_trade(self, outcome):
+        W.record_open_outcome(D_LIVE, outcome, "x")
+        W.run_for_date(D_LIVE, contracts_fn=contracts_for({}), closes_fn=closes_for({}), phase="mark")
+        assert W.stats()["open_missing"] == 1
+
+    def test_no_check_before_the_switch_date(self):
+        W.run_for_date(D0, contracts_fn=contracts_for({}), closes_fn=closes_for({}), phase="mark")
+        assert W.stats()["open_missing"] == 0
+
+    def test_intraday_failures_are_carried_into_the_evening_counters(self):
+        self._open(None)
+        W.reset_stats()                                                  # 晚上是另一个进程：计数从零开始
+        meta = ledger_io.load_json(W._paths()["meta"])
+        meta["last_open_run"]["stats"].update(run_errors=1, rv_total=1, rv_missing=1, all_chains_missing=True,
+                                              chain_total=1, items=[{"kind": "run_error", "detail": "boom"}])
+        ledger_io.write_json(W._paths()["meta"], meta)
+        W.run_for_date(D_LIVE, contracts_fn=contracts_for({}), closes_fn=closes_for({}), phase="mark")
+        s = W.stats()
+        assert s["run_errors"] == 1 and s["all_rv_missing"] is True and s["open_chains_missing"] == 1
+        assert s["open_missing"] == 0 and any(i["kind"] == "open:run_error" for i in s["items"])
+
+    def test_a_later_outside_window_trigger_does_not_overwrite_a_successful_run(self):
+        self._open()
+        W.record_open_outcome(D_LIVE, "outside_window", "launchd 唤醒后补触发")
+        assert _state()["meta"]["last_open_run"]["outcome"] == "ran"
+
+    def test_unknown_phase_is_rejected(self):
+        with pytest.raises(ValueError):
+            W.run_for_date(D_LIVE, phase="close")
+
+
+class TestOpenEntry:
+    """`sell_put_open.py`：休市不跑不记；窗口外 / 抛了各记一笔；窗口内调 phase="open"；plist 与代理。"""
+
+    @staticmethod
+    def _et(hh, mm, day=D_LIVE):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        y, m, d = map(int, day.split("-"))
+        return datetime(y, m, d, hh, mm, tzinfo=ZoneInfo("America/New_York"))
+
+    def test_holiday_exits_without_a_record(self):
+        import sell_put_open as O
+        assert O.run_now(self._et(15, 30), trading_day=lambda d: False) == O.EXIT_CLOSED
+        assert "last_open_run" not in (W._load_meta() or {})
+
+    def test_outside_window_records_and_does_not_trade(self):
+        import sell_put_open as O
+        called = []
+        rc = O.run_now(self._et(17, 5), runner=lambda *a, **k: called.append(1), trading_day=lambda d: True)
+        assert rc == O.EXIT_OUTSIDE and called == []
+        assert W._load_meta()["last_open_run"]["outcome"] == "outside_window"
+
+    def test_inside_window_runs_the_open_phase(self):
+        import sell_put_open as O
+        seen = []
+        rc = O.run_now(self._et(15, 30), runner=lambda as_of, phase: seen.append((as_of, phase)) or {"events": []},
+                       trading_day=lambda d: True)
+        assert rc == O.EXIT_OK and seen == [(D_LIVE, "open")]
+
+    def test_runner_exception_is_recorded(self):
+        import sell_put_open as O
+
+        def boom(*a, **k):
+            raise RuntimeError("cboe down")
+        assert O.run_now(self._et(15, 31), runner=boom, trading_day=lambda d: True) == O.EXIT_ERROR
+        rec = W._load_meta()["last_open_run"]
+        assert rec["outcome"] == "error" and "cboe down" in rec["detail"]
+
+    @pytest.mark.parametrize("hh, mm, ok", [(15, 14, False), (15, 15, True), (15, 59, True), (16, 0, False)])
+    def test_window_edges(self, hh, mm, ok):
+        assert W.open_window_ok(self._et(hh, mm)) is ok
+
+    def test_plist_fires_on_weekdays_at_local_1530_et_with_the_shared_proxy_env(self):
+        import plistlib
+        from datetime import date
+        from zoneinfo import ZoneInfo
+        import llm_shadow_daily
+        import sell_put_open as O
+        h, m = O.local_fire_time(date(2026, 12, 1), ZoneInfo("America/Denver"))
+        assert (h, m) == (13, 30)
+        assert O.local_fire_time(date(2026, 7, 1), ZoneInfo("America/Denver")) == (13, 30)   # 两边同一套夏令时
+        doc = plistlib.loads(O.render_plist(python="/py/python3", script="/x/sell_put_open.py",
+                                            log_dir="/l", hour=h, minute=m))
+        assert doc["Label"] == O.LABEL and doc["ProgramArguments"][-1] == "--now" and doc["RunAtLoad"] is False
+        assert [(e["Weekday"], e["Hour"], e["Minute"]) for e in doc["StartCalendarInterval"]] == [(wd, 13, 30) for wd in range(1, 6)]
+        env = doc["EnvironmentVariables"]
+        assert {k: env[k] for k in O.PROXY_ENV} == O.PROXY_ENV == llm_shadow_daily.PROXY_ENV
+        assert "ALPHA_HIVE_HOME" not in env
+
+
+# ───────────────────────────── 开仓同时记 mid（v0.45.809） ─────────────────────────────
+
+class TestFillQuote:
+    """成交按 bid、另记 ask / mid 与「按 mid 会多收」：数逐分钱、KPI 合计、只测量不改成交 / 现金 / 选合约。"""
+
+    def test_put_open_records_bid_ask_mid_and_the_gap(self):
+        table = {D0: {"AAA": chain(100.0, STD_PUTS)}}
+        r = W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}))
+        e = r["events"][0]
+        assert e["premium"] == 2.0                                     # 成交照旧按 bid
+        assert e["fill"] == {"bid": 2.0, "ask": 2.08, "mid": 2.04, "mid_gap_usd": 4.0}
+        assert _lot()["AAA"]["put"]["fill"] == e["fill"]
+        assert _state()["meta"]["cash"] == 100_200.0                     # 现金只认 bid，mid 不入账
+        k = W.kpis()
+        assert k["mid_gap_usd"] == 4.0 and k["n_with_mid"] == 1
+
+    def test_gap_scales_with_contracts(self):
+        assert W.fill_quote(put(90, 2.0, ask=2.2), 3) == {"bid": 2.0, "ask": 2.2, "mid": 2.1, "mid_gap_usd": 30.0}
+
+    def test_unusable_quote_gives_no_mid_rather_than_a_guess(self):
+        assert W.fill_quote({"bid": 0.0, "ask": 0.2}, 1)["mid"] is None
+        assert W.fill_quote({"bid": 1.0, "ask": 0.9}, 1)["mid_gap_usd"] is None
+
+    def test_old_events_without_fill_are_not_counted(self):
+        table = {D0: {"AAA": chain(100.0, STD_PUTS)}}
+        W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}))
+        st = _state()
+        st["events"].append({"date": "2026-11-01", "ticker": "AAA", "event": "put_sold", "premium": 1.0, "contracts": 1})
+        k = W.kpis(st)
+        assert k["n_with_mid"] == 1 and k["mid_gap_usd"] == 4.0
+
+    def test_decisions_never_read_the_fill_snapshot(self):
+        """`fill` 只写不读：模块里除了写入与 KPI 合计，没有任何地方取它（选合约 / 额度 / 结算 / 盯市都不看）。"""
+        src = (REPO / "sell_put_wheel.py").read_text(encoding="utf-8")
+        reads = [ln.strip() for ln in src.splitlines() if '"fill"' in ln or "'fill'" in ln]
+        assert all(("fill_quote(" in ln) or ("e.get(\"fill\")" in ln) for ln in reads), reads
+
+
+# ───────────────────────────── 用户手动干预（v0.45.807） ─────────────────────────────
+
+class TestManualIntervention:
+    """用户指示的人工平仓 / 开仓：现金逐分钱复算、标明 manual、越过总额度只记不挡、现金担保不够照样拒；
+    之后的每日运行把手动开的那笔当普通循环盯市，且同一只当天不再自动开第二笔。"""
+    SRC = dict(price_source="test", price_date="2026-11-03", note="用户指示")
+
+    def _open(self):
+        table = {D0: {"AAA": chain(100.0, STD_PUTS)}}
+        W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}))
+        return table
+
+    def test_close_books_the_buyback_and_ends_the_cycle(self):
+        self._open()
+        d1 = "2026-11-05"
+        ev = W.manual_close_put(d1, f"AAA-{D0}", 0.35, **self.SRC)
+        assert ev["event"] == "put_closed_manual" and ev["rule_version"] == "manual"
+        assert ev["realized_usd"] == pytest.approx((2.0 - 0.35) * 100)
+        st = _state()
+        assert st["lots"] == [] and st["meta"]["cash"] == pytest.approx(100_200.0 - 35.0)
+        assert st["events"][-1]["price_source"] == "test" and st["events"][-1]["price_date"] == "2026-11-03"
+        k = W.kpis()
+        assert k["n_put_closed_manual"] == 1 and k["cycles_closed"] == 1
+
+    def test_close_refuses_an_unknown_or_already_closed_cycle(self):
+        self._open()
+        W.manual_close_put("2026-11-05", f"AAA-{D0}", 0.35, **self.SRC)
+        with pytest.raises(ValueError):
+            W.manual_close_put("2026-11-05", f"AAA-{D0}", 0.35, **self.SRC)
+        with pytest.raises(ValueError):
+            W.manual_close_put("2026-11-05", "ZZZ-2026-11-04", 0.35, **self.SRC)
+
+    def test_sell_books_premium_marks_manual_and_records_the_cap_overrun(self):
+        self._open()                                       # 10% 额度：净值约 1 万、已占 9000 ⇒ 再开 85 的超额度
+        d1 = "2026-11-05"
+        ev = W.manual_sell_put(d1, "AAA", "AAA270122P00085000", 85.0, "2027-01-22", 5.75, **self.SRC, spot=100.0)
+        assert ev["rule_version"] == "manual" and ev["cycle"] == f"AAA-{d1}" and ev["dte"] == 78
+        assert ev["cap_check"]["within_cap"] is False and ev["cap_check"]["needed"] == 8500.0
+        assert ev["cap_check"]["held_before"] == 9000.0
+        st = _state()
+        assert st["meta"]["cash"] == pytest.approx(100_200.0 + 575.0)
+        lot = {l["cycle"]: l for l in st["lots"]}[f"AAA-{d1}"]
+        assert lot["put"]["rule_version"] == "manual" and lot["put"]["premium"] == 5.75
+        assert W.kpis()["n_put_sold_manual"] == 1
+
+    def test_sell_rejects_a_symbol_that_does_not_match_the_terms(self):
+        self._open()
+        with pytest.raises(ValueError, match="对不上"):
+            W.manual_sell_put("2026-11-05", "AAA", "AAA270122P00090000", 85.0, "2027-01-22", 1.0, **self.SRC)
+
+    def test_sell_still_refuses_when_cash_cannot_cover_the_collateral(self):
+        self._open()
+        with pytest.raises(ValueError, match="现金不够担保"):
+            W.manual_sell_put("2026-11-05", "AAA", "AAA270122P02000000", 2000.0, "2027-01-22", 1.0, contracts=1,
+                              **self.SRC)
+        assert len(_state()["lots"]) == 1 and _state()["meta"]["cash"] == pytest.approx(100_200.0)
+
+    def test_source_and_note_are_mandatory(self):
+        self._open()
+        with pytest.raises(ValueError):
+            W.manual_close_put("2026-11-05", f"AAA-{D0}", 0.35, price_source="", price_date="x", note="n")
+        with pytest.raises(ValueError):
+            W.manual_close_put("2026-11-05", f"AAA-{D0}", 0.35, price_source="s", price_date="x", note=" ")
+
+    def test_daily_run_marks_the_manual_cycle_and_opens_no_second_one_that_day(self, pinned_config):
+        table = self._open()
+        pinned_config["total_cap_pct"] = 60.0              # 额度宽到规则自己也想开 ⇒ 验证「一天一笔」挡住
+        d1 = "2026-11-05"
+        sym = "AAA270122P00085000"
+        W.manual_sell_put(d1, "AAA", sym, 85.0, "2027-01-22", 5.75, **self.SRC)
+        day = {d1: {"AAA": chain(100.0, STD_PUTS + [put(85, 1.0, ask=1.1, exp="2027-01-22", sym=sym)])}}
+        r = W.run_for_date(d1, contracts_fn=contracts_for({**table, **day}), closes_fn=closes_for({}))
+        assert r["events"] == []
+        lot = {l["cycle"]: l for l in _state()["lots"]}[f"AAA-{d1}"]
+        assert lot["put"]["last_mark"] == pytest.approx(1.05) and lot["put"]["last_mark_date"] == d1
+
+
 # ───────────────────────────── 原因码 ─────────────────────────────
 
 class TestReasonTable:
@@ -974,6 +1245,8 @@ class TestAlert:
         ({"chain_missing": 3, "all_chains_missing": True}, "一只期权链都没取到"),
         ({"max_deferred_days": 3, "deferred_alert": True}, "结算已延期 3 天"),
         ({"rv_total": 3, "rv_missing": 3, "all_rv_missing": True}, "实际波动率都没算出来"),
+        ({"open_missing": 1}, "盘中开仓那一轮没跑成"),                      # v0.45.810
+        ({"open_chains_missing": 1}, "盘中开仓那一轮一只期权链都没取到"),
     ])
     def test_each_failure_shape_is_a_p2(self, tmp_path, change, phrase):
         alerts, _ = _analyze(tmp_path, {**self.CLEAN, **change})
@@ -995,4 +1268,5 @@ class TestHookIsWired:
         src = (REPO / "alpha_hive_daily_report.py").read_text(encoding="utf-8")
         i = src.index("import sell_put_wheel as _spw")
         block = src[i - 200:i + 1300]
-        assert "_spw.run_for_date(self.date_str)" in block and "接货型卖 put 账本更新失败(非致命)" in block
+        # v0.45.810：收盘后的扫描只结算 + 盯市（开仓在盘中 launchd 任务里）
+        assert '_spw.run_for_date(self.date_str, phase="mark")' in block and "接货型卖 put 账本更新失败(非致命)" in block

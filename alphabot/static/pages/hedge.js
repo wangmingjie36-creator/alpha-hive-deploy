@@ -5,6 +5,7 @@ import { lines, C } from "../charts.js";
 import { renderTailHedge } from "./hedge_tail.js";
 import { tailBudgetPanel } from "./hedge_tail_budget.js";
 import { renderBetaSens } from "./hedge_beta.js";
+import { renderHedgeLive } from "./hedge_live.js";
 
 const sMoney = (v, dp = 0) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}$${num(Math.abs(v), dp)}` : "—");
 const sPct = (v, dp = 2) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}${num(Math.abs(v), dp)}%` : "—");
@@ -193,6 +194,7 @@ export async function renderHedge(root, alive) {
   if ((pc.gaps || []).length) warns.push(`${L.date} 另缺：${pc.gaps.join("；")}`);
   // 买价为 0 的腿不是「缺」：Greeks 取 CBOE 模型值（没有 mid）、已计入带位——说出来，别让它悄悄进决定
   if (pc.n_bid_zero) warns.push(`${L.date} 带位含 ${pc.n_bid_zero} 张买价为 0 的腿（${(pc.bid_zero || []).join("、")}）：用的是 CBOE 模型 Greeks，没有中间价；这些腿没有进压力表。`);
+  if (pc.n_expiry_intrinsic) warns.push(`${L.date} 带位含 ${pc.n_expiry_intrinsic} 张当天到期的腿（${(pc.expiry_intrinsic || []).join("、")}）：已按当天收盘的内在价值锁定（账本现金结算，收盘后对标的没有敞口，Delta 记 0），不用 CBOE 报价；这些腿没有进压力表。`);
   // 被排除的标的不是「没有敞口」：点名 + 估算额，让它变大时看得见（v0.45.545）
   // v0.45.701：SPY 覆盖本来就不看股票纸面组合（rules.hedge_stock_book 为假）⇒ 只有被排除的「跨式」才值得点名；
   // 旧审计里只有股票仓的那几行不再显示（它们现在跟别的股票仓一样本来就不进对冲）
@@ -211,8 +213,9 @@ export async function renderHedge(root, alive) {
     kpi("标记价", money(a.mark), a.mark_stale ? "down" : "", a.mark_date ? `标记于 ${a.mark_date}` : null),
     kpi("市值", money(a.market_value, 0)), kpi("现金", money(a.cash, 0)),
     kpi("累计盈亏（= 净值）", sMoney(a.nav), tone(a.nav)),
-    kpi("浮动", sMoney(a.unrealized_usd), tone(a.unrealized_usd)), kpi("已实现", sMoney(a.realized_usd), tone(a.realized_usd)));
+    kpi("浮动（收盘）", sMoney(a.unrealized_usd), tone(a.unrealized_usd)), kpi("已实现", sMoney(a.realized_usd), tone(a.realized_usd)));
 
+  const liveHost = h("div");     // 此刻浮动（v0.45.800）：另一个接口、现取报价，盘中自动续刷，不阻塞本页其余部分
   const tailBudgetEl = tailBudgetPanel(d.tail);     // 组合尾部预算（v0.45.649）：数据随 /api/hedge 来（审计文件的 tail 一节）
   const betaHost = h("div");     // β 窗口对照（v0.45.662）：另一个接口、要现取 250 日 β（yfinance），不阻塞本页其余部分
   const tailHost = h("div");     // 尾部对冲候选（v0.45.643）：另一个接口、要现拉 SPY 期权链，不阻塞本页其余部分
@@ -242,6 +245,8 @@ export async function renderHedge(root, alive) {
     warns.map((w) => h("p", { class: "callout warn" }, w)),
     panel("账户", { sub: `起始现金 0，所以净值就是开账（${a.starting_date || "—"}）以来的累计盈亏 · 账目核对 ${a.identity_ok === true ? `✓（与 ${a.identity_checked_against} 净值行一致）` : a.identity_ok === false ? "✗" : `—（${a.identity_reason || "核对不了"}）`}` }, kpis),
     h("div", { style: { height: "16px" } }),
+    liveHost,
+    h("div", { style: { height: "16px" } }),
     latestPanel(L, rules),
     h("div", { style: { height: "16px" } }),
     h("div", { class: "grid halves" },
@@ -266,6 +271,7 @@ export async function renderHedge(root, alive) {
     gatePanel(g),
     h("p", { class: "note small muted", style: { marginTop: "14px" } }, `对冲只看 β·Delta：vega 超 ${num(rules.vega_alert_pct, 1)}% / gamma 超 ${num(rules.gamma_alert_pct, 1)}% NAV 只告警、不对冲；缺价 / 缺 β / 缺报价时一律不对冲。观察项：不进评分、不进股票纸面组合、不构成投资建议。`));
 
+  renderHedgeLive(liveHost, alive);
   renderTailHedge(tailHost, alive);
   renderBetaSens(betaHost, alive);
   tailBudgetEl._after?.();

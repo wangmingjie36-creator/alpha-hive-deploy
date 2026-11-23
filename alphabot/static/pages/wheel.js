@@ -2,6 +2,7 @@
 // 规则冻结在 experiments/sell_put_wheel_prereg.md；它是测量账本、不是检验——页面不给「推荐」「综合分」。
 // 数字（盈亏 / 基准 / 占用）全由服务端算好，前端只排版；会变的规则常量取自 /api/method 的 wheel.*（经 d.rules）。
 import { api, h, helpLink, num, money, panel, table, isNum, fill } from "../lib.js";
+import { renderWheelLive } from "./wheel_live.js";
 
 const sMoney = (v, dp = 0) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}$${num(Math.abs(v), dp)}` : "—");
 const sPct = (v, dp = 2) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}${num(Math.abs(v), dp)}%` : "—");
@@ -17,6 +18,10 @@ function legCell(leg) {
     leg.settle_deferred_since ? h("span", { class: "chip warn", title: leg.settle_deferred_reason_zh || leg.settle_deferred_reason || "" }, `结算延期（自 ${leg.settle_deferred_since}）`) : null);
 }
 
+// v0.45.809：成交按 bid，另记开仓那一刻的 mid——「按 mid 成交会多收多少」只测量，不进任何决定
+const midSub = (f) => (f && isNum(f.mid) ? h("div", { class: "sub" }, `开仓 mid ${num(f.mid, 2)}`
+  + (isNum(f.mid_gap_usd) ? ` · 按 mid 多 ${money(f.mid_gap_usd, 0)}` : "")) : null);
+
 function lotsPanel(d) {
   const cols = [
     { label: "标的", render: (r) => h("b", {}, r.ticker) },
@@ -24,17 +29,19 @@ function lotsPanel(d) {
     { label: "张数", cls: "r", render: (r) => num(r.contracts, 0) },
     { label: "put（行权价 · 到期）", render: (r) => legCell(r.put) },
     { label: "put 权利金", cls: "r", render: (r) => (r.put ? h("span", {}, num(r.put.premium, 2),
+      r.put.rule_version === "manual" ? h("span", { class: "chip warn", title: r.put.price_source || "用户指示的手动开仓" }, "手动") : null,
       h("div", { class: "sub" }, `年化 ${isNum(r.put.annual_yield_pct) ? num(r.put.annual_yield_pct, 1) + "%" : "—"}`
-        + (isNum(r.put.iv_rv) ? ` · IV÷RV ${num(r.put.iv_rv, 2)}` : ""))) : "—") },
+        + (isNum(r.put.iv_rv) ? ` · IV÷RV ${num(r.put.iv_rv, 2)}` : "")),
+      midSub(r.put.fill)) : "—") },
     { label: "接货价", cls: "r", render: (r) => (r.put ? h("span", {}, num(r.put.accept_price, 2),
       r.put.accept_price_source === "placeholder" ? h("span", { class: "chip warn", title: "用户还没给接货价，这是开仓当天现价打折的占位" }, "占位") : null) : "—") },
     { label: "持股", cls: "r", render: (r) => (r.shares ? `${r.shares.n} 股 @ ${num(r.shares.assigned_price, 2)}` : "—") },
     { label: "call（行权价 · 到期）", render: (r) => (r.call ? h("span", {}, legCell(r.call),
       h("div", { class: "sub" }, `权利金 ${num(r.call.premium, 2)} · 年化 ${isNum(r.call.annual_yield_pct) ? num(r.call.annual_yield_pct, 1) + "%" : "—"}`
-        + (isNum(r.call.iv_rv) ? ` · IV÷RV ${num(r.call.iv_rv, 2)}` : "")))
+        + (isNum(r.call.iv_rv) ? ` · IV÷RV ${num(r.call.iv_rv, 2)}` : "")), midSub(r.call.fill))
       : (r.shares && isNum(r.shares.call_trigger) ? h("span", { class: "sub" }, `收盘到 ${num(r.shares.call_trigger, 2)} 才卖`) : "—")) },
     { label: "累计权利金", cls: "r", render: (r) => money(r.premiums_collected_usd, 0) },
-    { label: "持股浮动", cls: "r", render: (r) => (r.shares ? h("span", { class: tone(r.shares.unrealized_usd) }, sMoney(r.shares.unrealized_usd)) : "—") },
+    { label: "持股浮动（收盘）", cls: "r", render: (r) => (r.shares ? h("span", { class: tone(r.shares.unrealized_usd) }, sMoney(r.shares.unrealized_usd)) : "—") },
   ];
   return panel("当前持仓", { sub: "每个循环一条（加仓后同一只会有多条，各自到期、各自结算）；put 作废或被叫走后那一圈结束" },
     d.lots.length ? table(cols, d.lots) : h("div", { class: "empty" }, "现在没有持仓（还没开过，或这一圈刚结束、下一个交易日再开）。"));
@@ -76,7 +83,7 @@ export async function renderWheel(root, alive) {
   const r = d.rules || {};
   const head = h("div", { class: "page-head" }, h("div", {},
     h("h1", {}, "接货型卖 put", h("span", { class: "sub" }, d.available ? `账本 ${d.as_of || "—"}` : "")),
-    h("p", { class: "lede" }, `纸面账本（模拟成交，不连券商）。新开仓名单：${(r.universe || []).join(" / ") || "—"}（退出名单的标的，已开的那笔照常持有到结算）。先卖 put（30~50 天内、不高于接货价、IV ÷ RV ≥ 门槛的合格合约里，按账本规则「年化 × IV/RV」选一张），到期收盘低于行权价就接货，`
+    h("p", { class: "lede" }, `纸面账本（模拟成交，不连券商）。新开仓名单：${(r.universe || []).join(" / ") || "—"}（退出名单的标的，已开的那笔照常持有到结算）。先卖 put（30~50 天内、不高于接货价、IV ÷ RV ≥ 门槛的合格合约里，按账本规则「年化 × IV/RV」选一张），每个交易日美东 15:30 在盘中开仓、按那一刻报价（约延迟 15 分钟）的 bid 成交（0.45.810 起；此前按收盘那份报价），到期收盘低于行权价就接货，`
       + "接货后卖 covered call，被叫走一圈结束；没有止损止盈。这是测量账本，不是检验，也不给任何推荐。")),
     helpLink("wheel"));
   const tabs = h("p", { class: "small" }, h("b", {}, "账本"), "　·　", h("a", { href: "#/wheel/screen" }, "筛选：30 只标的里卖 put 好不好做 →"));
@@ -96,15 +103,21 @@ export async function renderWheel(root, alive) {
   }
   for (const x of d.deferred || []) warns.push(`${x.ticker} 的 ${x.leg === "put" ? "put" : "call"}（到期 ${x.expiry}）还没结算：${x.reason_zh || x.reason}——拿不到到期那一场的收盘，不会拿前一天的价顶替。`);
   for (const [tk, why] of Object.entries(d.chain_errors || {})) warns.push(`${tk} 今天没取到期权链：${why}`);
+  const o = d.open_run;
+  if (o && o.outcome && o.outcome !== "ran") warns.push(`盘中开仓 ${o.date}：${o.outcome_zh}${o.detail ? `（${o.detail}）` : ""}`);
   const skippedBits = (d.skipped || []).map((s) => `${s.ticker} ${s.leg === "put" ? "put" : "call"}：${s.reason_zh}${s.leg === "call" && s.detail ? `（${s.detail}）` : ""}`);
   const kpis = h("div", { class: "kpis" },
     kpi("净值", money(a.nav, 0), "", `起始 ${money(a.starting_capital, 0)}`),
     kpi("收益", sPct(a.return_pct, 2), tone(a.return_pct)),
     kpi("现金", money(a.cash, 0)), kpi("put 担保占用", money(a.reserved_puts, 0)),
-    kpi("持股市值", money(a.shares_value, 0)), kpi("累计权利金", money(d.kpis?.premium_collected_usd, 0)));
+    kpi("持股市值", money(a.shares_value, 0)), kpi("累计权利金", money(d.kpis?.premium_collected_usd, 0)),
+    d.kpis?.n_with_mid ? kpi("按 mid 会多收", money(d.kpis.mid_gap_usd, 0), "", `${d.kpis.n_with_mid} 笔有开仓 mid（0.45.809 起）`) : null);
+  const liveHost = h("div");     // 此刻浮动（v0.45.801）：另一个接口、现取 CBOE 报价，盘中自动续刷，不阻塞本页其余部分
   fill(root, head, tabs, ...warns.map((w) => h("p", { class: "callout warn" }, w)), kpis,
+    o && o.outcome === "ran" ? h("p", { class: "small muted" }, `盘中开仓 ${o.date}：${o.outcome_zh}`) : null,
     skippedBits.length ? h("p", { class: "small muted" }, `今天没开 / 没卖的：${skippedBits.join("；")}`) : null,
-    lotsPanel(d), benchmarkPanel(d), eventsPanel(d),
-    h("p", { class: "note small muted" }, "成交一律按 bid（保守）、未到期的腿按 mid 盯市，所以刚开仓那天净值会比起始略低（点差）。"
+    lotsPanel(d), liveHost, benchmarkPanel(d), eventsPanel(d),
+    h("p", { class: "note small muted" }, "成交一律按 bid（保守）、未到期的腿按 mid 盯市，所以刚开仓那天净值会比起始略低（点差）。0.45.809 起每笔开仓另记当时的 mid，「按 mid 会多收」= 若挂 mid 成交多收的合计——能不能真按 mid 成交没有核对。"
       + "美式提前行权、保证金、分红、手续费都不建模。"));
+  renderWheelLive(liveHost, alive);
 }

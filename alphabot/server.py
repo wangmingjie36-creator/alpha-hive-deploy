@@ -217,6 +217,14 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         return svc.wheel_screen_chain(request.path_params["ticker"])
 
     @api
+    def wheel_live(request):
+        return svc.wheel_live(force=_q(request, "force") == "1")
+
+    @api
+    def hedge_live(request):
+        return svc.hedge_live(force=_q(request, "force") == "1")
+
+    @api
     def hedge_tail(request):
         return svc.tail_hedge(force=_q(request, "force") == "1")
 
@@ -264,6 +272,31 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         except Exception as exc:  # noqa: BLE001 - API 报错 / 网络 / 记账失败：原样说出类型与原因，不吞
             _log.warning("对话失败：%s: %s", type(exc).__name__, exc)
             return _json({"error": f"对话失败：{type(exc).__name__}: {exc}"}, 502)
+
+    async def chat_conversations(request: Request):
+        """历史列表（v0.45.808）：GET ?archived=1 只列已归档的。只读本机文件、不花钱。"""
+        from starlette.concurrency import run_in_threadpool
+        try:
+            return _json(await run_in_threadpool(chat.list_conversations, _q(request, "archived") == "1"))
+        except ChatError as exc:
+            return _json({"error": str(exc)}, exc.status)
+
+    async def chat_conversation(request: Request):
+        """GET = 一场对话的显示记录；POST {"archived": true|false} = 归档 / 取消归档（没有删除）。"""
+        from starlette.concurrency import run_in_threadpool
+        cid = request.path_params["cid"]
+        try:
+            if request.method == "GET":
+                return _json(await run_in_threadpool(chat.get_conversation, cid))
+            try:
+                body = await request.json()
+            except (ValueError, UnicodeDecodeError):
+                return _json({"error": "请求体须为 JSON"}, 400)
+            if not isinstance(body, dict):
+                return _json({"error": "请求体须为 JSON 对象"}, 400)
+            return _json(await run_in_threadpool(chat.set_archived, cid, body.get("archived")))
+        except ChatError as exc:
+            return _json({"error": str(exc)}, exc.status)
 
     async def thesis_claude_api(request: Request):
         """GET = 条件、预估费用、今天已花、上次结果与进度；POST {"confirm": true} = 开始核对（后台跑，页面轮询 GET）。
@@ -334,12 +367,16 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/wheel/screen", wheel_screen),
         Route("/api/wheel/screen/prices", wheel_screen_prices),
         Route("/api/wheel/screen/chain/{ticker}", wheel_screen_chain),
+        Route("/api/hedge/live", hedge_live),
+        Route("/api/wheel/live", wheel_live),
         Route("/api/hedge/tail", hedge_tail),
         Route("/api/hedge/beta", hedge_beta),
         Route("/api/straddle/live/{ticker}", straddle_live),
         Route("/api/straddle/compare/{ticker}", straddle_compare),
         Route("/api/settings", settings, methods=["GET", "PUT"]),
         Route("/api/chat", chat_api, methods=["GET", "POST"]),
+        Route("/api/chat/conversations", chat_conversations),
+        Route("/api/chat/conversations/{cid}", chat_conversation, methods=["GET", "POST"]),
         Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
     ]
 

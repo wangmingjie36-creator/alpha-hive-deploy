@@ -450,7 +450,8 @@ def _greek_legs(greeks: Optional[dict]) -> Dict[str, dict]:
     out = {}
     for r in (greeks or {}).get("rows") or []:
         if isinstance(r, dict) and r.get("kind") == "option" and r.get("symbol"):
-            out[str(r["symbol"])] = {k: r.get(k) for k in (*GREEK_KEYS, "iv", "mid", "quote_missing", "bid_zero")}
+            out[str(r["symbol"])] = {k: r.get(k) for k in (*GREEK_KEYS, "iv", "mid", "quote_missing", "bid_zero",
+                                                                  "expiry_intrinsic")}
     return out
 
 
@@ -468,6 +469,9 @@ def position_view(p: dict, *, as_of: Optional[str], today: Optional[str], sig_to
     degraded = [name for name, leg in zip(("call", "put"), legs) if leg and leg.get("bid_zero")]
     g = position_greeks(legs, side, n, S)
     g["degraded_legs"] = _degraded_if_used(g, degraded)
+    # 到期日收盘后已按内在价值锁定的腿（v0.45.803，portfolio_greeks）：Greeks 记 0、不是 CBOE 报价，同样说出来
+    g["intrinsic_legs"] = _degraded_if_used(
+        g, [name for name, leg in zip(("call", "put"), legs) if leg and leg.get("expiry_intrinsic")])
     g["source"] = f"hedge_state/greeks_{as_of}.json" if (as_of and greek_legs) else None
     return {
         **{k: p.get(k) for k in ("ticker", "side", "label", "entry_date", "expiry", "strike", "call_symbol",

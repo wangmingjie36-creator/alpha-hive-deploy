@@ -231,16 +231,73 @@ class _YF:
              "marketState": "REGULAR", "fiftyTwoWeekChangePercent": 5.0, "marketCap": 1e9, "shortName": s} for s in syms]}})
 
 
+class _CappedYF(_YF):
+    """一次最多回 `cap` 只的 Yahoo（单次数量有上限时的样子）。"""
+
+    def __init__(self, cap):
+        super().__init__()
+        self.cap = cap
+
+    def get(self, url, params=None, timeout=None):
+        r = super().get(url, params=params, timeout=timeout)
+        r._body["quoteResponse"]["result"] = r._body["quoteResponse"]["result"][:self.cap]
+        return r
+
+
 class TestFetch:
-    def test_quotes_are_chunked_not_one_request_per_ticker(self):
+    @pytest.fixture(autouse=True)
+    def _fresh_mode(self, monkeypatch):
+        monkeypatch.setitem(SM._QUOTE_MODE, "chunked", False)        # 进程内的「改分批」记号不许在测试之间串
+
+    def test_all_symbols_go_in_one_request(self):
         yf = _YF()
         syms = _tickers(503)
         q, meta = SM.fetch_quotes(syms, yf_data=yf)
-        assert meta == {"reason": None, "n_requests": 3} and len(yf.calls) == 3      # 503 只 = 3 个请求，不是 503 个
-        assert max(len(c) for c in yf.calls) <= SM.RULES["quote_chunk"]
+        assert meta == {"reason": None, "n_requests": 1} and [len(c) for c in yf.calls] == [503]   # 503 只 = 1 个请求
         assert len(q) == 503 and q[syms[0]]["price"] == 10.0 and q[syms[0]]["prev_close"] == 9.0
+        assert SM._QUOTE_MODE["chunked"] is False
+
+    def test_falls_back_to_chunks_when_one_request_is_cut_short_and_remembers(self):
+        yf = _CappedYF(cap=260)
+        syms = _tickers(503)
+        q, meta = SM.fetch_quotes(syms, yf_data=yf)
+        assert len(q) == 503 and meta["reason"] is None and "260 / 503" in meta["fallback"]
+        assert [len(c) for c in yf.calls] == [503, 250, 250, 3] and meta["n_requests"] == 4
+        assert SM._QUOTE_MODE["chunked"] is True
+        yf2 = _CappedYF(cap=260)
+        q, meta = SM.fetch_quotes(syms, yf_data=yf2)             # 记住了：下一轮不再先撞一次
+        assert [len(c) for c in yf2.calls] == [250, 250, 3] and meta == {"reason": None, "n_requests": 3}
+
+    def test_falls_back_on_a_non_rate_limit_error_but_not_on_429(self):
+        yf = _YF([414])                                          # 地址太长之类：换分批
+        q, meta = SM.fetch_quotes(_tickers(503), yf_data=yf)
+        assert len(q) == 503 and "http_414" in meta["fallback"] and len(yf.calls) == 4
+        SM._QUOTE_MODE["chunked"] = False
+        yf = _YF([429])                                          # 限流：直接失败，一个请求都不多发
+        q, meta = SM.fetch_quotes(_tickers(503), yf_data=yf)
+        assert q is None and meta["reason"] == "rate_limited" and len(yf.calls) == 1
+        assert SM._QUOTE_MODE["chunked"] is False
+
+    def test_a_transient_network_error_does_not_switch_to_chunks_for_good(self):
+        """超时 / 连接报错 / 5xx 是一时的：这一轮失败，下一轮照样一次取全。记成「改分批」的话，一次抖动就永久三倍请求量。"""
+        class Flaky(_YF):
+            def get(self, url, params=None, timeout=None):
+                if not self.calls:
+                    self.calls.append(params["symbols"].split(","))
+                    raise TimeoutError("curl: (28) Operation timed out")
+                return super().get(url, params=params, timeout=timeout)
+        yf = Flaky()
+        q, meta = SM.fetch_quotes(_tickers(503), yf_data=yf)
+        assert q is None and meta["reason"] == "fetch_error" and len(yf.calls) == 1
+        assert SM._QUOTE_MODE["chunked"] is False
+        q, meta = SM.fetch_quotes(_tickers(503), yf_data=yf)     # 下一轮：仍是一个请求
+        assert len(q) == 503 and [len(c) for c in yf.calls] == [503, 503]
+        yf = _YF([503])                                          # 5xx 同理
+        q, meta = SM.fetch_quotes(_tickers(503), yf_data=yf)
+        assert q is None and len(yf.calls) == 1 and SM._QUOTE_MODE["chunked"] is False
 
     def test_rate_limit_http_error_and_empty_each_have_a_reason(self):
+        SM._QUOTE_MODE["chunked"] = True                         # 分批时第二批被限流
         q, meta = SM.fetch_quotes(_tickers(300), yf_data=_YF([200, 429]))
         assert q is None and meta["reason"] == "rate_limited" and "retry_after_sec" in meta   # 半张图不要
         q, meta = SM.fetch_quotes(["AAPL"], yf_data=_YF([503]))

@@ -305,8 +305,145 @@ class TestHistoryIsAppendOnly:
         eng, _ = engine(svc, resp([text("一")]), resp([text("二")]))
         out = eng.send("接着说", conversation_id="gone-after-restart")
         assert out["conversation_reset"] is True and out["conversation_id"] != "gone-after-restart"
-        assert "原对话已不在" in out["notes"][0]
+        assert "原对话找不到了" in out["notes"][0]
         assert eng.send("新开的")["conversation_reset"] is False
+
+
+
+def conv_file(svc, cid):
+    return Path(svc.state_dir()) / "chat" / "conversations" / f"{cid}.json"
+
+
+class TestHistoryPersists:
+    """对话落盘、历史列表、只由人归档（v0.45.808，用户 2026-11-23 定「像 Claude Code 一样保留，不要的我自己归档」）。"""
+
+    def test_restart_keeps_the_conversation_verbatim(self, svc):
+        eng, _ = engine(svc, resp([THINK, text("一")]))
+        cid = eng.send("一？")["conversation_id"]
+        eng2, client2 = engine(svc, resp([text("二")]))          # 新进程：内存里什么都没有
+        out = eng2.send("二？", conversation_id=cid)
+        assert out["conversation_id"] == cid and out["conversation_reset"] is False
+        sent = client2.requests[0]["messages"]
+        assert [m["role"] for m in sent] == ["user", "assistant", "user"]
+        assert sent[1]["content"] == [THINK, text("一")], "放回的历史不是原样（思考块会失效）"
+
+    def test_list_get_and_archive(self, svc):
+        ticks = iter(range(10_000))
+        client = FakeClient(resp([text("一")]), resp([text("二")]), resp([text("三")]))
+        # 钟要走：列表按更新时间排，钉死的钟下两场同一时刻、顺序就只剩并列裁决
+        eng = C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: T0 + next(ticks))
+        a = eng.send("第一场\n第二行")["conversation_id"]
+        b = eng.send("第二场")["conversation_id"]
+        eng.send("接着", conversation_id=a)
+        lst = eng.list_conversations()
+        assert [r["id"] for r in lst["conversations"]] == [a, b] and lst["archived_count"] == 0
+        assert lst["conversations"][0]["title"] == "第一场 第二行" and lst["conversations"][0]["turns"] == 2
+        got = eng.get_conversation(a)
+        assert [d["role"] for d in got["display"]] == ["user", "bot", "user", "bot"]
+        assert got["display"][3]["r"]["reply"] == "三"
+
+        eng.set_archived(a, True)
+        assert [r["id"] for r in eng.list_conversations()["conversations"]] == [b]
+        arch = engine(svc)[0].list_conversations(archived=True)          # 归档也落盘了
+        assert [r["id"] for r in arch["conversations"]] == [a] and arch["active_count"] == 1
+        eng.set_archived(a, False)
+        assert {r["id"] for r in engine(svc)[0].list_conversations()["conversations"]} == {a, b}
+        with pytest.raises(C.ChatError):
+            eng.set_archived(a, "yes")
+
+    def test_asking_an_archived_conversation_unarchives_it(self, svc):
+        eng, _ = engine(svc, resp([text("一")]), resp([text("二")]))
+        cid = eng.send("一？")["conversation_id"]
+        eng.set_archived(cid, True)
+        eng.send("二？", conversation_id=cid)
+        assert engine(svc)[0].get_conversation(cid)["archived"] is False
+
+    def test_nothing_is_cleaned_up_automatically(self, svc, monkeypatch):
+        """没有自动清理：内存缓存挤出去的，磁盘上还在、列表里还有、接着问照样带上历史。"""
+        monkeypatch.setattr(C, "MAX_CACHED_CONVERSATIONS", 2)
+        ticks = iter(range(10_000))
+        client = FakeClient(*[resp([text(f"r{i}")]) for i in range(6)])
+        # 钟要走：钉死的钟下大家 updated 相同，修剪按插入顺序挤，刚读回的那场碰巧挤不到——808 的 #1 就这样漏过了第一版测试
+        eng = C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: T0 + next(ticks))
+        ids = [eng.send(f"q{i}")["conversation_id"] for i in range(5)]
+        assert len(eng._convs) <= 2
+        assert {r["id"] for r in eng.list_conversations()["conversations"]} == set(ids)
+        out = eng.send("再问", conversation_id=ids[0])
+        assert [m["role"] for m in client.requests[-1]["messages"]] == ["user", "assistant", "user"]
+        # 808 二次检查 #1：从盘读回的旧对话 updated 最旧，曾被同一次修剪当场挤掉 ⇒ 答完存不上
+        assert not any("没存上" in n for n in out["notes"]), out["notes"]
+        assert engine(svc)[0].get_conversation(ids[0])["turns"] == 2, "接着问的这一问没存上盘"
+
+    def test_archiving_during_an_answer_sticks(self, svc):
+        """808 二次检查 #2：答题期间点了归档，答完存盘时不该又被自动取消归档。"""
+        eng, client = engine(svc, resp([text("一")]), resp([text("二")]))
+        cid = eng.send("一？")["conversation_id"]
+        real = client._create
+
+        def archive_mid_answer(**kw):
+            eng.set_archived(cid, True)
+            return real(**kw)
+        client.messages.with_raw_response.create = archive_mid_answer
+        eng.send("二？", conversation_id=cid)
+        got = engine(svc)[0].get_conversation(cid)
+        assert got["archived"] is True and got["turns"] == 2
+
+    @pytest.mark.parametrize("patch", [{"created": "abc"}, {"display": [1]}, {"updated": [1]}])
+    def test_wrong_field_types_are_a_bad_record_not_a_crash(self, svc, patch):
+        """808 二次检查 #3：合法 JSON、字段类型不对，曾让整个历史列表抛 ValueError / AttributeError。"""
+        eng, _ = engine(svc, resp([text("一")]), resp([text("二")]))
+        good = eng.send("好的")["conversation_id"]
+        cid = eng.send("坏的")["conversation_id"]
+        path = conv_file(svc, cid)
+        path.write_text(json.dumps({**json.loads(path.read_text(encoding="utf-8")), **patch}), encoding="utf-8")
+        fresh = engine(svc)[0]
+        rows = {r["id"]: r for r in fresh.list_conversations()["conversations"]}
+        assert "error" in rows[cid] and "error" not in rows[good]
+        with pytest.raises(C.ChatHistoryUnreadable):
+            fresh.get_conversation(cid)
+
+    def test_failed_turn_is_not_displayed(self, svc):
+        eng, _ = engine(svc, resp([text("一")]), RuntimeError("boom"))
+        cid = eng.send("一？")["conversation_id"]
+        with pytest.raises(RuntimeError):
+            eng.send("二？", conversation_id=cid)
+        assert [d.get("text") for d in engine(svc)[0].get_conversation(cid)["display"] if d["role"] == "user"] == ["一？"]
+
+    def test_corrupt_record_is_said_not_replaced(self, svc):
+        eng, _ = engine(svc, resp([text("一")]))
+        cid = eng.send("一？")["conversation_id"]
+        conv_file(svc, cid).write_text("{坏了", encoding="utf-8")
+        eng2, client2 = engine(svc, resp([text("不该发")]))
+        with pytest.raises(C.ChatHistoryUnreadable):
+            eng2.send("二？", conversation_id=cid)
+        assert client2.requests == [], "记录坏了还发了请求"
+        rows = eng2.list_conversations()["conversations"]
+        assert [r["id"] for r in rows] == [cid] and "error" in rows[0], "坏文件被跳过了（不该当没有）"
+
+    @pytest.mark.parametrize("cid", ["../../x", "ABCDEF123456", "a" * 13, "", None])
+    def test_odd_ids_never_become_paths(self, svc, cid):
+        eng, _ = engine(svc, resp([text("一")]))
+        with pytest.raises(C.ConversationNotFound):
+            eng.get_conversation(cid)
+        out = eng.send("一？", conversation_id=cid)
+        assert C.CONV_ID_RE.fullmatch(out["conversation_id"])
+        assert out["conversation_reset"] is bool(cid)
+
+    def test_save_failure_still_answers_and_says_so(self, svc, monkeypatch):
+        eng, _ = engine(svc, resp([text("一")]))
+        real = ledger_io.write_json
+
+        def boom(path, *a, **k):
+            if "conversations" in str(path):
+                raise ledger_io.LedgerWriteError("磁盘满")
+            return real(path, *a, **k)
+        monkeypatch.setattr(ledger_io, "write_json", boom)
+        out = eng.send("一？")
+        assert out["reply"] == "一" and any("没存上" in n for n in out["notes"])
+        row = eng.list_conversations()["conversations"][0]
+        assert row["unsaved"] is True, "没存上盘的对话在列表里看不出来"
+        with pytest.raises(C.ChatHistoryWriteFailed):
+            eng.set_archived(out["conversation_id"], True)
 
 
 class TestSpend:
@@ -953,6 +1090,26 @@ class TestDrawer:
             "前提变了（不再用 hidden 收输入区，或输入区不再设 display）：重看这条守卫还该不该在"
 
 
+    def test_history_view_is_wired(self):
+        """历史视图（v0.45.808）：列表、打开、归档 / 取消归档都走服务端；没有删除；发送中不许换对话（答案会进错的那场）。
+        行为在 node 里用 DOM 桩逐状态核过；这里钉住结构。"""
+        js = (REPO / "alphabot" / "static" / "chat.js").read_text(encoding="utf-8")
+        assert "/api/chat/conversations" in js and "setArchived(" in js and "openConversation(" in js
+        assert 'method: "DELETE"' not in js and ">删除<" not in js and '"删除")' not in js
+        for fn in ("function newConversation()", "async function openConversation("):
+            body = js[js.index(fn):js.index(fn) + 200]
+            assert "if (busy) return;" in body, f"{fn} 在发送中也能换对话"
+        assert "try { return localStorage.getItem" in js, "localStorage 没包 try（隐私窗口会抛）"
+        # 808 二次检查 #4：异步取回的结果只认最后一次；发送中不许归档正在答的那场
+        oc = js[js.index("async function openConversation("):js.index("async function loadHistory(")]
+        assert oc.count("if (stale()) return;") == 2, "打开对话取回后没核对是否已过时（会盖掉正在发的那问）"
+        lh = js[js.index("async function loadHistory("):js.index("async function setArchived(")]
+        assert "if (seq !== histSeq) return;" in lh
+        sa = js[js.index("async function setArchived("):]
+        assert sa.index("if (busy && id === convId) return;") < sa.index("await api(")
+        help_js = (REPO / "alphabot" / "static" / "pages" / "help.js").read_text(encoding="utf-8")
+        assert "只存在本机服务的内存里" not in help_js and "归档" in help_js
+
     def test_status_refetch_failure_keeps_the_conversation(self):
         """取状态失败时，已有能用的状态就保留、只加一条提示（v0.45.637 二次检查 #2：发送成功后重取失败，刚付钱的回答与输入框
         会一起被「读不到对话状态」盖掉）。node DOM 桩里实跑过；这里钉住结构。"""
@@ -994,6 +1151,22 @@ class TestServer:
         r = c.post("/api/chat", json={"message": "hi"}, headers={"X-AlphaBot": "1"})
         assert r.status_code == 409 and "没开启" in r.json()["error"]
         assert c.post("/api/chat", json=["x"], headers={"X-AlphaBot": "1"}).status_code == 400
+
+    def test_history_endpoints(self, svc):
+        eng, _ = engine(svc, resp([text("你好")]))
+        c = self._client(svc, eng)
+        cid = c.post("/api/chat", json={"message": "hi"}, headers={"X-AlphaBot": "1"}).json()["conversation_id"]
+        assert [r["id"] for r in c.get("/api/chat/conversations").json()["conversations"]] == [cid]
+        assert c.get(f"/api/chat/conversations/{cid}").json()["display"][1]["r"]["reply"] == "你好"
+        assert c.get("/api/chat/conversations/000000000000").status_code == 404
+        assert c.post(f"/api/chat/conversations/{cid}", json={"archived": True}).status_code == 403   # 没带 X-AlphaBot
+        assert c.post(f"/api/chat/conversations/{cid}", json={"archived": 1},
+                      headers={"X-AlphaBot": "1"}).status_code == 400
+        r = c.post(f"/api/chat/conversations/{cid}", json={"archived": True}, headers={"X-AlphaBot": "1"})
+        assert r.status_code == 200 and r.json()["archived"] is True
+        assert c.get("/api/chat/conversations").json()["conversations"] == []
+        assert [x["id"] for x in c.get("/api/chat/conversations?archived=1").json()["conversations"]] == [cid]
+        assert c.delete(f"/api/chat/conversations/{cid}", headers={"X-AlphaBot": "1"}).status_code == 405, "不该有删除"
 
     def test_method_publishes_the_chat_rules(self, svc):
         m = self._client(svc, engine(svc)[0]).get("/api/method").json()
