@@ -221,6 +221,11 @@ SITE_ARTIFACTS: dict = {
     'llm_shadow_scan.py::write_status': ('shadow_status/<date>.json', 'shadow_status/<date>.control.json'),
     'sell_put_wheel.py::_run_for_date': ('sell_put_state/lots.jsonl', 'sell_put_state/events.jsonl',
                                          'sell_put_state/equity_curve.jsonl', 'sell_put_state/meta.json'),
+    # v0.45.807 用户指示的人工平仓 / 开仓：写同一本账（不写净值行，净值仍只由每日运行写）
+    'sell_put_wheel.py::manual_close_put': ('sell_put_state/lots.jsonl', 'sell_put_state/events.jsonl',
+                                            'sell_put_state/meta.json'),
+    'sell_put_wheel.py::manual_sell_put': ('sell_put_state/lots.jsonl', 'sell_put_state/events.jsonl',
+                                           'sell_put_state/meta.json'),
     'sell_strike_ledger.py::_write_shard': ('sell_strike_state/<tenor>/*.jsonl',),
     'sell_strike_report.py::write_local_report': ('sell_strike_state/reports/sell-strike-*.md',),
     'step_contract.py::write_out': ('orchestrator step --out JSON envelopes',),
