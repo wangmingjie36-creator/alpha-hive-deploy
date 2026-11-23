@@ -740,6 +740,8 @@ def option_exposures(as_of: str, positions: Optional[List[Dict]] = None,
     `_expiry_intrinsic` 计：Greeks 全 0、mid = 锁定的内在价值，行上标 `expiry_intrinsic=True`。跨式账本按这一场收盘的
     内在价值现金结算，收盘后对标的已无敞口——此前 CBOE 给实值腿 delta ±1（11-20 NVDA 看跌腿 −1.0），SPY 覆盖会继续对冲
     一笔已锁定的仓位直到下一个扫描日结算；虚值腿则因 CBOE 收盘后把 iv 记 0 过不了 bid=0 判据、整组 unknown 不对冲。
+    v0.45.811：已过到期日、还没结算的腿（dte < 0，结算推迟时会挂几天）同样 Greeks 记 0、标 `expiry_intrinsic`，另记
+    `expired_days`；mid 不给（锁定价值要到期那一场的收盘，这里只有今天的价）。
     S（v0.45.423）取自与报价**同一份** CBOE payload（`_default_quotes` 附在报价里的 "underlying"），
     与期权报价同一时刻；报价里没有它（注入的 quotes_fn）才退回 closes_fn。payload 属于别的场次
     （补跑历史日时拉到的是今天的链）⇒ 报价本身也不是 as_of 的：quote_missing + quote_stale，Greeks 不进汇总。"""
@@ -796,7 +798,14 @@ def option_exposures(as_of: str, positions: Optional[List[Dict]] = None,
                 q = None                    # 别的场次的报价：不进 Greeks 汇总（同缺报价）
             ok = isinstance(q, dict) and bool(q.get("quote_ok"))
             bid_zero = (not ok) and bid_zero_greeks_usable(q)
-            g0 = _expiry_intrinsic(cp, S, row["strike"]) if (row["dte"] == 0 and m.get("at_close")) else None
+            dte_i = row["dte"]
+            if dte_i is not None and dte_i < 0:
+                # v0.45.811：已过到期日、跨式账本还没结算（结算要到期那一场的定稿收盘，推迟时会挂几天）：盈亏已按那一场收盘锁定，
+                # 对标的没有敞口 ⇒ Greeks 记 0；锁定的内在价值要那一场的收盘，这里没有 ⇒ mid 不给（None），不拿今天的价算
+                g0 = {"mid": None, "iv": None, "delta": 0.0, "gamma": 0.0, "vega": 0.0, "theta": 0.0}
+                row["expired_days"] = -dte_i
+            else:
+                g0 = _expiry_intrinsic(cp, S, row["strike"]) if (dte_i == 0 and m.get("at_close")) else None
             if g0 is not None:
                 row.update(g0)
                 row["expiry_intrinsic"] = True    # 到期日收盘后：已按这一场收盘锁定、现金结算，Greeks 0（不看 CBOE 报价）
@@ -1503,7 +1512,11 @@ def stress_table(rows: List[Dict], spy_price: Optional[float] = None) -> Dict:
             usable.append(("stock", {"dd": dd, "beta": beta}))
         elif kind == "option":
             if row.get("expiry_intrinsic"):    # v0.45.803：到期日当晚按收盘内在价值计的腿，已到期、不重定价（同下面 dte<=0）
-                _exclude(row, f"{row.get('symbol') or row.get('ticker')}(option:expiry-day intrinsic)")
+                # v0.45.811：已过到期日、待结算的腿也走这里（行上没有 mid）；标签沿用下面 dte<0 的「expired Nd」，
+                # 只有当天到期那种才写 expiry-day intrinsic——剔除理由是给人看的，别把旧标签改没了
+                dte_x = _num(row.get("dte"))
+                why = f"expired {int(dte_x)}d" if (dte_x is not None and dte_x < 0) else "expiry-day intrinsic"
+                _exclude(row, f"{row.get('symbol') or row.get('ticker')}(option:{why})")
                 continue
             need = {k: _num(row.get(k)) for k in ("qty", "price", "strike", "iv", "mid", "beta")}
             dte = _num(row.get("dte"))     # 过 _num：NaN 的 dte 躲得过 `is None`，却会让 int() 直接崩
@@ -2419,7 +2432,7 @@ def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
     if cov.get("n_bid_zero"):
         cov_line += f"；含 {cov['n_bid_zero']} 张买价为 0 的腿（CBOE 模型 Greeks、无 mid，已计入带位）"
     if cov.get("n_expiry_intrinsic"):
-        cov_line += f"；含 {cov['n_expiry_intrinsic']} 张今天到期的腿已按收盘内在价值锁定（现金结算，Greeks 记 0）"
+        cov_line += f"；含 {cov['n_expiry_intrinsic']} 张当天到期或已到期待结算的腿已按到期收盘锁定（现金结算，Greeks 记 0）"
     if agg.get("partial"):
         cov_line += " —— **部分数据，结论不完整，不据此对冲**"
     L += ["", cov_line]
