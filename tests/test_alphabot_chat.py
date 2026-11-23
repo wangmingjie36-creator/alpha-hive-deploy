@@ -361,12 +361,46 @@ class TestHistoryPersists:
     def test_nothing_is_cleaned_up_automatically(self, svc, monkeypatch):
         """没有自动清理：内存缓存挤出去的，磁盘上还在、列表里还有、接着问照样带上历史。"""
         monkeypatch.setattr(C, "MAX_CACHED_CONVERSATIONS", 2)
-        eng, client = engine(svc, *[resp([text(f"r{i}")]) for i in range(6)])
+        ticks = iter(range(10_000))
+        client = FakeClient(*[resp([text(f"r{i}")]) for i in range(6)])
+        # 钟要走：钉死的钟下大家 updated 相同，修剪按插入顺序挤，刚读回的那场碰巧挤不到——808 的 #1 就这样漏过了第一版测试
+        eng = C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: T0 + next(ticks))
         ids = [eng.send(f"q{i}")["conversation_id"] for i in range(5)]
         assert len(eng._convs) <= 2
         assert {r["id"] for r in eng.list_conversations()["conversations"]} == set(ids)
-        eng.send("再问", conversation_id=ids[0])
+        out = eng.send("再问", conversation_id=ids[0])
         assert [m["role"] for m in client.requests[-1]["messages"]] == ["user", "assistant", "user"]
+        # 808 二次检查 #1：从盘读回的旧对话 updated 最旧，曾被同一次修剪当场挤掉 ⇒ 答完存不上
+        assert not any("没存上" in n for n in out["notes"]), out["notes"]
+        assert engine(svc)[0].get_conversation(ids[0])["turns"] == 2, "接着问的这一问没存上盘"
+
+    def test_archiving_during_an_answer_sticks(self, svc):
+        """808 二次检查 #2：答题期间点了归档，答完存盘时不该又被自动取消归档。"""
+        eng, client = engine(svc, resp([text("一")]), resp([text("二")]))
+        cid = eng.send("一？")["conversation_id"]
+        real = client._create
+
+        def archive_mid_answer(**kw):
+            eng.set_archived(cid, True)
+            return real(**kw)
+        client.messages.with_raw_response.create = archive_mid_answer
+        eng.send("二？", conversation_id=cid)
+        got = engine(svc)[0].get_conversation(cid)
+        assert got["archived"] is True and got["turns"] == 2
+
+    @pytest.mark.parametrize("patch", [{"created": "abc"}, {"display": [1]}, {"updated": [1]}])
+    def test_wrong_field_types_are_a_bad_record_not_a_crash(self, svc, patch):
+        """808 二次检查 #3：合法 JSON、字段类型不对，曾让整个历史列表抛 ValueError / AttributeError。"""
+        eng, _ = engine(svc, resp([text("一")]), resp([text("二")]))
+        good = eng.send("好的")["conversation_id"]
+        cid = eng.send("坏的")["conversation_id"]
+        path = conv_file(svc, cid)
+        path.write_text(json.dumps({**json.loads(path.read_text(encoding="utf-8")), **patch}), encoding="utf-8")
+        fresh = engine(svc)[0]
+        rows = {r["id"]: r for r in fresh.list_conversations()["conversations"]}
+        assert "error" in rows[cid] and "error" not in rows[good]
+        with pytest.raises(C.ChatHistoryUnreadable):
+            fresh.get_conversation(cid)
 
     def test_failed_turn_is_not_displayed(self, svc):
         eng, _ = engine(svc, resp([text("一")]), RuntimeError("boom"))
@@ -1066,6 +1100,13 @@ class TestDrawer:
             body = js[js.index(fn):js.index(fn) + 200]
             assert "if (busy) return;" in body, f"{fn} 在发送中也能换对话"
         assert "try { return localStorage.getItem" in js, "localStorage 没包 try（隐私窗口会抛）"
+        # 808 二次检查 #4：异步取回的结果只认最后一次；发送中不许归档正在答的那场
+        oc = js[js.index("async function openConversation("):js.index("async function loadHistory(")]
+        assert oc.count("if (stale()) return;") == 2, "打开对话取回后没核对是否已过时（会盖掉正在发的那问）"
+        lh = js[js.index("async function loadHistory("):js.index("async function setArchived(")]
+        assert "if (seq !== histSeq) return;" in lh
+        sa = js[js.index("async function setArchived("):]
+        assert sa.index("if (busy && id === convId) return;") < sa.index("await api(")
         help_js = (REPO / "alphabot" / "static" / "pages" / "help.js").read_text(encoding="utf-8")
         assert "只存在本机服务的内存里" not in help_js and "归档" in help_js
 

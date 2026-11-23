@@ -17,6 +17,7 @@ let view = "chat";        // "chat" | "history"
 let showArchived = false; // 历史列表看的是不是「已归档」
 let hist = null;          // 历史列表：{ data } | { error } | null（加载中）
 let restored = false;     // 打开抽屉时是否已试过恢复上次的对话
+let openSeq = 0, histSeq = 0;   // 异步取回的结果只认最后一次
 const LAST_KEY = "alphabot.chat.last";
 
 function remember(id) {
@@ -92,11 +93,16 @@ function newConversation() {
 // 打开一场历史对话：显示存下的每一问（用户原话 + 当时的结果）；接着问就接在它后面
 async function openConversation(id, { quiet = false } = {}) {
   if (busy) return;
+  const before = convId, seq = ++openSeq;
+  // 取回来之前人已经发了一问 / 换了对话 / 又点了另一场：这次结果作废（808 二次检查 #4：异步恢复会盖掉正在发的那问）
+  const stale = () => busy || convId !== before || seq !== openSeq;
   try {
     const c = await api(`/api/chat/conversations/${encodeURIComponent(id)}`);
+    if (stale()) return;
     convId = c.id; convArchived = !!c.archived; remember(convId);
     log = (c.display || []).map((d) => (d.role === "user" ? { role: "user", text: d.text } : { role: "bot", r: d.r || {} }));
   } catch (e) {
+    if (stale()) return;
     if (quiet && e.status === 404) { remember(null); return; }      // 上次那场不在了：从新对话开始
     convId = null; convArchived = false; remember(null);
     log = [{ role: "err", text: `这场对话打不开：${e.message}` }];
@@ -107,13 +113,18 @@ async function openConversation(id, { quiet = false } = {}) {
 }
 
 async function loadHistory() {
+  const seq = ++histSeq;            // 快速来回切「已归档」时，晚到的旧回复别盖掉新的
   hist = null; render();
-  try { hist = { data: await api(`/api/chat/conversations${showArchived ? "?archived=1" : ""}`) }; }
-  catch (e) { hist = { error: e.message }; }
+  let next;
+  try { next = { data: await api(`/api/chat/conversations${showArchived ? "?archived=1" : ""}`) }; }
+  catch (e) { next = { error: e.message }; }
+  if (seq !== histSeq) return;
+  hist = next;
   render();
 }
 
 async function setArchived(id, archived) {
+  if (busy && id === convId) return;
   try { await api(`/api/chat/conversations/${encodeURIComponent(id)}`, { method: "POST", body: { archived } }); }
   catch (e) { alert(`${archived ? "归档" : "取消归档"}失败：${e.message}`); return; }
   if (id === convId) {
@@ -155,7 +166,8 @@ function historyBody() {
         title: c.title, onclick: () => openConversation(c.id) },
       h("span", { class: "chat-hist-title" }, c.title),
       h("span", { class: c.error ? "chat-hist-meta warn" : "chat-hist-meta" }, meta)),
-      c.error ? null : h("button", { class: "link-btn", type: "button", onclick: () => setArchived(c.id, !showArchived) },
+      c.error ? null : h("button", { class: "link-btn", type: "button", disabled: busy && c.id === convId,
+        title: busy && c.id === convId ? "正在等这场的回答，答完再归档" : null, onclick: () => setArchived(c.id, !showArchived) },
         showArchived ? "取消归档" : "归档")));
   }
   return out;

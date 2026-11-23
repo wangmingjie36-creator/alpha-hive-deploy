@@ -855,11 +855,18 @@ class ChatEngine:
             raise ChatHistoryUnreadable(f"这场对话的记录读不了（{type(exc).__name__}）：没发请求、没计费。可以开新对话") from exc
         if doc is None:
             return None
+        bad = "这场对话的记录格式不对（{}）：没发请求、没计费。可以开新对话"
         if not (isinstance(doc.get("messages"), list) and isinstance(doc.get("display"), list)):
-            raise ChatHistoryUnreadable("这场对话的记录缺了 messages / display：没发请求、没计费。可以开新对话")
+            raise ChatHistoryUnreadable(bad.format("缺 messages / display"))
+        if not all(isinstance(d, dict) for d in doc["display"]):
+            raise ChatHistoryUnreadable(bad.format("display 里有不是对象的条目"))
+        try:     # 合法 JSON、字段类型却不对：同样是坏记录——此前 float("abc") 的 ValueError 会让整个历史列表 502（808 二次检查 #3）
+            created, updated = float(doc.get("created") or 0.0), float(doc.get("updated") or 0.0)
+        except (TypeError, ValueError):
+            raise ChatHistoryUnreadable(bad.format("时间不是数")) from None
         return {"messages": doc["messages"], "display": doc["display"], "title": str(doc.get("title") or ""),
-                "created": float(doc.get("created") or 0.0), "updated": float(doc.get("updated") or 0.0),
-                "archived": doc.get("archived") is True, "busy": False}
+                "created": created, "updated": updated, "archived": doc.get("archived") is True, "busy": False,
+                "archive_rev": 0}
 
     def _get_conv(self, cid) -> Optional[dict]:
         """缓存 → 磁盘（调用方持 `self._lock`）。id 形状不对 ⇒ None（当没有，也就不会拿它拼路径）。"""
@@ -870,12 +877,14 @@ class ChatEngine:
             conv = self._read_conv(cid)
             if conv is not None:
                 self._convs[cid] = conv
-                self._trim_cache()
+                self._trim_cache(keep=cid)
         return conv
 
-    def _trim_cache(self) -> None:
-        """只从内存挤掉（磁盘上的不动）；正在答的、没存上盘的不挤。"""
-        spare = [k for k, c in self._convs.items() if not c["busy"] and not c.get("unsaved")]
+    def _trim_cache(self, keep: Optional[str] = None) -> None:
+        """只从内存挤掉（磁盘上的不动）；正在答的、没存上盘的、刚放进来要用的（`keep`）不挤。
+        808 二次检查 #1：刚从盘读回的旧对话 updated 最旧，不留 `keep` 会被同一次修剪当场挤掉——调用方拿着一个已不在缓存里的
+        对象接着答：busy 闸失效，答完存盘时又找不到它（「缓存里没有这场对话」），这一问没存上。"""
+        spare = [k for k, c in self._convs.items() if k != keep and not c["busy"] and not c.get("unsaved")]
         for k in sorted(spare, key=lambda k: self._convs[k]["updated"])[:max(0, len(self._convs) - MAX_CACHED_CONVERSATIONS)]:
             del self._convs[k]
 
@@ -957,6 +966,7 @@ class ChatEngine:
             if conv is None:
                 raise ConversationNotFound("没有这场对话")
             conv["archived"] = archived
+            conv["archive_rev"] = conv.get("archive_rev", 0) + 1     # 答题期间被人改过 ⇒ 答完不再自动取消归档
         why = self._save_conv(cid)
         if why is not None:
             raise ChatHistoryWriteFailed(f"{'归档' if archived else '取消归档'}没存上（{why}）：重启 Alpha Bot 后会恢复原样")
@@ -988,29 +998,30 @@ class ChatEngine:
                     reset_note = "原对话找不到了（记录文件不在）：这是一场新对话，之前说过的它不记得"
                 conversation_id = uuid.uuid4().hex[:12]
                 conv = {"messages": [], "display": [], "title": "", "created": self._now(), "updated": self._now(),
-                        "archived": False, "busy": False}
+                        "archived": False, "busy": False, "archive_rev": 0}
                 self._convs[conversation_id] = conv
-                self._trim_cache()
+                self._trim_cache(keep=conversation_id)
             if conv["busy"]:
                 raise ChatError("上一问还没答完")      # 两问并发会各自读同一段历史、后写的盖掉先写的
             history = list(conv["messages"])
             if len(json.dumps(history, ensure_ascii=False, default=str)) > MAX_HISTORY_CHARS:
                 raise ChatError("这场对话太长了（每问都要把历史整段发出去，越来越贵）：请点「新对话」")
             conv["busy"] = True
+            archive_rev = conv.get("archive_rev", 0)
         try:
-            return self._turn(client, conversation_id, history, message, page, reset_note)
+            return self._turn(client, conversation_id, history, message, page, reset_note, archive_rev)
         finally:
             with self._lock:
                 if conversation_id in self._convs:
                     self._convs[conversation_id]["busy"] = False
 
     def _turn(self, client, conversation_id: str, history: list, message: str, page,
-              reset_note: Optional[str] = None) -> dict:
+              reset_note: Optional[str] = None, archive_rev: int = 0) -> dict:
         today_et = datetime.fromtimestamp(self._now(), ET).date().isoformat()
         messages = history + [{"role": "user", "content": [
             {"type": "text", "text": f"[{today_et}（美东）· 用户正在看：{page_context(page)}]\n{message}"}]}]
         turn = {"cost_usd": 0.0, "searches": 0, "tools": [], "notes": [reset_note] if reset_note else [], "calls": 0,
-                "message": message}
+                "message": message, "archive_rev": archive_rev}
         try:
             return self._run(client, conversation_id, messages, turn, fresh=not history, reset=bool(reset_note))
         except ChatError as exc:
@@ -1114,7 +1125,8 @@ class ChatEngine:
                                                      {"role": "bot", "r": result, "ts": now}]
                 conv["title"] = conv["title"] or turn["message"].replace("\n", " ")[:TITLE_CHARS]
                 conv["updated"] = now
-                conv["archived"] = False         # 又问了一句 ⇒ 它又是在用的对话
+                if conv.get("archive_rev", 0) == turn["archive_rev"]:
+                    conv["archived"] = False     # 又问了一句 ⇒ 它又是在用的对话；答题期间人点过归档就听人的（808 二次检查 #2）
         why = self._save_conv(conversation_id) if conv is not None else "缓存里没有这场对话"
         if why is not None:
             result["notes"].append(f"这场对话没存上（{why}）：Alpha Bot 开着时还在，重启后就找不回了")
