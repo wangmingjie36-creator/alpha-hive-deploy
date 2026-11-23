@@ -326,6 +326,7 @@ class AlertAnalyzer:
         self._check_ledger_io_failures(status)
         self._check_strangle_shadow(status)
         self._check_sell_put(status)             # v0.45.720：接货型卖 put 账本整轮抛 / 链全取不到 / 结算延期 ≥ 3 天
+        self._check_options_paper(status)        # v0.45.804：跨式账本触发平仓后仍在账上超期 ≥ 2 个交易日 / 整轮抛
         self._check_history_fill(status)
         self._check_stock_fetch_legacy(status)   # v0.45.639：P1 行情改走 cache.py 旧回落
         self._check_event_rows(status)           # v0.45.645：P2 日线公司行动空行不在首行（某个交易日的价格缺了）
@@ -1202,6 +1203,53 @@ class AlertAnalyzer:
                         "结算延期看 Twelve Data 是否给出到期日那一根收盘（`options_paper_leg._default_close` 的 reason）",
             },
             ["sell_put_wheel", "data_quality"]
+        ))
+
+    def _check_options_paper(self, status: Dict) -> None:
+        """财报跨式纸面账本的状态不变式（v0.45.804；`options_paper_leg.stats()` 经 scan_timing 进来）。
+
+        账本的约定：`post_event` / `expiry_buffer` 一触发，持仓当天就该平掉。平不了的原因很多（一条腿 bid=0 / 没报价 /
+        Twelve Data 滞后 / 到期日坏 / 平仓算出非有限值被拒 / 平仓路径自己抛了），此前每个都只在日志里留一行——NVDA 2026-11-18~20 卡了
+        两天，是人工核对才发现的。所以这里不按原因报，只按**结果**报：① 有持仓超期 ≥ 2 个交易日（应平日由持久化状态 + 交易日历推出，
+        与平仓路径互相独立；超期 1 个交易日不报：到期当晚无定稿收盘延期一天是设计内，历史上也有 1 笔整体报价故障晚了 1 天）；
+        ② 有持仓的应平日算不出来（永远不会自动平）；③ 整轮抛了（此时不变式检查本身跑不了）。
+        本进程没跑过账本（`runs == 0`）不算故障——半程扫描 / 补跑可以合法地不碰它。计数缺失 ⇒ checks_skipped。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        op = (st.get("counters") or {}).get("options_paper")
+        if not isinstance(op, dict):
+            self.checks_skipped.append("跨式账本超期检查（scan_timing 无 options_paper 计数）")
+            return
+        problems = []
+        if op.get("overdue_alert") and op.get("max_overdue_sessions", 0) >= 1:
+            problems.append(f"{op.get('overdue_n')} 个持仓触发平仓后仍在账上，最久超期 {op.get('max_overdue_sessions')} 个交易日")
+        if op.get("undeterminable_n"):
+            problems.append(f"{op.get('undeterminable_n')} 个持仓的应平日算不出来（不会自动平）")
+        if op.get("run_errors"):
+            problems.append(f"整轮抛了 {op['run_errors']} 次（账本这天没记，超期检查也没跑成）")
+        if not problems:
+            return
+        items = op.get("items") or []
+
+        def _line(i: Dict) -> str:
+            if i.get("kind") == "overdue":
+                return (f"{i.get('ticker')} {i.get('side')}：应平日 {i.get('due')}（{i.get('due_reason')}）"
+                        f"超期 {i.get('overdue_sessions')} 个交易日，到期 {i.get('expiry')}；{i.get('reason')}")
+            return f"{i.get('ticker') or '整轮'}：{i.get('kind')}；{i.get('reason')}"
+
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            "📊 【P2 中】跨式纸面账本有持仓该平仓却没平：" + "；".join(problems),
+            {
+                "明细": "；".join(_line(i) for i in items[:5]) or "（无明细）",
+                "影响": "只影响这本账自己：预注册样本里这个单位的平仓延迟或可能缺失，持仓照旧按冻结 mark 计 NAV；"
+                        "不改任何交易行为、不进评分 / 对冲（见 `options_paper_leg` 模块头「盯市与出场」）",
+                "建议": "「原因未知」= 平仓路径根本没走到，先查当晚 alpha_hive.log 里 `[OptionsPaperLeg]` 的 ERROR / WARNING；"
+                        "「平不了」看 `exit_blocked_reason`（哪条腿没有可成交的价）；「结算延期」看 Twelve Data 是否给出到期日那一根收盘；"
+                        "未到期的单位等不到报价会一直等到到期按内在价值结，别为了让它变绿去改成交口径（预注册样本）",
+            },
+            ["options_paper_leg", "data_quality"]
         ))
 
     def _check_strangle_shadow(self, status: Dict) -> None:

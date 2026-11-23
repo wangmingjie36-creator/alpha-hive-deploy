@@ -132,6 +132,7 @@ def counters() -> Dict[str, Optional[dict]]:
                                       "portfolio_greeks": None, "paper_portfolio": None,
                                       "ledger_io": None, "history_fill": None,
                                       "strangle_shadow": None, "stock_fetch_legacy": None, "sell_put": None,
+                                      "options_paper": None,
                                       "event_rows": None, "yf_daily": None,
                                       "price_nonfinite": None, "macro_context": None,
                                       "shared_quotes": None}
@@ -203,6 +204,13 @@ def counters() -> Dict[str, Optional[dict]]:
         out["sell_put"] = sell_put_wheel.stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("sell_put stats 不可得: %s", e)
+    try:
+        import options_paper_leg
+        # v0.45.804：财报跨式纸面账本的状态不变式（触发平仓后仍在账上、超期几个交易日）与整轮抛；`_check_options_paper` 读它。
+        # 不可导入 ⇒ None（不写 {}：空 dict 会被读成「零超期」）
+        out["options_paper"] = options_paper_leg.stats()
+    except Exception as e:  # noqa: BLE001
+        _log.debug("options_paper stats 不可得: %s", e)
     try:
         from swarm_agents import cache as _swarm_cache
         # v0.45.639：data_pipeline 坏了时取数改走 cache.py 旧回落的次数（此前一个 `except ImportError: pass` 吞掉、不留痕）；
