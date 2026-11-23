@@ -357,6 +357,15 @@ def mark_of(c: Optional[dict]) -> Optional[float]:
     return (bid + ask) / 2.0
 
 
+def fill_quote(c: dict, n: int) -> Dict:
+    """开仓时的报价快照（v0.45.809，用户 11-23 定「成交价记 bid、同时记 mid」）：成交仍按 bid，
+    另记 ask / mid 与「若按 mid 成交会多收」的金额——只测量、不进任何决定（选合约 / 额度 / 结算都不读它）。"""
+    bid, ask = _num(c.get("bid")), _num(c.get("ask"))
+    mid = mark_of(c)
+    return {"bid": bid, "ask": ask, "mid": round(mid, 4) if mid is not None else None,
+            "mid_gap_usd": round((mid - bid) * CONTRACT * n, 2) if (mid is not None and bid is not None) else None}
+
+
 # ═══════════════════════════ 结算（纯函数） ═══════════════════════════
 
 def settle_put(strike: float, close: float) -> str:
@@ -666,7 +675,8 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
         extra = {"spot_at_open": _pos(ch.get("underlying_price")), "dte_at_open": _dte(as_of, c["expiry"]),
                  "close": close, "close_session": rv_meta.get("end"), "trigger": trigger,
                  "annual_yield_pct": info["annual_yield_pct"], "iv_pct": info["iv_pct"], "rv_pct": info["rv_pct"],
-                 "iv_rv": info["iv_rv"], "score": info["score"], "rv_end": rv_meta.get("end"), "rule_version": _VERSION}
+                 "iv_rv": info["iv_rv"], "score": info["score"], "rv_end": rv_meta.get("end"), "rule_version": _VERSION,
+                 "fill": fill_quote(c, n)}
         lot["call"] = {"symbol": c["symbol"], "strike": c["strike"], "expiry": c["expiry"], "premium": c["bid"],
                        "sold_on": as_of, "delta": c.get("delta"), "last_mark": mark_of(c) or c["bid"],
                        "last_mark_date": as_of, "stale_days": 0, **extra}
@@ -724,14 +734,15 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
                             "accept_price": info["accept_price"], "accept_price_source": info["accept_price_source"],
                             "annual_yield_pct": info["annual_yield_pct"], "dte_at_open": info["dte"],
                             "iv_pct": info["iv_pct"], "rv_pct": info["rv_pct"], "iv_rv": info["iv_rv"],
-                            "score": info["score"], "rv_end": info["rv_end"], "rule_version": _VERSION}}
+                            "score": info["score"], "rv_end": info["rv_end"], "rule_version": _VERSION,
+                            "fill": fill_quote(c, n)}}
         events.append({"date": as_of, "ticker": tk, "event": "put_sold", "strike": c["strike"], "expiry": c["expiry"],
                        "premium": c["bid"], "contracts": n, "cycle": cycle, "delta": c.get("delta"),
                        "spot": info["spot"], "accept_price": info["accept_price"],
                        "accept_price_source": info["accept_price_source"], "annual_yield_pct": info["annual_yield_pct"],
                        "dte": info["dte"], "spread_pct": round(_spread_pct(c) * 100, 2),
                        "iv_pct": info["iv_pct"], "rv_pct": info["rv_pct"], "iv_rv": info["iv_rv"], "score": info["score"],
-                       "rv_end": info["rv_end"], "rule_version": _VERSION})
+                       "rv_end": info["rv_end"], "rule_version": _VERSION, "fill": fill_quote(c, n)})
 
     # ── (c) 盯市与净值 ──
     nav_info = _nav_estimate(cash, lots, chains, chain, mark=True, as_of=as_of)
@@ -981,6 +992,11 @@ def kpis(state: Optional[Dict] = None) -> Dict:
             "n_assigned": len(by("put_assigned")), "n_call_sold": len(by("call_sold")),
             "n_called_away": len(by("call_called_away")), "premium_collected_usd": round(prem, 2),
             "n_put_closed_manual": len(by("put_closed_manual")),
+            # v0.45.809：按 bid 成交比按 mid 少收的合计（只数记了 fill 的开仓；之前的与手动开仓没有这项）
+            "mid_gap_usd": round(sum((e.get("fill") or {}).get("mid_gap_usd") or 0.0 for e in ev
+                                     if e["event"] in ("put_sold", "call_sold")), 2),
+            "n_with_mid": sum(1 for e in ev if e["event"] in ("put_sold", "call_sold")
+                              and (e.get("fill") or {}).get("mid_gap_usd") is not None),
             "n_put_sold_manual": sum(1 for e in by("put_sold") if e.get("rule_version") == MANUAL_RULE),
             "cycles_closed": len(by("call_called_away")) + len(by("put_expired")) + len(by("put_closed_manual")),
             "nav": nav, "starting_capital": start,

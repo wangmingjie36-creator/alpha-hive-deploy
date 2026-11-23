@@ -501,6 +501,8 @@ class TestLifecycle:
         lot = _lot()["AAA"]
         assert lot["state"] == "shares" and lot["shares"]["n"] == 100 and lot["call"]["strike"] == 96.0
         assert lot["call"]["rule_version"] == W._VERSION
+        # v0.45.809：call 开仓同样记 bid / ask / mid（成交仍按 bid）：96 call bid 3.0、ask 3.12 ⇒ mid 3.06、多 $6
+        assert e["fill"] == {"bid": 3.0, "ask": 3.12, "mid": 3.06, "mid_gap_usd": 6.0} and lot["call"]["fill"] == e["fill"]
         # 现金：100000 + 200（put 权利金）− 9000（接货）+ 300（call 权利金）
         assert _state()["meta"]["cash"] == pytest.approx(100_000 + 200 - 9_000 + 300)
 
@@ -800,6 +802,44 @@ class TestLedgerSafety:
         assert k["n_put_sold"] == 1 and k["premium_collected_usd"] == 200.0 and k["n_assigned"] == 0
         md = W.render_markdown()
         assert "只记录，非检验" in md and "AAA" in md
+
+
+# ───────────────────────────── 开仓同时记 mid（v0.45.809） ─────────────────────────────
+
+class TestFillQuote:
+    """成交按 bid、另记 ask / mid 与「按 mid 会多收」：数逐分钱、KPI 合计、只测量不改成交 / 现金 / 选合约。"""
+
+    def test_put_open_records_bid_ask_mid_and_the_gap(self):
+        table = {D0: {"AAA": chain(100.0, STD_PUTS)}}
+        r = W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}))
+        e = r["events"][0]
+        assert e["premium"] == 2.0                                     # 成交照旧按 bid
+        assert e["fill"] == {"bid": 2.0, "ask": 2.08, "mid": 2.04, "mid_gap_usd": 4.0}
+        assert _lot()["AAA"]["put"]["fill"] == e["fill"]
+        assert _state()["meta"]["cash"] == 100_200.0                     # 现金只认 bid，mid 不入账
+        k = W.kpis()
+        assert k["mid_gap_usd"] == 4.0 and k["n_with_mid"] == 1
+
+    def test_gap_scales_with_contracts(self):
+        assert W.fill_quote(put(90, 2.0, ask=2.2), 3) == {"bid": 2.0, "ask": 2.2, "mid": 2.1, "mid_gap_usd": 30.0}
+
+    def test_unusable_quote_gives_no_mid_rather_than_a_guess(self):
+        assert W.fill_quote({"bid": 0.0, "ask": 0.2}, 1)["mid"] is None
+        assert W.fill_quote({"bid": 1.0, "ask": 0.9}, 1)["mid_gap_usd"] is None
+
+    def test_old_events_without_fill_are_not_counted(self):
+        table = {D0: {"AAA": chain(100.0, STD_PUTS)}}
+        W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}))
+        st = _state()
+        st["events"].append({"date": "2026-11-01", "ticker": "AAA", "event": "put_sold", "premium": 1.0, "contracts": 1})
+        k = W.kpis(st)
+        assert k["n_with_mid"] == 1 and k["mid_gap_usd"] == 4.0
+
+    def test_decisions_never_read_the_fill_snapshot(self):
+        """`fill` 只写不读：模块里除了写入与 KPI 合计，没有任何地方取它（选合约 / 额度 / 结算 / 盯市都不看）。"""
+        src = (REPO / "sell_put_wheel.py").read_text(encoding="utf-8")
+        reads = [ln.strip() for ln in src.splitlines() if '"fill"' in ln or "'fill'" in ln]
+        assert all(("fill_quote(" in ln) or ("e.get(\"fill\")" in ln) for ln in reads), reads
 
 
 # ───────────────────────────── 用户手动干预（v0.45.807） ─────────────────────────────
