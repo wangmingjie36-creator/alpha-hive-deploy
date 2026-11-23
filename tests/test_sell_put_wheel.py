@@ -802,6 +802,83 @@ class TestLedgerSafety:
         assert "只记录，非检验" in md and "AAA" in md
 
 
+# ───────────────────────────── 用户手动干预（v0.45.807） ─────────────────────────────
+
+class TestManualIntervention:
+    """用户指示的人工平仓 / 开仓：现金逐分钱复算、标明 manual、越过总额度只记不挡、现金担保不够照样拒；
+    之后的每日运行把手动开的那笔当普通循环盯市，且同一只当天不再自动开第二笔。"""
+    SRC = dict(price_source="test", price_date="2026-11-03", note="用户指示")
+
+    def _open(self):
+        table = {D0: {"AAA": chain(100.0, STD_PUTS)}}
+        W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}))
+        return table
+
+    def test_close_books_the_buyback_and_ends_the_cycle(self):
+        self._open()
+        d1 = "2026-11-05"
+        ev = W.manual_close_put(d1, f"AAA-{D0}", 0.35, **self.SRC)
+        assert ev["event"] == "put_closed_manual" and ev["rule_version"] == "manual"
+        assert ev["realized_usd"] == pytest.approx((2.0 - 0.35) * 100)
+        st = _state()
+        assert st["lots"] == [] and st["meta"]["cash"] == pytest.approx(100_200.0 - 35.0)
+        assert st["events"][-1]["price_source"] == "test" and st["events"][-1]["price_date"] == "2026-11-03"
+        k = W.kpis()
+        assert k["n_put_closed_manual"] == 1 and k["cycles_closed"] == 1
+
+    def test_close_refuses_an_unknown_or_already_closed_cycle(self):
+        self._open()
+        W.manual_close_put("2026-11-05", f"AAA-{D0}", 0.35, **self.SRC)
+        with pytest.raises(ValueError):
+            W.manual_close_put("2026-11-05", f"AAA-{D0}", 0.35, **self.SRC)
+        with pytest.raises(ValueError):
+            W.manual_close_put("2026-11-05", "ZZZ-2026-11-04", 0.35, **self.SRC)
+
+    def test_sell_books_premium_marks_manual_and_records_the_cap_overrun(self):
+        self._open()                                       # 10% 额度：净值约 1 万、已占 9000 ⇒ 再开 85 的超额度
+        d1 = "2026-11-05"
+        ev = W.manual_sell_put(d1, "AAA", "AAA270122P00085000", 85.0, "2027-01-22", 5.75, **self.SRC, spot=100.0)
+        assert ev["rule_version"] == "manual" and ev["cycle"] == f"AAA-{d1}" and ev["dte"] == 78
+        assert ev["cap_check"]["within_cap"] is False and ev["cap_check"]["needed"] == 8500.0
+        assert ev["cap_check"]["held_before"] == 9000.0
+        st = _state()
+        assert st["meta"]["cash"] == pytest.approx(100_200.0 + 575.0)
+        lot = {l["cycle"]: l for l in st["lots"]}[f"AAA-{d1}"]
+        assert lot["put"]["rule_version"] == "manual" and lot["put"]["premium"] == 5.75
+        assert W.kpis()["n_put_sold_manual"] == 1
+
+    def test_sell_rejects_a_symbol_that_does_not_match_the_terms(self):
+        self._open()
+        with pytest.raises(ValueError, match="对不上"):
+            W.manual_sell_put("2026-11-05", "AAA", "AAA270122P00090000", 85.0, "2027-01-22", 1.0, **self.SRC)
+
+    def test_sell_still_refuses_when_cash_cannot_cover_the_collateral(self):
+        self._open()
+        with pytest.raises(ValueError, match="现金不够担保"):
+            W.manual_sell_put("2026-11-05", "AAA", "AAA270122P02000000", 2000.0, "2027-01-22", 1.0, contracts=1,
+                              **self.SRC)
+        assert len(_state()["lots"]) == 1 and _state()["meta"]["cash"] == pytest.approx(100_200.0)
+
+    def test_source_and_note_are_mandatory(self):
+        self._open()
+        with pytest.raises(ValueError):
+            W.manual_close_put("2026-11-05", f"AAA-{D0}", 0.35, price_source="", price_date="x", note="n")
+        with pytest.raises(ValueError):
+            W.manual_close_put("2026-11-05", f"AAA-{D0}", 0.35, price_source="s", price_date="x", note=" ")
+
+    def test_daily_run_marks_the_manual_cycle_and_opens_no_second_one_that_day(self, pinned_config):
+        table = self._open()
+        pinned_config["total_cap_pct"] = 60.0              # 额度宽到规则自己也想开 ⇒ 验证「一天一笔」挡住
+        d1 = "2026-11-05"
+        sym = "AAA270122P00085000"
+        W.manual_sell_put(d1, "AAA", sym, 85.0, "2027-01-22", 5.75, **self.SRC)
+        day = {d1: {"AAA": chain(100.0, STD_PUTS + [put(85, 1.0, ask=1.1, exp="2027-01-22", sym=sym)])}}
+        r = W.run_for_date(d1, contracts_fn=contracts_for({**table, **day}), closes_fn=closes_for({}))
+        assert r["events"] == []
+        lot = {l["cycle"]: l for l in _state()["lots"]}[f"AAA-{d1}"]
+        assert lot["put"]["last_mark"] == pytest.approx(1.05) and lot["put"]["last_mark_date"] == d1
+
+
 # ───────────────────────────── 原因码 ─────────────────────────────
 
 class TestReasonTable:

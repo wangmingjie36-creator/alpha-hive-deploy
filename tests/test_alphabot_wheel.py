@@ -94,7 +94,8 @@ class TestOverview:
         dates = [e["date"] for e in v["events"]]
         assert dates == sorted(dates, reverse=True)
         assert all(e["event_zh"] != e["event"] for e in v["events"])
-        assert set(WH.EVENT_ZH) == {"put_sold", "put_expired", "put_assigned", "call_sold", "call_expired", "call_called_away"}
+        assert set(WH.EVENT_ZH) == {"put_sold", "put_expired", "put_assigned", "call_sold", "call_expired", "call_called_away",
+                                    "put_closed_manual"}
 
 
 class TestBenchmarks:

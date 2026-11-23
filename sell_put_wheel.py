@@ -770,6 +770,121 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
             "deferred": deferred, "n_lots": len(lots)}
 
 
+# ═══════════════════════════ 用户手动干预（v0.45.807） ═══════════════════════════
+# 规则里没有止损止盈、也没有人工开平仓——这两个入口只在**用户明确指示**时用，每一笔都落盘标明是人工的：
+# 平仓记 `put_closed_manual`；新开的 put 照记 `put_sold`（页面 / KPI 照常认），但 `rule_version = "manual"`，
+# 比较规则表现时按它排除。成交价由调用方给、连同来源与价格所属日期一起记（不在这里取数、不猜）。
+# ⚠️ 手动开仓**不判 60% 总额度**（用户指示可越过，越过多少照实记进 `cap_check`），但现金担保仍要够——
+# 现金不够担保是账本自洽性的问题，不是规则选择，越不过去。
+MANUAL_RULE = "manual"
+
+
+def _occ_ok(symbol: str, ticker: str, cp: str, strike: float, expiry: str) -> bool:
+    """OCC 代码（如 NVDA261224P00110000）与标的 / 方向 / 行权价 / 到期日逐项一致。"""
+    try:
+        d = date.fromisoformat(expiry)
+    except (TypeError, ValueError):
+        return False
+    want = f"{ticker}{d:%y%m%d}{cp}{int(round(strike * 1000)):08d}"
+    return symbol == want
+
+
+def _manual_common(as_of: str, price, price_source: str, note: str) -> float:
+    if _iso_day(as_of) != as_of:
+        raise ValueError(f"as_of 须为 YYYY-MM-DD：{as_of!r}")
+    px = _pos(price)
+    if px is None:
+        raise ValueError(f"成交价须为正的有限数：{price!r}")
+    if not (isinstance(price_source, str) and price_source.strip()):
+        raise ValueError("必须写明成交价来源（price_source）")
+    if not (isinstance(note, str) and note.strip()):
+        raise ValueError("必须写明是谁、为什么手动操作（note）")
+    return px
+
+
+def manual_close_put(as_of: str, cycle: str, price: float, *, price_source: str, price_date: str, note: str) -> Dict:
+    """用户指示：按给定价买回某个循环未到期的 put，那一圈结束。返回写下的事件。"""
+    px = _manual_common(as_of, price, price_source, note)
+    p = _paths()
+    with ledger_io.locked(p["dir"]):
+        meta = _load_meta()
+        cash = _num(meta.get("cash"))
+        if cash is None:
+            raise ValueError(f"meta.cash 非有限：{meta.get('cash')!r}")
+        lots = {_lot_key(r): r for r in ledger_io.load_jsonl(p["lots"])}
+        lot = lots.get(cycle)
+        if lot is None or not lot.get("put") or lot.get("state") != "put":
+            raise ValueError(f"没有这个持 put 的循环：{cycle!r}（已平 / 已结算 / 已接货的不能再平）")
+        leg, n = lot["put"], int(lot["contracts"])
+        cash -= px * CONTRACT * n
+        ev = {"date": as_of, "ticker": lot["ticker"], "event": "put_closed_manual", "strike": leg["strike"],
+              "expiry": leg["expiry"], "symbol": leg["symbol"], "premium": leg["premium"], "close_price": px,
+              "contracts": n, "cycle": cycle, "realized_usd": round((leg["premium"] - px) * CONTRACT * n, 2),
+              "price_source": price_source, "price_date": price_date, "note": note, "rule_version": MANUAL_RULE}
+        lots.pop(cycle)
+        ledger_io.append_jsonl(p["events"], _scrub(ev))
+        ledger_io.write_jsonl(p["lots"], [_scrub(l) for l in lots.values()])
+        meta["cash"] = round(cash, 2)
+        ledger_io.write_json(p["meta"], _scrub(meta))
+    return ev
+
+
+def manual_sell_put(as_of: str, ticker: str, symbol: str, strike: float, expiry: str, premium: float,
+                    contracts: int = 1, *, price_source: str, price_date: str, note: str,
+                    spot: Optional[float] = None) -> Dict:
+    """用户指示：按给定价卖出一张 put，开一个新循环（`rule_version = "manual"`）。返回写下的事件。"""
+    px = _manual_common(as_of, premium, price_source, note)
+    k = _pos(strike)
+    if k is None or not _occ_ok(symbol, ticker, "P", k, expiry):
+        raise ValueError(f"合约代码与标的 / 行权价 / 到期日对不上：{symbol!r} vs {ticker} {strike} {expiry}")
+    dte = _dte(as_of, expiry)
+    if dte is None or dte <= 0:
+        raise ValueError(f"到期日须晚于 {as_of}：{expiry}")
+    n = int(contracts)
+    if n < 1:
+        raise ValueError("张数至少 1")
+    p = _paths()
+    p["dir"].mkdir(parents=True, exist_ok=True)
+    with ledger_io.locked(p["dir"]):
+        meta = _load_meta()
+        cash = _num(meta.get("cash"))
+        if cash is None:
+            raise ValueError(f"meta.cash 非有限：{meta.get('cash')!r}")
+        lots = {_lot_key(r): r for r in ledger_io.load_jsonl(p["lots"])}
+        cycle = f"{ticker}-{as_of}"
+        if cycle in lots:
+            raise ValueError(f"循环 {cycle} 已存在（同一只一天最多新开一笔）")
+        reserved_after = _reserved_puts(lots) + k * CONTRACT * n
+        cash_after = cash + px * CONTRACT * n
+        if cash_after < reserved_after:
+            raise ValueError(f"现金不够担保：开仓后现金 {cash_after:.2f} < 全部 put 担保 {reserved_after:.2f}")
+        # 总额度只记不挡：按最近一行净值（那一天的盯市）估，标明口径
+        eq = ledger_io.load_jsonl(p["equity"])
+        last = eq[-1] if eq else {}
+        nav = _num(last.get("nav"))
+        held = _reserved_and_shares(lots, {"prices": last.get("prices") or {}})
+        cap = None
+        if nav is not None:
+            room = nav * CONFIG["total_cap_pct"] / 100.0 - held
+            cap = {"nav": round(nav, 2), "nav_date": last.get("date"), "held_before": round(held, 2),
+                   "room_before": round(room, 2), "needed": round(k * CONTRACT * n, 2),
+                   "within_cap": room >= k * CONTRACT * n}
+        ay = round(annual_yield(px, k, dte), 2)
+        info = {"spot_at_open": _pos(spot), "dte_at_open": dte, "annual_yield_pct": ay, "rule_version": MANUAL_RULE,
+                "price_source": price_source, "price_date": price_date, "note": note, "cap_check": cap}
+        lots[cycle] = {"ticker": ticker, "state": "put", "cycle": cycle, "contracts": n, "opened_on": as_of,
+                       "premiums": px, "shares": None, "call": None,
+                       "put": {"symbol": symbol, "strike": k, "expiry": expiry, "premium": px, "sold_on": as_of,
+                               "delta": None, "last_mark": px, "last_mark_date": as_of, "stale_days": 0, **info}}
+        ev = {"date": as_of, "ticker": ticker, "event": "put_sold", "strike": k, "expiry": expiry, "symbol": symbol,
+              "premium": px, "contracts": n, "cycle": cycle, "spot": _pos(spot), "dte": dte, **info}
+        ledger_io.append_jsonl(p["events"], _scrub(ev))
+        ledger_io.write_jsonl(p["lots"], [_scrub(l) for l in lots.values()])
+        meta["cash"] = round(cash_after, 2)
+        ledger_io.write_json(p["meta"], _scrub(meta))
+    return ev
+
+
 def put_size(strike: float, bid: float, nav: float, held: float, cash: float, reserved: float) -> Tuple[int, int]:
     """v3 张数（纯函数）：(总额度容得下的张数, 现金担保容得下的张数)，调用方取两者较小。
     总额度：held + 行权价 × 100 × n ≤ NAV × total_cap_pct%。现金：开仓后现金（含收到的权利金）≥ 全部 put 担保。"""
@@ -865,7 +980,9 @@ def kpis(state: Optional[Dict] = None) -> Dict:
     return {"available": True, "n_put_sold": len(by("put_sold")), "n_put_expired": len(by("put_expired")),
             "n_assigned": len(by("put_assigned")), "n_call_sold": len(by("call_sold")),
             "n_called_away": len(by("call_called_away")), "premium_collected_usd": round(prem, 2),
-            "cycles_closed": len(by("call_called_away")) + len(by("put_expired")),
+            "n_put_closed_manual": len(by("put_closed_manual")),
+            "n_put_sold_manual": sum(1 for e in by("put_sold") if e.get("rule_version") == MANUAL_RULE),
+            "cycles_closed": len(by("call_called_away")) + len(by("put_expired")) + len(by("put_closed_manual")),
             "nav": nav, "starting_capital": start,
             "return_pct": round((nav / start - 1) * 100, 3) if (nav is not None and start) else None,
             "last_run_date": (st.get("meta") or {}).get("last_run_date")}

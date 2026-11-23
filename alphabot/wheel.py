@@ -28,6 +28,7 @@ EQUITY_SHOWN = 60
 EVENT_ZH = {
     "put_sold": "卖出 put", "put_expired": "put 作废（权利金落袋）", "put_assigned": "put 被行权（接货）",
     "call_sold": "卖出 covered call", "call_expired": "call 作废（继续持股）", "call_called_away": "call 被叫走（一圈结束）",
+    "put_closed_manual": "用户手动买回 put（一圈结束）",   # v0.45.807：用户指示的人工平仓，规则里没有这一步
 }
 #: 结算延期的原因码（`options_paper_leg._default_close` / `_resolve_close` 给的）→ 人话；没登记的原样给出，不编
 DEFER_ZH = {
