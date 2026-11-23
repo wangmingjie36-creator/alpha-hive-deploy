@@ -78,6 +78,9 @@ def audit_brief(day: str, a: dict) -> dict:
         # bid_zero（v0.45.620）：买价为 0 的腿用的是 CBOE 模型 Greeks、没有 mid，已计入带位——不是缺，但要让人看得见
         "price_check": {"n_stale": pc.get("n_stale"), "gaps": pc.get("gaps") or [],
                         "n_bid_zero": pc.get("n_bid_zero") or 0, "bid_zero": list(pc.get("bid_zero") or []),
+                        # v0.45.803：到期日收盘后已按内在价值锁定（Greeks 记 0）的腿——不是缺，但要让人看得见
+                        "n_expiry_intrinsic": pc.get("n_expiry_intrinsic") or 0,
+                        "expiry_intrinsic": list(pc.get("expiry_intrinsic") or []),
                         "hedge_undecided": pc.get("hedge_undecided"),
                         # v0.45.704：纸面组合净值读不了、NAV 分母用审计旧值顶上（页面黄条点名）
                         "nav_fallback": ({k: pc["nav_fallback"].get(k) for k in ("reason", "from_audit", "origin_date")}

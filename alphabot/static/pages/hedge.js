@@ -194,6 +194,7 @@ export async function renderHedge(root, alive) {
   if ((pc.gaps || []).length) warns.push(`${L.date} 另缺：${pc.gaps.join("；")}`);
   // 买价为 0 的腿不是「缺」：Greeks 取 CBOE 模型值（没有 mid）、已计入带位——说出来，别让它悄悄进决定
   if (pc.n_bid_zero) warns.push(`${L.date} 带位含 ${pc.n_bid_zero} 张买价为 0 的腿（${(pc.bid_zero || []).join("、")}）：用的是 CBOE 模型 Greeks，没有中间价；这些腿没有进压力表。`);
+  if (pc.n_expiry_intrinsic) warns.push(`${L.date} 带位含 ${pc.n_expiry_intrinsic} 张当天到期的腿（${(pc.expiry_intrinsic || []).join("、")}）：已按当天收盘的内在价值锁定（账本现金结算，收盘后对标的没有敞口，Delta 记 0），不用 CBOE 报价；这些腿没有进压力表。`);
   // 被排除的标的不是「没有敞口」：点名 + 估算额，让它变大时看得见（v0.45.545）
   // v0.45.701：SPY 覆盖本来就不看股票纸面组合（rules.hedge_stock_book 为假）⇒ 只有被排除的「跨式」才值得点名；
   // 旧审计里只有股票仓的那几行不再显示（它们现在跟别的股票仓一样本来就不进对冲）
