@@ -226,6 +226,10 @@ SITE_ARTIFACTS: dict = {
                                             'sell_put_state/meta.json'),
     'sell_put_wheel.py::manual_sell_put': ('sell_put_state/lots.jsonl', 'sell_put_state/events.jsonl',
                                            'sell_put_state/meta.json'),
+    # v0.45.810 盘中开仓阶段：写事件 / 持仓 / meta（last_open_run，晚上 mark 阶段读它核对）；不写净值行
+    'sell_put_wheel.py::_write_events': ('sell_put_state/events.jsonl',),
+    'sell_put_wheel.py::_finish_open': ('sell_put_state/lots.jsonl', 'sell_put_state/meta.json'),
+    'sell_put_wheel.py::record_open_outcome': ('sell_put_state/meta.json',),
     'sell_strike_ledger.py::_write_shard': ('sell_strike_state/<tenor>/*.jsonl',),
     'sell_strike_report.py::write_local_report': ('sell_strike_state/reports/sell-strike-*.md',),
     'step_contract.py::write_out': ('orchestrator step --out JSON envelopes',),

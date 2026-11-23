@@ -1184,6 +1184,10 @@ class AlertAnalyzer:
             problems.append(f"到期腿结算已延期 {sp.get('max_deferred_days')} 天（拿不到结算那一场的收盘）")
         if sp.get("all_rv_missing"):
             problems.append(f"要开 put 的 {sp.get('rv_total')} 只一只实际波动率都没算出来（选合约规则 v2 离不开它，这天一张都开不出）")
+        if sp.get("open_missing"):
+            problems.append("今天盘中开仓那一轮没跑成（v0.45.810 起开仓在美东 15:30 的 launchd 任务里：机器没开 / 睡眠后补触发已过窗口 / 抛了 / 任务没装）")
+        if sp.get("open_chains_missing"):
+            problems.append("今天盘中开仓那一轮一只期权链都没取到")
         if not problems:
             return
         items = sp.get("items") or []

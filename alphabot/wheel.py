@@ -125,6 +125,11 @@ def _benchmarks(events: List[dict], equity: List[dict]) -> List[dict]:
     return sorted(out, key=lambda r: r["expiry"] or "", reverse=True)
 
 
+#: 盘中开仓那一轮的结局 → 人话（v0.45.810；`sell_put_wheel.OPEN_OUTCOMES`）
+OPEN_OUTCOME_ZH = {"ran": "跑了（按那一刻报价的 bid 开仓）", "outside_window": "触发时已不在美东 15:15~15:59 窗口内，没开仓（机器睡眠后补触发？）",
+                   "error": "跑的时候抛了，没开仓"}
+
+
 def build_overview(state: dict, *, rules: Optional[dict] = None) -> dict:
     """页面的全部数据。账本目录不存在 ⇒ available False（说「账本还没开」，不说成「账本为空」）。"""
     if not state.get("available"):
@@ -136,7 +141,13 @@ def build_overview(state: dict, *, rules: Optional[dict] = None) -> dict:
     start = _num(meta.get("starting_capital"))
     nav = _num(last.get("nav"))
     run = meta.get("last_run") or {}
-    skipped = [{**s, "reason_zh": W.SKIP_REASONS.get(s.get("reason"), s.get("reason"))} for s in run.get("skipped") or []]
+    # v0.45.810：开仓在盘中那一轮（meta.last_open_run），收盘后的 mark 只结算 + 盯市 ⇒ 「今天没开」读盘中那一轮；
+    # 它比收盘账本新（下午到晚上扫描之间）或同一天才用，旧的不拿来顶
+    opened = meta.get("last_open_run") or {}
+    open_fresh = bool(opened.get("date")) and (not as_of or opened["date"] >= as_of)
+    raw_skipped = (opened.get("skipped") or [] if open_fresh else []) + (run.get("skipped") or [])
+    skipped = [{**s, "reason_zh": W.SKIP_REASONS.get(s.get("reason"), s.get("reason"))} for s in raw_skipped]
+    chain_errors = {**(opened.get("chain_errors") or {} if open_fresh else {}), **(run.get("chain_errors") or {})}
     return {
         "available": True, "as_of": as_of, "rules": rules or {},
         "account": {"nav": nav, "starting_capital": start,
@@ -149,7 +160,9 @@ def build_overview(state: dict, *, rules: Optional[dict] = None) -> dict:
         "benchmarks": _benchmarks(events, equity),
         "skipped": skipped,
         "deferred": [{**x, "reason_zh": DEFER_ZH.get(x.get("reason"), x.get("reason"))} for x in run.get("deferred") or []],
-        "chain_errors": run.get("chain_errors") or {},
+        "chain_errors": chain_errors,
+        "open_run": ({k: opened.get(k) for k in ("date", "outcome", "detail", "quote_times")}
+                     | {"outcome_zh": OPEN_OUTCOME_ZH.get(opened.get("outcome"), opened.get("outcome"))}) if opened else None,
         "equity": [{k: r.get(k) for k in ("date", "nav", "cash", "n_lots")} for r in equity[-EQUITY_SHOWN:]],
         "kpis": W.kpis(state),
     }

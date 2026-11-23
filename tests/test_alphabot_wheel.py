@@ -89,6 +89,22 @@ class TestOverview:
         assert v["chain_errors"] == {"EEE": "unavailable"}
         assert v["rules"] == {"x": 1} and v["as_of"] == "2026-12-02"
 
+    def test_open_phase_skips_and_status_come_from_the_intraday_run(self):
+        """v0.45.810：开仓在盘中那一轮；「今天没开」读 last_open_run（同一天或比收盘账本新），旧的不拿来顶。"""
+        st = _state()
+        st["meta"]["last_open_run"] = {"date": "2026-12-03", "outcome": "ran", "quote_times": {"AAA": "2026-12-03T15:14:00"},
+                                       "skipped": [{"ticker": "DDD", "leg": "put", "reason": "quote_not_intraday"}],
+                                       "chain_errors": {"FFF": "timeout"}}
+        v = WH.build_overview(st)
+        assert [s["ticker"] for s in v["skipped"]] == ["DDD", "CCC"]
+        assert v["skipped"][0]["reason_zh"] == W.SKIP_REASONS["quote_not_intraday"]
+        assert v["chain_errors"] == {"FFF": "timeout", "EEE": "unavailable"}
+        assert v["open_run"]["outcome"] == "ran" and v["open_run"]["outcome_zh"] == WH.OPEN_OUTCOME_ZH["ran"]
+        st["meta"]["last_open_run"]["date"] = "2026-12-01"                     # 比收盘账本旧 ⇒ 不拿来顶
+        v = WH.build_overview(st)
+        assert [s["ticker"] for s in v["skipped"]] == ["CCC"] and v["chain_errors"] == {"EEE": "unavailable"}
+        assert set(WH.OPEN_OUTCOME_ZH) == set(W.OPEN_OUTCOMES)
+
     def test_events_newest_first_with_a_word_for_each(self):
         v = WH.build_overview(_state())
         dates = [e["date"] for e in v["events"]]

@@ -74,7 +74,7 @@ def public_rules() -> dict:
 
 
 #: 口径世代（手写常量，只在账本口径变时改）
-_VERSION = "0.45.749"          # v3.2：新开仓只剩 NVDA；0.45.747 = v3.1：允许加仓（一只多个循环）；0.45.746 = v3：总额度按综合分装满、covered call 涨 5% 才卖且按综合分选；0.45.742 = v2；0.45.720 = v1
+_VERSION = "0.45.810"          # v4：开仓挪到盘中美东 15:30、按那一刻的报价成交；v3.2：新开仓只剩 NVDA；0.45.747 = v3.1：允许加仓（一只多个循环）；0.45.746 = v3：总额度按综合分装满、covered call 涨 5% 才卖且按综合分选；0.45.742 = v2；0.45.720 = v1
 CONTRACT = 100
 
 
@@ -156,6 +156,7 @@ SKIP_REASONS = {
     "no_close": "取不到最近一个已收盘场次的收盘价（判不了涨没涨）",
     "not_risen": "收盘较接货价还没涨够，不卖 call",
     "settle_deferred": "上一腿到期了、还没拿到结算那一场的收盘",
+    "quote_not_intraday": "报价不是今天盘中的（休市 / 提前收盘 / CBOE 文件还停在上一场）——盘中开仓只认此刻的报价",
 }
 
 
@@ -422,7 +423,8 @@ DEFERRED_ALERT_DAYS = 3
 _ITEMS_MAX = 10
 _LOCK = threading.Lock()
 _ZERO = {"runs": 0, "run_errors": 0, "chain_total": 0, "chain_missing": 0, "max_deferred_days": 0,
-         "rv_total": 0, "rv_missing": 0}
+         "rv_total": 0, "rv_missing": 0,
+         "open_missing": 0, "open_chains_missing": 0}     # v0.45.810：盘中开仓那一轮没跑 / 那一轮链全没取到（mark 阶段转进来）
 _STATS: Dict[str, Any] = {**_ZERO, "items": []}
 
 
@@ -505,30 +507,60 @@ def _resolve_close(raw, session: str) -> Dict:
     return opl._resolve_close(raw, session)
 
 
+# ═══════════════════════════ 盘中开仓（v0.45.810，用户 2026-11-23 定） ═══════════════════════════
+# 规则 v4：开仓（卖 put / 卖 covered call）挪到盘中美东 OPEN_AT_ET，按那一刻 CBOE 报价（延迟约 15 分钟）的 bid 成交——
+# 决定与成交用同一份报价；此前是收盘后扫描按收盘报价「成交」，那个价收盘后已经成交不了。
+# 到期结算与每日盯市仍在收盘后的扫描里（phase="mark"），净值曲线仍是收盘口径。
+#   phase="open"：结算 + 开仓，不写净值行；把这一轮的结局记进 meta.last_open_run（另一个进程，计数带不进扫描）
+#   phase="mark"：结算 + 盯市 + 净值行；不开仓；核对当天盘中那一轮跑了没有（没跑 ⇒ 计数 open_missing ⇒ P2）
+#   phase="full"：老流程（结算 + 开仓 + 盯市一次做完），只留给测试与补跑历史日
+PHASES = ("full", "open", "mark")
+OPEN_AT_ET = (15, 30)
+#: 盘中那一轮只在这个美东时间窗里才开仓：launchd 在机器睡眠时错过的任务会在唤醒后补跑，收盘后补跑就不是「盘中」了
+OPEN_WINDOW_ET = ((15, 15), (15, 59))
+#: 从这一天起收盘后的扫描才核对「盘中那一轮跑了没有」（v0.45.810 上线的下一个交易日；之前没有盘中任务）
+OPEN_PHASE_FROM = "2026-11-24"
+OPEN_OUTCOMES = ("ran", "outside_window", "error")
+
+
+def intraday_ok(ch: Optional[dict], as_of: str) -> bool:
+    """这份链是不是今天盘中的：`session_live` 为真且文件日期就是今天。休市 / 提前收盘 / 文件卡在上一场都不是。"""
+    return bool(ch) and ch.get("session_live") is True and str(ch.get("vintage_date") or "")[:10] == as_of
+
+
+def open_window_ok(now_et) -> bool:
+    (h0, m0), (h1, m1) = OPEN_WINDOW_ET
+    t = now_et.hour * 60 + now_et.minute
+    return h0 * 60 + m0 <= t <= h1 * 60 + m1
+
+
 def run_for_date(as_of: str,
                  contracts_fn: Optional[Callable[[str, str], Tuple[Optional[dict], Optional[str]]]] = None,
                  closes_fn: Optional[Callable[..., Any]] = None,
-                 rv_fn: Optional[Callable[[str, str], Tuple[Optional[float], Optional[str]]]] = None) -> Dict:
-    """(a) 到期结算 → (b) 卖 call / 卖 put → (c) 盯市与净值。同日重跑幂等。
+                 rv_fn: Optional[Callable[[str, str], Tuple[Optional[float], Optional[str]]]] = None,
+                 phase: str = "full") -> Dict:
+    """(a) 到期结算 → (b) 卖 call / 卖 put → (c) 盯市与净值。同日重跑幂等。`phase` 见上面 PHASES 的说明。
 
     整轮持账本目录锁：读 meta / 持仓 → 改 → 写回是一次读-改-写，手动补跑与定时扫描撞上时后写者会用旧快照覆盖先写者。
     `contracts_fn(ticker, as_of)` → (`fetch_cboe_raw_contracts` 形状 | None, 原因)；`closes_fn(ticker, settle_date, as_of=...)`
     → 自报场次的 dict（缺省 `options_paper_leg._default_close`）或裸数字（测试注入，视为「就是那一场的收盘」）；
     `rv_fn(ticker, as_of)` → (实际波动率 % | None, 原因)（缺省 `_default_rv`，yfinance 复权日线）。"""
+    if phase not in PHASES:
+        raise ValueError(f"phase 须为 {PHASES} 之一：{phase!r}")
     d = _paths()["dir"]
     d.mkdir(parents=True, exist_ok=True)
     _note(runs=1)
     try:
         with ledger_io.locked(d):
             return _run_for_date(as_of, contracts_fn or _default_contracts, closes_fn or _default_close,
-                                 rv_fn or _default_rv)
+                                 rv_fn or _default_rv, phase)
     except Exception as exc:  # noqa: BLE001 - 登记后原样抛：调用方（日报钩子）会吞成 WARNING，计数才是红的那个
         _note(run_errors=1)
         _note_item("run_error", f"{type(exc).__name__}: {exc}")
         raise
 
 
-def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
+def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn, phase: str = "full") -> Dict:
     p = _paths()
     meta = _load_meta()
     cash = _num(meta.get("cash"))
@@ -636,8 +668,8 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
         if lot.get("state") == "closed":
             lots.pop(key, None)
 
-    # ── (b) 卖 call（有股票、没有未到期 call）──
-    for key, lot in lots.items():
+    # ── (b) 卖 call（有股票、没有未到期 call）──（v0.45.810：收盘后的 mark 阶段不开仓）
+    for key, lot in (lots.items() if phase != "mark" else ()):
         tk = lot["ticker"]
         if lot.get("state") != "shares" or lot.get("call"):
             continue
@@ -647,6 +679,10 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
         ch = chain(tk)
         if not ch:
             skipped.append({"ticker": tk, "leg": "call", "reason": "no_chain", "detail": why_no_chain.get(tk)})
+            continue
+        if phase == "open" and not intraday_ok(ch, as_of):
+            skipped.append({"ticker": tk, "leg": "call", "reason": "quote_not_intraday",
+                            "detail": f"session_live={ch.get('session_live')} vintage={ch.get('vintage_date')}"})
             continue
         rv, rv_meta, why_rv = fetch_rv(tk)
         if rv is None:
@@ -676,7 +712,7 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
                  "close": close, "close_session": rv_meta.get("end"), "trigger": trigger,
                  "annual_yield_pct": info["annual_yield_pct"], "iv_pct": info["iv_pct"], "rv_pct": info["rv_pct"],
                  "iv_rv": info["iv_rv"], "score": info["score"], "rv_end": rv_meta.get("end"), "rule_version": _VERSION,
-                 "fill": fill_quote(c, n)}
+                 "fill": fill_quote(c, n), "quote_time": ch.get("payload_last_trade_time"), "phase": phase}
         lot["call"] = {"symbol": c["symbol"], "strike": c["strike"], "expiry": c["expiry"], "premium": c["bid"],
                        "sold_on": as_of, "delta": c.get("delta"), "last_mark": mark_of(c) or c["bid"],
                        "last_mark_date": as_of, "stale_days": 0, **extra}
@@ -686,7 +722,7 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
 
     # ── (b') 卖 put（无仓的标的）：按综合分（年化 × IV/RV）从高到低排，逐只判额度 ──
     cands: List[Tuple[float, str, dict, dict]] = []
-    for tk in CONFIG["universe"]:
+    for tk in (CONFIG["universe"] if phase != "mark" else ()):
         # v3.1：已有未到期 put / 持股不再挡（允许加仓）；但同一只**一天最多新开一笔**（同日重跑幂等、循环号 = 标的-日期不撞），
         # 结算延期的标的当天也不加（那一只的收盘还没拿到）
         if any(l["ticker"] == tk and l.get("opened_on") == as_of for l in lots.values()):
@@ -697,6 +733,10 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
         ch = chain(tk)
         if not ch:
             skipped.append({"ticker": tk, "leg": "put", "reason": "no_chain", "detail": why_no_chain.get(tk)})
+            continue
+        if phase == "open" and not intraday_ok(ch, as_of):
+            skipped.append({"ticker": tk, "leg": "put", "reason": "quote_not_intraday",
+                            "detail": f"session_live={ch.get('session_live')} vintage={ch.get('vintage_date')}"})
             continue
         spot = _pos(ch.get("underlying_price"))
         if spot is None:
@@ -742,9 +782,16 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
                        "accept_price_source": info["accept_price_source"], "annual_yield_pct": info["annual_yield_pct"],
                        "dte": info["dte"], "spread_pct": round(_spread_pct(c) * 100, 2),
                        "iv_pct": info["iv_pct"], "rv_pct": info["rv_pct"], "iv_rv": info["iv_rv"], "score": info["score"],
-                       "rv_end": info["rv_end"], "rule_version": _VERSION, "fill": fill_quote(c, n)})
+                       "rv_end": info["rv_end"], "rule_version": _VERSION, "fill": fill_quote(c, n),
+                       "quote_time": chains[tk].get("payload_last_trade_time") if chains.get(tk) else None,
+                       "phase": phase})
+
+    if phase == "open":
+        return _finish_open(as_of, p, meta, cash, lots, events, skipped, deferred, chains, why_no_chain)
 
     # ── (c) 盯市与净值 ──
+    if phase == "mark":
+        _check_open_ran(as_of, meta)
     nav_info = _nav_estimate(cash, lots, chains, chain, mark=True, as_of=as_of)
     fetched = dict(chains)          # v3.2：名单外仍有持仓的标的（XOM / WMT）也要取链盯市，取不到同样算数
     n_missing = sum(1 for v in fetched.values() if v is None)
@@ -756,12 +803,7 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
             _note_item("chain_missing", f"{tk}: {why}")
     # 事件先落盘（按 (日期, 标的, 事件, 圈) 去重——同日重跑不重复记），净值行里的事件数按**落盘后**该日的条数算：
     # 数「本次新增」的话，同日重跑那一行会变成 0，账本文件就不再逐字节幂等（测试抓到的）
-    prior_events = ledger_io.load_jsonl(p["events"])
-    seen = {(e["date"], e["ticker"], e["event"], e.get("cycle")) for e in prior_events}
-    for e in events:
-        if (e["date"], e["ticker"], e["event"], e.get("cycle")) not in seen:
-            ledger_io.append_jsonl(p["events"], _scrub(e))
-            seen.add((e["date"], e["ticker"], e["event"], e.get("cycle")))
+    _write_events(p, events)
     n_events_today = sum(1 for e in ledger_io.load_jsonl(p["events"]) if e["date"] == as_of)
     row = {"date": as_of, "cash": round(cash, 2), "nav": round(nav_info["nav"], 2),
            "shares_value": round(nav_info["shares_value"], 2), "liability": round(nav_info["liability"], 2),
@@ -779,6 +821,71 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
     ledger_io.write_json(p["meta"], _scrub(meta))
     return {"as_of": as_of, "nav": row["nav"], "cash": row["cash"], "events": events, "skipped": skipped,
             "deferred": deferred, "n_lots": len(lots)}
+
+
+def _write_events(p: Dict[str, Path], events: List[Dict]) -> None:
+    prior = ledger_io.load_jsonl(p["events"])
+    seen = {(e["date"], e["ticker"], e["event"], e.get("cycle")) for e in prior}
+    for e in events:
+        if (e["date"], e["ticker"], e["event"], e.get("cycle")) not in seen:
+            ledger_io.append_jsonl(p["events"], _scrub(e))
+            seen.add((e["date"], e["ticker"], e["event"], e.get("cycle")))
+
+
+def _finish_open(as_of, p, meta, cash, lots, events, skipped, deferred, chains, why_no_chain) -> Dict:
+    """盘中那一轮的收尾：事件 → 持仓 → meta（含 last_open_run）。不写净值行（净值曲线是收盘口径，由 mark 阶段写）。
+    这一轮在另一个进程里跑，计数进不了当晚扫描的 scan_timing ⇒ 把本进程的计数快照存进 last_open_run，mark 阶段再转进计数。"""
+    n_missing = sum(1 for v in chains.values() if v is None)
+    _note(chain_total=len(chains), chain_missing=n_missing)
+    for tk, why in why_no_chain.items():
+        if chains.get(tk) is None:
+            _note_item("chain_missing", f"{tk}: {why}")
+    _write_events(p, events)
+    meta.update(cash=round(cash, 2), version=_VERSION, config_snapshot=_config_snapshot(),
+                last_open_run={"date": as_of, "outcome": "ran", "skipped": skipped, "deferred": deferred,
+                               "chain_errors": {tk: w for tk, w in why_no_chain.items() if chains.get(tk) is None},
+                               "quote_times": {tk: (c or {}).get("payload_last_trade_time") for tk, c in chains.items()},
+                               "stats": stats()})
+    ledger_io.write_jsonl(p["lots"], [_scrub(l) for l in lots.values()])
+    ledger_io.write_json(p["meta"], _scrub(meta))
+    return {"as_of": as_of, "phase": "open", "cash": round(cash, 2), "events": events, "skipped": skipped,
+            "deferred": deferred, "n_lots": len(lots)}
+
+
+def _check_open_ran(as_of: str, meta: Dict) -> None:
+    """mark 阶段：当天盘中那一轮跑了没有。没有记录 / 窗口外 / 抛了 ⇒ open_missing（P2）；跑了 ⇒ 把那一轮的计数并进本进程，
+    让「整轮抛 / 链全取不到 / RV 全没算出来」照样经 scan_timing → alert_manager 报出来。"""
+    if as_of < OPEN_PHASE_FROM:
+        return
+    rec = meta.get("last_open_run") or {}
+    if rec.get("date") != as_of or rec.get("outcome") != "ran":
+        why = "没有记录（机器没开 / 睡眠 / 任务没装）" if rec.get("date") != as_of else f"{rec.get('outcome')}：{rec.get('detail')}"
+        _note(open_missing=1)
+        _note_item("open_missing", f"{as_of} 盘中开仓那一轮：{why}")
+        return
+    st = rec.get("stats") or {}
+    _note(run_errors=int(st.get("run_errors") or 0), rv_total=int(st.get("rv_total") or 0),
+          rv_missing=int(st.get("rv_missing") or 0))
+    if st.get("all_chains_missing"):
+        _note(open_chains_missing=1)
+        _note_item("open_chains_missing", f"{as_of} 盘中那一轮取链的 {st.get('chain_total')} 只一只都没取到")
+    for it in (st.get("items") or [])[:3]:
+        _note_item(f"open:{it.get('kind')}", it.get("detail"))
+
+
+def record_open_outcome(as_of: str, outcome: str, detail: Optional[str]) -> None:
+    """盘中入口没跑成 run_for_date 时（窗口外 / 抛了）也落一笔，mark 阶段据此报 P2；跑成了由 `_finish_open` 记。"""
+    if outcome not in OPEN_OUTCOMES:
+        raise ValueError(outcome)
+    p = _paths()
+    p["dir"].mkdir(parents=True, exist_ok=True)
+    with ledger_io.locked(p["dir"]):
+        meta = _load_meta()
+        prev = meta.get("last_open_run") or {}
+        if prev.get("date") == as_of and prev.get("outcome") == "ran":
+            return                                  # 同一天已经跑成过（比如手动补跑后又被 launchd 补触发），不覆盖
+        meta["last_open_run"] = {"date": as_of, "outcome": outcome, "detail": detail}
+        ledger_io.write_json(p["meta"], _scrub(meta))
 
 
 # ═══════════════════════════ 用户手动干预（v0.45.807） ═══════════════════════════
@@ -1027,7 +1134,9 @@ if __name__ == "__main__":  # pragma: no cover - 命令行：看进度（只读�
     import argparse
     ap = argparse.ArgumentParser(description="接货型卖 put 纸面账本")
     ap.add_argument("--run", metavar="YYYY-MM-DD", help="手动跑某一天（写账本）")
+    ap.add_argument("--phase", choices=PHASES, default="mark",
+                    help="缺省 mark（只结算 + 盯市，与收盘后扫描相同）；盘中开仓走 sell_put_open.py --now")
     args = ap.parse_args()
     if args.run:
-        print(run_for_date(args.run))
+        print(run_for_date(args.run, phase=args.phase))
     print(render_markdown())

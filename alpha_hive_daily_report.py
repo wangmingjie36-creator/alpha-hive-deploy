@@ -1275,7 +1275,9 @@ class AlphaHiveDailyReporter:
         # 失败在源头登记（`sell_put_wheel.stats()` → scan_timing → alert_manager P2）；这里只吞成 WARNING，不拖死日报。
         try:
             import sell_put_wheel as _spw
-            _spw_result = _spw.run_for_date(self.date_str)
+            # v0.45.810：开仓挪到盘中美东 15:30（launchd `sell_put_open.py`）；这里只结算 + 盯市 + 净值，
+            # 并核对当天盘中那一轮跑了没有（没跑 ⇒ sell_put.open_missing ⇒ P2）
+            _spw_result = _spw.run_for_date(self.date_str, phase="mark")
             _log.info("接货型卖 put 账本已更新: %s (NAV %s / 事件 %d / 没开 %d / 结算延期 %d)", self.date_str,
                       (_spw_result or {}).get("nav", "?"), len((_spw_result or {}).get("events") or []),
                       len((_spw_result or {}).get("skipped") or []), len((_spw_result or {}).get("deferred") or []))
