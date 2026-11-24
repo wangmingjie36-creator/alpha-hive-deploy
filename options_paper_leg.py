@@ -95,9 +95,10 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from collections import defaultdict
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -614,6 +615,122 @@ def _exit_blocked_reason(side: str, qc: Optional[dict], qp: Optional[dict]) -> s
     return "；".join(bad) or "未知"
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 状态不变式：平仓条件触发后仍未平（v0.45.804）
+# ══════════════════════════════════════════════════════════════════════════════
+# 这本账的约定：`post_event`（as_of > 财报日）或 `expiry_buffer`（距到期 ≤ buffer）一触发，持仓就该在**当天**平掉；
+# 平不了的原因有很多（一条腿 bid=0 / 没报价 / Twelve Data 滞后 / 到期日坏 / 平仓算出非有限值被拒 / 整轮抛），每一个此前
+# 都只在日志里留一行——NVDA 卡了两天、是人工核对才发现的（2026-11-19）。不为每个原因各写一个探测器：只检查**结果**——
+# 「触发了却还在账上」。从持久化状态（财报日、到期日）加交易日历推出**应平日**，与平仓路径互相独立，所以平仓路径自己坏了
+# 也报得出来；同日重跑幂等（覆盖式登记，不累加）。只读状态、不改任何平仓行为。
+#
+# 阈值 2 个交易日（用账本历史定的）：已平的 10 笔事后平仓里 9 笔应平日当天平、1 笔（COST，多个持仓同时 stale 的整体报价故障）
+# 晚 1 个交易日；到期当晚无定稿收盘 ⇒ 延期一天是设计内。≥ 2 零误报；超期 1 个交易日只进日报 / 日志，不报警。
+OVERDUE_ALERT_SESSIONS = 2
+_ITEMS_MAX = 10
+_LOCK = threading.Lock()
+_ZERO = {"runs": 0, "run_errors": 0, "overdue_n": 0, "max_overdue_sessions": 0, "undeterminable_n": 0}
+_STATS: Dict = {**_ZERO, "items": []}
+
+
+def exit_due_date(earnings_date, expiry) -> Tuple[Optional[str], Optional[str]]:
+    """持仓**最早**会被账本平仓的那个扫描日及原因：(日期, "post_event" | "expiry_buffer")；两个都算不出 ⇒ (None, None)。
+
+    与 `_run_for_date` 的出场判定同一条件、换成日期：
+      post_event     as_of > 财报日                 ⇒ 财报日之后第 1 个 NYSE 交易日（`add_trading_days(财报日, 1)`）
+      expiry_buffer  距到期 ≤ expiry_buffer_days    ⇒ 到期日 − buffer 这一天起、不早于它的第 1 个交易日（`add_trading_days(…, 0)`）
+    两者取先到的。`exit_after_event` 关着就不算 post_event；财报日取前 10 位（信号存原始值，可能带时间戳）。
+    交易日算术只走 `is_trading_day.add_trading_days`（全仓唯一实现，不心算）。日历抛 ⇒ 原样抛给调用方。"""
+    from is_trading_day import add_trading_days
+    cands: List[Tuple[str, str]] = []
+    ed = _iso_day(str(earnings_date or "")[:10])
+    if CONFIG["exit_after_event"] and ed:
+        cands.append((add_trading_days(date.fromisoformat(ed), 1).isoformat(), "post_event"))
+    ex = _iso_day(str(expiry or ""))
+    if ex:
+        edge = date.fromisoformat(ex) - timedelta(days=int(CONFIG["expiry_buffer_days"]))
+        cands.append((add_trading_days(edge, 0).isoformat(), "expiry_buffer"))
+    # 同一天到期时与出场路径一致：`reason = "post_event" if post_event else "expiry_buffer"`，post_event 优先
+    return min(cands, key=lambda c: (c[0], c[1] != "post_event")) if cands else (None, None)
+
+
+def _sessions_after(due: str, as_of: str) -> int:
+    """`as_of` 比应平日晚几个交易日（应平日当天 = 0；as_of 不晚于它 = 0）。"""
+    from is_trading_day import add_trading_days
+    d0, a = date.fromisoformat(due), date.fromisoformat(as_of)
+    n = 0
+    while add_trading_days(d0, n + 1) <= a:
+        n += 1
+    return n
+
+
+def overdue_positions(positions: List[StraddlePosition], as_of: str) -> List[Dict]:
+    """账上还挂着、却早该平的持仓：超期 ≥ 1 个交易日的，外加「应平日算不出来」的（`kind="undeterminable"`，永远不会自动平）。
+
+    `positions` 是本轮收尾后**仍未平**的那批。纯函数、不读时钟、不碰状态文件；一个持仓算炸了只让它自己进 undeterminable，
+    不影响别的。原因优先读账本已经留的痕（`exit_blocked_reason` / `settle_deferred_reason`），都没有 ⇒「原因未知」——
+    这种最危险：说明平仓路径根本没走到（抛了 / 被跳过），不是「走到了但平不了」。"""
+    out: List[Dict] = []
+    ao = _iso_day(str(as_of or ""))
+    for p in positions:
+        base = {"ticker": p.ticker, "side": p.side, "expiry": p.expiry, "earnings_date": p.earnings_date}
+        try:
+            due, why = exit_due_date(p.earnings_date, p.expiry)
+            if due is None or ao is None:
+                out.append({**base, "kind": "undeterminable", "due": None, "due_reason": None, "overdue_sessions": None,
+                            "reason": "应平日算不出来（财报日与到期日都不可用）" if due is None else f"as_of 不可用 {as_of!r}"})
+                continue
+            n = _sessions_after(due, ao)
+        except Exception as exc:  # noqa: BLE001 - 一个持仓的日历算炸了不能拖累别的；记成算不出，由告警点名
+            out.append({**base, "kind": "undeterminable", "due": None, "due_reason": None, "overdue_sessions": None,
+                        "reason": f"应平日计算失败：{type(exc).__name__}"})
+            continue
+        if n < 1:
+            continue
+        if p.exit_blocked_since:
+            reason = f"平不了（自 {p.exit_blocked_since}）：{p.exit_blocked_reason}"
+        elif p.settle_deferred_since:
+            reason = f"结算延期（自 {p.settle_deferred_since}）：{p.settle_deferred_reason}"
+        else:
+            reason = "原因未知：平仓路径没留痕（没走到 / 被跳过 / 抛了）"
+        out.append({**base, "kind": "overdue", "due": due, "due_reason": why, "overdue_sessions": n, "reason": reason})
+    return out
+
+
+def _note_run(overdue: List[Dict]) -> None:
+    """登记本轮不变式检查的结果。**覆盖式**（同日重跑 / 一个进程多次调用不累加）；`runs` 累加。"""
+    with _LOCK:
+        _STATS["runs"] += 1
+        _STATS["overdue_n"] = sum(1 for o in overdue if o["kind"] == "overdue")
+        _STATS["undeterminable_n"] = sum(1 for o in overdue if o["kind"] == "undeterminable")
+        _STATS["max_overdue_sessions"] = max([o["overdue_sessions"] or 0 for o in overdue] or [0])
+        _STATS["items"] = [dict(o) for o in overdue[:_ITEMS_MAX]]
+
+
+def _note_run_error(exc: BaseException) -> None:
+    with _LOCK:
+        _STATS["run_errors"] += 1
+        if len(_STATS["items"]) < _ITEMS_MAX:
+            _STATS["items"].append({"kind": "run_error", "reason": f"{type(exc).__name__}: {exc}"[:200]})
+
+
+def stats() -> dict:
+    """进程内登记（`scan_timing.counters()["options_paper"]` 读它，`alert_manager._check_options_paper` 转 P2）。
+    `overdue_alert`：有持仓超期 ≥ `OVERDUE_ALERT_SESSIONS` 个交易日，或有持仓应平日算不出来；`run_errors`：整轮抛了。
+    本进程没跑过账本 ⇒ `runs == 0`、全是零——**不当故障报**（半程扫描 / 补跑可以合法地不碰它）。"""
+    with _LOCK:
+        out = {k: _STATS[k] for k in _ZERO}
+        out["items"] = [dict(i) for i in _STATS["items"]]
+    out["overdue_alert"] = out["max_overdue_sessions"] >= OVERDUE_ALERT_SESSIONS or out["undeterminable_n"] > 0
+    return out
+
+
+def reset_stats() -> None:
+    with _LOCK:
+        _STATS.clear()
+        _STATS.update({**_ZERO, "items": []})
+
+
 def _mark_value(pos: StraddlePosition) -> float:
     """持仓对 NAV 的贡献：long 为 +市值、short 为 −市值。"""
     v = pos.last_mark * 100.0 * pos.contracts
@@ -808,8 +925,12 @@ def run_for_date(as_of: str,
 
     整轮持账本目录锁（v0.45.452，照 paper_portfolio）：读 meta / 持仓 → 改 → 写回是一次读-改-写，手动补跑与定时
     扫描撞上时后写者会用旧快照覆盖先写者。锁超时 ⇒ LedgerLockTimeout，不退回无锁写。"""
-    with ledger_io.locked(POSITIONS_FILE.parent):
-        return _run_for_date(as_of, quotes_fn, signals, closes_fn)
+    try:
+        with ledger_io.locked(POSITIONS_FILE.parent):
+            return _run_for_date(as_of, quotes_fn, signals, closes_fn)
+    except Exception as exc:  # noqa: BLE001 - 整轮抛：日报钩子会把它吞成一条 WARNING，这里先在源头登记（v0.45.804），再原样抛
+        _note_run_error(exc)
+        raise
 
 
 def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
@@ -1070,6 +1191,23 @@ def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
     meta["skipped_entries"] = [{"date": as_of, **s} for s in skipped]
     _save_meta(meta)
 
+    # v0.45.804：状态不变式——触发平仓条件后仍在账上的持仓。与上面的出场路径互相独立（只读本轮收尾后的持仓状态），
+    # 登记失败不能影响账本（已写盘），但要留痕。
+    overdue: List[Dict] = []
+    try:
+        overdue = overdue_positions(positions, as_of)
+        _note_run(overdue)
+    except Exception as exc:  # noqa: BLE001
+        _log.error("[OptionsPaperLeg] 超期持仓检查失败（账本已写盘、不受影响）: %s", exc, exc_info=True)
+        _note_run_error(exc)
+    for o in overdue:
+        if (o["overdue_sessions"] or 0) >= OVERDUE_ALERT_SESSIONS or o["kind"] == "undeterminable":
+            # 已知原因（平不了 / 结算延期）是设计内的等待、上面各自已有 WARNING，P2 告警才是响的那一道 ⇒ 这里 WARNING；
+            # 「原因未知」（平仓路径没走到）与「应平日算不出」没有任何别的痕迹 ⇒ ERROR
+            (_log.error if o["kind"] == "undeterminable" or o["reason"].startswith("原因未知") else _log.warning)(
+                "[OptionsPaperLeg] ⚠️ %s %s 该平仓却还在账上：应平日 %s（%s），已超期 %s 个交易日；%s",
+                o["ticker"], o["side"], o["due"], o["due_reason"], o["overdue_sessions"], o["reason"])
+
     return {
         "as_of": as_of, "nav": nav, "cash": cash,
         "positions": [p.to_dict() for p in positions],
@@ -1078,6 +1216,7 @@ def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
         "settle_deferred": deferred,
         "invalid_expiry": invalid_expiry,
         "exit_blocked": blocked,
+        "overdue": overdue,
     }
 
 

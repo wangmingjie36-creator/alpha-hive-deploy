@@ -52,8 +52,10 @@ class FakeEngine:
 
 def sdk_client(*script):
     """真 anthropic SDK + httpx MockTransport：每次请求取下一项（dict ⇒ 200 回复，异常 ⇒ 抛），不出网。
-    要测「断线可能已计费」必须走真 SDK——SDK 把 httpx 超时包成 APITimeoutError，分类器认的是那个。"""
-    import anthropic
+    要测「断线可能已计费」必须走真 SDK——SDK 把 httpx 超时包成 APITimeoutError，分类器认的是那个。
+    CI 刻意不装 anthropic（requirements.txt 注释，v0.45.601）⇒ 那里 skip；本机（真调 API 的唯一地方）照跑。
+    与 test_alphabot_chat.py::TestWireWithTheRealSdk 同一做法（v0.45.812：此前裸 import，CI 自 11-20 起红）。"""
+    anthropic = pytest.importorskip("anthropic")
     items = list(script)
 
     def handler(request):

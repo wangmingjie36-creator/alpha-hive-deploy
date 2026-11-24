@@ -123,9 +123,9 @@ class TestVisibility:
         res = {"as_of": AS_OF, "aggregate": agg, "rows": rows,
                "recommendation": pg.hedge_recommendation(agg, 689.81, 140_000.0),
                "stress": pg.stress_table(rows), "executed": False}
-        assert "已按收盘内在价值锁定" in pg.render_markdown(AS_OF, res)
+        assert "已按到期收盘锁定" in pg.render_markdown(AS_OF, res)
         js = (_ROOT / "alphabot" / "static" / "pages" / "hedge.js").read_text(encoding="utf-8")
-        assert re.search(r"if \(pc\.n_expiry_intrinsic\)\s*warns\.push\([^;]*当天到期的腿", js), "hedge.js 缺到期内在价值提示"
+        assert re.search(r"if \(pc\.n_expiry_intrinsic\)\s*warns\.push\([^;]*当天到期或已到期待结算的腿", js), "hedge.js 缺到期内在价值提示"
 
 
 class TestHelper:
@@ -163,3 +163,32 @@ class TestStraddlePageLedgerView:
     def test_page_shows_the_note(self):
         js = (_ROOT / "alphabot" / "static" / "pages" / "straddle.js").read_text(encoding="utf-8")
         assert re.search(r"g\.intrinsic_legs\?\.length[^?]*\?\s*h\([^;]*内在价值", js), "straddle.js 缺内在价值腿提示"
+
+
+class TestExpiredUnsettled:
+    """v0.45.811：已过到期日、跨式账本还没结算的腿（结算推迟时会挂几天，11-20 那晚就推迟过）——合约已不在报价文件里，
+    此前判缺报价 ⇒ 整轮 unknown。盈亏已按到期那一场收盘锁定 ⇒ Greeks 记 0；mid 不给（要那一场的收盘，不拿今天的价算）。"""
+    LATER = "2026-11-23"
+
+    def test_expired_legs_are_zero_not_missing(self):
+        rows = _rows(None, put_q={}, S=130.0, as_of=self.LATER)
+        for cp in ("call", "put"):
+            r = _leg(rows, cp)
+            assert r["dte"] == -3 and r["expired_days"] == 3 and r["expiry_intrinsic"] is True
+            assert r["quote_missing"] is False and r["delta"] == 0.0 and r["dollar_delta"] == 0.0 and r["mid"] is None
+        agg = pg.aggregate(rows, nav=140_000.0)
+        assert agg["partial"] is False and agg["band_status"] != "unknown" and agg["coverage"]["n_expiry_intrinsic"] == 2
+
+    def test_expired_even_without_a_close_and_even_if_a_quote_shows_up(self):
+        """不需要今天的收盘（锁定的是到期那一场）；万一报价文件里还有它的报价也不用。"""
+        live = {"price": 130.0, "session": self.LATER, "source": "cboe_live", "at_close": False, "live": True}
+        rows = _rows(_usable(delta=0.5, mid=3.0), put_q=_usable(delta=-0.5, mid=3.0), mark=live, as_of=self.LATER)
+        assert all(r["expiry_intrinsic"] and r["delta"] == 0.0 for r in rows)
+
+    def test_stress_excludes_and_straddle_page_names_them(self):
+        rows = _rows(None, put_q={}, S=130.0, as_of=self.LATER)
+        st = pg.stress_table(rows)
+        assert f"{CALL}(option:expired -3d)" in st["excluded"] and f"{PUT}(option:expired -3d)" in st["excluded"]
+        g = sd.position_view(_position(), as_of=self.LATER, today=self.LATER, sig_today={"underlying_price": 130.0, "as_of": self.LATER},
+                             sig_entry=None, greek_legs=sd._greek_legs({"rows": rows}))["greeks"]
+        assert g["intrinsic_legs"] == ["call", "put"] and g["dollar_delta"] == 0.0

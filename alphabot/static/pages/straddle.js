@@ -69,7 +69,7 @@ function greeksGrid(g, warnAt) {
     g.degraded_legs?.length && GREEK_TOTALS.some((k) => isNum(g[k])) ? h("div", { class: "small muted" },
       `Greeks 含 ${g.degraded_legs.join("、")} 腿（bid=0）的 CBOE 模型值，仅供参考；这条腿没有中间价（买价为 0），盯市价不会拿它的模型值去算。`) : null,
     g.intrinsic_legs?.length && GREEK_TOTALS.some((k) => isNum(g[k])) ? h("div", { class: "small muted" },
-      `${g.intrinsic_legs.join("、")} 腿今天到期：已按当天收盘的内在价值锁定（账本现金结算），收盘后对标的没有敞口，Greeks 记 0，不用 CBOE 报价。`) : null,
+      `${g.intrinsic_legs.join("、")} 腿已到期（当天或待结算）：已按到期那天收盘的内在价值锁定（账本现金结算），收盘后对标的没有敞口，Greeks 记 0，不用 CBOE 报价。`) : null,
   ];
 }
 
