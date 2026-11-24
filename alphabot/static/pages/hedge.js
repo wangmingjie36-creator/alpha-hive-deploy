@@ -166,7 +166,7 @@ export async function renderHedge(root, alive) {
   const rules = d.rules || {};
   const head = h("div", { class: "page-head" }, h("div", {},
     h("h1", {}, "对冲账本", h("span", { class: "sub" }, d.source === "demo" ? "演示数据" : (d.as_of ? `账本 ${d.as_of}` : ""))),
-    h("p", { class: "lede" }, `组合 Greeks 的纸面 ${rules.hedge_instrument || "SPY"} 覆盖（模拟成交，不连券商）：每个扫描日收盘后，${rules.hedge_stock_book ? "把股票纸面组合和跨式腿合起来" : "只拿财报跨式腿（不看股票纸面组合）"}算 β·Delta 占合并 NAV 的百分比，出 ±${num(rules.beta_delta_band_pct, 0)}% 带就用 ${rules.hedge_instrument || "SPY"} 股票拉回带边，带内不动。 `, helpLink("hedge"))));
+    h("p", { class: "lede" }, `组合 Greeks 的纸面 ${rules.hedge_instrument || "SPY"} 覆盖（模拟成交，不连券商）：每个扫描日收盘后，${rules.hedge_stock_book ? "把股票纸面组合和跨式腿合起来" : "只拿财报跨式腿（不看股票纸面组合）"}算 β·Delta 占合并 NAV 的百分比，出 ±${num(rules.beta_delta_band_pct, 0)}% 带就用 ${rules.hedge_instrument || "SPY"} 股票拉回带边，带内不动；已没有跨式可对冲时整笔平掉。 `, helpLink("hedge"))));
   if (!d.data_available) {
     fill(root, head, panel(null, {}, h("div", { class: "empty" }, `没找到对冲账本目录：${d.state_dir?.path || "—"}`),
       Object.entries(d.errors || {}).map(([k, v]) => h("p", { class: "small muted" }, `${k}：${v}`)),
