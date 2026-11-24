@@ -211,7 +211,11 @@ export async function renderHedge(root, alive) {
     kpi(`持有 ${a.ticker || rules.hedge_instrument || "SPY"}`, shares(a.shares), "", a.entry_date ? `自 ${a.entry_date}` : null),
     kpi("均价", money(a.avg_price)),
     kpi("标记价", money(a.mark), a.mark_stale ? "down" : "", a.mark_date ? `标记于 ${a.mark_date}` : null),
-    kpi("市值", money(a.market_value, 0)), kpi("现金", money(a.cash, 0)),
+    kpi("市值", money(a.market_value, 0)),
+    // 可用现金（用户 11-24 要求标出）：起始现金 0，这里的现金全是这层对冲攒下的；空 SPY 时里面含卖空所得、平仓要还，不能全算「可用」
+    kpi("可用现金", money(a.cash, 0), "", !isNum(a.shares) || !isNum(a.cash) ? null
+      : a.shares < 0 ? `含卖空 SPY 所得，平仓要还；真正可用 ≈ 净值 ${money(a.nav, 0)}`
+      : a.shares > 0 ? "买 SPY 已花掉的不在里面" : "空仓，全部可用"),
     kpi("累计盈亏（= 净值）", sMoney(a.nav), tone(a.nav)),
     kpi("浮动（收盘）", sMoney(a.unrealized_usd), tone(a.unrealized_usd)), kpi("已实现", sMoney(a.realized_usd), tone(a.realized_usd)));
 
@@ -243,7 +247,7 @@ export async function renderHedge(root, alive) {
 
   fill(root, head,
     warns.map((w) => h("p", { class: "callout warn" }, w)),
-    panel("账户", { sub: `起始现金 0，所以净值就是开账（${a.starting_date || "—"}）以来的累计盈亏 · 账目核对 ${a.identity_ok === true ? `✓（与 ${a.identity_checked_against} 净值行一致）` : a.identity_ok === false ? "✗" : `—（${a.identity_reason || "核对不了"}）`}` }, kpis),
+    panel("账户", { sub: `起始现金 0，所以净值就是开账（${a.starting_date || "—"}）以来的累计盈亏 · 可用现金 ${money(a.cash, 0)} · 账目核对 ${a.identity_ok === true ? `✓（与 ${a.identity_checked_against} 净值行一致）` : a.identity_ok === false ? "✗" : `—（${a.identity_reason || "核对不了"}）`}` }, kpis),
     h("div", { style: { height: "16px" } }),
     liveHost,
     h("div", { style: { height: "16px" } }),
