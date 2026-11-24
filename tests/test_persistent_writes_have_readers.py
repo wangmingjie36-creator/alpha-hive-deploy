@@ -125,6 +125,8 @@ SITE_ARTIFACTS: dict = {
     'alphabot/macos_app.py::build_app': ('Alpha Bot.app 包（用户 Applications 目录）',),
     'alphabot/service.py::AlphaBotService.take_snapshot': ('alphabot_state/intraday/<date>/*.jsonl',),
     'alphabot/service.py::_atomic_write_json': ('alphabot_state/settings.json',),
+    # v0.45.815 当日原始链存档（每张落盘快照覆盖写一次 ⇒ 一天留最后一份）
+    'alphabot/service.py::_atomic_write_gzip_json': ('alphabot_state/intraday/<date>/<T>.chain.json.gz',),
     'alphabot/thesis_claude.py::ThesisClaude._save': ('alphabot_state/thesis_claude/<T>.json',),
     'cboe_fetcher.py::<module>': ('cboe_sample.html',),
     'cboe_fetcher.py::CBOEDailyFetcher._write_cache': ('cache/cboe_daily/*.json',),
@@ -281,6 +283,9 @@ ARTIFACTS: dict = {
         '对话记录（v0.45.808）；点开历史对话接着聊经 _read_conv 读回、「历史」列表经 list_conversations 逐个读摘要；只由人归档，无自动清理'),
     'alphabot_state/intraday/<date>/*.jsonl': (READ, [('alphabot/service.py::AlphaBotService.intraday', '.jsonl'), ('alphabot/service.py::AlphaBotService.intraday_dates', 'intraday')],
         '盘中快照追加；server.py /intraday 接口经 intraday()/intraday_dates() 读回给页面'),
+    'alphabot_state/intraday/<date>/<T>.chain.json.gz': (FORENSIC, [],
+        '当日原始期权链存档（v0.45.815）：盘中快照只存汇总值，做日间拆解（换昨天的 OI / IV 重算 Zero Gamma）时才翻；'
+        '读回口 AlphaBotService.archived_chain，没有页面或定时流程读它；不自动清理（同盘中快照，用户知情）'),
     'alphabot_state/settings.json': (READ, [('alphabot/service.py::AlphaBotService._settings_path', 'settings.json')],
         '唯一调用点 update_settings；消费者 settings()（server.py /settings、轮询 focus 列表）'),
     'alphabot_state/thesis_claude/<T>.json': (READ, [('alphabot/thesis_claude.py::ThesisClaude._path', 'thesis_claude')],

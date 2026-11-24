@@ -7,13 +7,14 @@
     不调记录、结算、写本地报告；assess 一律 freeze=False——冻结的唯一写者仍是日报钩子。
   · **盲期**：行视图的结算字段、历史水平叠价格，全部由 `sell_strike_report` 按「全部 tenor 冻结」判定，
     本模块不自己判、不自己拼（少一份判据就少一次漂移）。
-  · 本模块**自己**写的只有 `PATHS.alphabot_state`（设置与盘中快照），调用时求值。
+  · 本模块**自己**写的只有 `PATHS.alphabot_state`（设置、盘中快照与当日原始链存档），调用时求值。
 
 取数慢且串行（每只 ~1.5MB、4–7 秒，进程内同一时刻只有一个外发请求），所以：现算结果按票缓存
 `LIVE_TTL_SEC` 秒、同票并发合并成一次；总览读账本的收盘后行，不逐只现拉。
 """
 from __future__ import annotations
 
+import gzip
 import json
 import math
 import os
@@ -73,6 +74,10 @@ DEFAULT_FOCUS = ("NVDA", "TSLA", "MSFT", "META", "AMZN")
 DEFAULT_INTERVAL_MIN = 10
 #: 快照里逐行权价 GEX 只存现价 ±这么多（热力图 / 回看点够用；不存原始链）
 SNAPSHOT_STRIKE_BAND = 0.12
+# 当日原始链存档（v0.45.815）：每张落盘的快照把这一拍现算用的原始链整份覆盖写到
+# `intraday/<日期>/<T>.chain.json.gz` ⇒ 一天只留最后一份（收盘前最后一拍）。快照本身只存汇总值，
+# 没有逐合约 OI / IV 就没法做「换掉昨天的 OI 重算 Zero Gamma」这类日间拆解（11-24 NVDA 实测只能用排除法）。
+CHAIN_ARCHIVE_SUFFIX = ".chain.json.gz"
 #: CBOE 报 `stale_vintage`（文件还停在上一交易日）时，这些票改拉 yfinance（`alphabot.yf_chain`，v0.45.603）。
 #: NVDL（2026-10-22）：它的 CBOE 文件整个上午不更新，同一时刻 yfinance 有 15 分钟延迟的成交。
 #: BILI（2026-10-27）：CBOE 文件盘中不更新（一个时点实测：12:47 ET 时文件还是昨天 23:22 ET 生成的；刷新时刻待验证），
@@ -257,6 +262,23 @@ def _atomic_write_json(path: Path, obj) -> None:
         raise
 
 
+def _atomic_write_gzip_json(path: Path, obj) -> None:
+    """整份覆盖写一个 gzip 压缩的 JSON（临时文件 + os.replace，读者永远看不到写了一半的文件）。
+    非 JSON 原生值按 str 落盘（防御：取链结果应当全是 JSON 原生值，万一混进别的类型不让整份存档失败）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as raw_f, gzip.GzipFile(fileobj=raw_f, mode="wb", mtime=0) as f:
+            f.write(json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8"))
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def W_CONFIG_UNIVERSE() -> List[str]:
     """接货账本现行名单（`sell_put_wheel.CONFIG`，调用时取，不存模块级常量）。"""
     import sell_put_wheel
@@ -422,7 +444,7 @@ class AlphaBotService:
                       "premium_computed": 0, "premium_cache_hits": 0, "premium_failures": 0,
                       "howto_failures": 0, "yf_fallback_used": 0, "yf_fallback_failed": 0,
                       "beta_sens_computed": 0, "beta_sens_failures": 0, "yf_rate_limited": 0,
-                      "activity_failures": 0, "ohlc_failures": 0,
+                      "activity_failures": 0, "ohlc_failures": 0, "chain_archive_failures": 0,
                       "minute_fetches": 0, "minute_cache_hits": 0, "minute_failures": 0,
                       "thesis_fetches": 0, "thesis_cache_hits": 0, "thesis_failures": 0,
                       "sector_quote_fetches": 0, "sector_cache_hits": 0, "sector_failures": 0,
@@ -2237,6 +2259,8 @@ class AlphaBotService:
             raw = raws[-1] if raws else None
             vols = self._attach_activity(t, snap, raw, date_et=now.date().isoformat(),
                                          last_ts=(last or {}).get("ts"))
+            # 存档状态写进这一拍（ok / no_raw / failed）：存档坏了快照照落，但下游读快照就知道这天的链缺了
+            snap["chain_archive"] = self._archive_chain(t, raw, now.date().isoformat())
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(snap, ensure_ascii=False) + "\n")
@@ -2245,6 +2269,46 @@ class AlphaBotService:
             self._act_prev[t] = {"date": now.date().isoformat(), "source": _chain_source(raw),
                                  "ts": snap["ts"], "vols": vols}
         return {"ticker": t, "recorded": True, "ts": snap["ts"]}
+
+    def _chain_archive_path(self, t: str, date_et: str) -> Path:
+        return self._intraday_dir(date_et) / f"{t}{CHAIN_ARCHIVE_SUFFIX}"
+
+    def _archive_chain(self, t: str, raw: Optional[dict], date_et: str) -> str:
+        """把这一拍现算用的原始链整份覆盖写进当日存档（v0.45.815）。返回 `ok` / `no_raw` / `failed`。
+        失败不挡快照落盘：计 `stats.chain_archive_failures`、日志 warning，并由调用方写进快照的 `chain_archive`。"""
+        if raw is None:
+            return "no_raw"
+        try:
+            _atomic_write_gzip_json(self._chain_archive_path(t, date_et), clean_json(raw))
+            return "ok"
+        except Exception as exc:  # noqa: BLE001 - 存档是附加取证材料，坏了不许连累快照本身
+            self.stats["chain_archive_failures"] += 1
+            _log.warning("[%s] 当日原始链存档写不进：%s: %s", t, type(exc).__name__, exc)
+            return "failed"
+
+    def archived_chain(self, ticker, date_et) -> dict:
+        """读回某票某个美东日存档的原始链（当天最后一张落盘快照用的那份；v0.45.815）。
+        没有 ⇒ `available=False, reason="missing"`；读坏 ⇒ `reason="corrupt"` + 异常文字（不当成没有）。
+        给日间拆解（换 OI / IV / 到期日重算 Zero Gamma）用；没有页面读它。"""
+        t, d = norm_ticker(ticker), norm_date(date_et)
+        path = self._chain_archive_path(t, d)
+        out = {"ticker": t, "date": d, "available": False, "reason": None, "raw": None}
+        if not path.is_file():
+            out["reason"] = "missing"
+            return out
+        try:
+            with gzip.open(path, "rb") as f:
+                raw = json.loads(f.read().decode("utf-8"))
+        except (OSError, EOFError, ValueError) as exc:
+            out["reason"] = "corrupt"
+            out["error"] = f"{type(exc).__name__}: {exc}"
+            return out
+        if not isinstance(raw, dict):
+            out["reason"] = "corrupt"
+            out["error"] = f"顶层不是对象：{type(raw).__name__}"
+            return out
+        out.update(available=True, raw=raw)
+        return out
 
     def _attach_activity(self, t: str, snap: dict, raw: Optional[dict], *, date_et: str,
                          last_ts: Optional[str]) -> Optional[dict]:

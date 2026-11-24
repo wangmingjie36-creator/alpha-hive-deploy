@@ -17,6 +17,7 @@ v0.45.409（阶段 6 ⑤）追加**真实数据根闸**的同三层：判据（`
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import json
 import os
 import shutil
@@ -654,6 +655,61 @@ class TestAlphabotAppendClassifier:
         if case not in ("removed",):
             assert target in v["why"], f"{case}：Alpha Bot 目录下没能归因的项要给出原因"
 
+    # ── v0.45.815 当日原始链存档（覆盖写的 .chain.json.gz）与新增的快照键 chain_archive
+    @staticmethod
+    def _archive(root, rel, **extra):
+        rec = {"ticker": "NVDA", "underlying_price_source": "cboe_intraday", "contracts": [{"strike": 100.0}]}
+        rec.update(extra)
+        a = root / rel.replace(".jsonl", ".chain.json.gz")
+        a.write_bytes(gzip.compress(json.dumps(rec).encode()))
+        return str(Path(rel).parent / a.name)
+
+    def test_snapshot_with_and_without_chain_archive_key_are_both_alphabot(self, tmp_path):
+        """新进程的快照带 chain_archive；没重启的旧进程（815 之前的代码）不带——两种都是真采样。"""
+        root, rel, before, baseline, started, now = self._setup(tmp_path)
+        with open(root / rel, "ab") as f:
+            f.write(_line(_snap(now, chain_archive="ok")) + _line(_snap(now)))
+        _changes, v = self._explain(root, before, baseline, started)
+        assert v["explained"] == [rel] and v["records"] == 2 and v["why"] == {}, v
+
+    def test_archive_rewritten_alongside_a_snapshot_is_explained(self, tmp_path):
+        root, rel, before, baseline, started, now = self._setup(tmp_path)
+        arch = self._archive(root, rel)
+        with open(root / rel, "ab") as f:
+            f.write(_line(_snap(now, chain_archive="ok")))
+        _changes, v = self._explain(root, before, baseline, started)
+        assert v["explained"] == sorted([rel, arch]) and v["unexplained"] == {} and v["why"] == {}, v
+
+    def test_first_batch_with_archive_of_a_new_day_is_explained(self, tmp_path):
+        root, rel, before, baseline, started, now = self._setup(tmp_path, with_file=False)
+        (root / rel).parent.mkdir(parents=True)
+        (root / rel).write_bytes(_line(_snap(now, chain_archive="ok")))
+        arch = self._archive(root, rel)
+        _changes, v = self._explain(root, before, baseline, started)
+        assert v["explained"] == sorted([str(Path(rel).parent), rel, arch]) and v["unexplained"] == {}, v
+
+    @pytest.mark.parametrize("case", ["no_snapshot", "demo_source", "not_gzip", "no_contracts", "bad_snapshot"])
+    def test_archive_lookalikes_are_not_explained(self, tmp_path, case):
+        root, rel, before, baseline, started, now = self._setup(tmp_path)
+        if case == "demo_source":
+            arch = self._archive(root, rel, underlying_price_source=g.ALPHABOT_DEMO_SOURCE)
+        elif case == "no_contracts":
+            arch = self._archive(root, rel, contracts=None)
+        else:
+            arch = self._archive(root, rel)
+        if case == "not_gzip":
+            (root / arch).write_bytes(b'{"contracts": []}')
+        if case == "bad_snapshot":                               # 同标的快照本身就归不了因
+            with open(root / rel, "ab") as f:
+                f.write(_line(_snap(now, written_by="a test")))
+        elif case != "no_snapshot":
+            with open(root / rel, "ab") as f:
+                f.write(_line(_snap(now, chain_archive="ok")))
+        _changes, v = self._explain(root, before, baseline, started)
+        assert arch not in v["explained"], f"{case}：存档被错误归因成 Alpha Bot"
+        assert any(arch in items for items in v["unexplained"].values()), v
+        assert arch in v["why"], v
+
     def test_snapshot_date_must_match_the_directory(self, tmp_path):
         """时刻在窗口内、但按记录自己的时区落在另一天（-12 与 +14 相差 26 小时，日期必不同）。"""
         root, rel, before, baseline, started, now = self._setup(tmp_path, tz=dt.timezone(dt.timedelta(hours=-12)))
@@ -706,7 +762,17 @@ class TestAlphabotAppendClassifier:
     def test_keys_match_the_writer(self):
         """键集合必须就是 Alpha Bot 写的那一份——它改了字段而这里没跟，归因就会恒失败（退回原措辞，不会误放）。"""
         from alphabot.service import AlphaBotService
-        assert set(AlphaBotService.snapshot_from({}, "2026-10-09T15:50:35-04:00")) == g.ALPHABOT_SNAPSHOT_KEYS
+        # v0.45.815：`chain_archive` 由 take_snapshot 在 snapshot_from 之后补上 ⇒ 比对真写出来的那一行
+        import alphabot.synthetic as syn
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            svc = AlphaBotService(fetch_fn=syn.demo_fetch, state_dir=Path(d))
+            now = dt.datetime(2026, 10, 9, 15, 50, 35, tzinfo=_ET)
+            assert svc.take_snapshot("NVDA", now=now)["recorded"] is True
+            rec = json.loads((Path(d) / "intraday/2026-10-09/NVDA.jsonl").read_text().splitlines()[-1])
+        assert set(rec) == g.ALPHABOT_SNAPSHOT_KEYS
+        # 旧键集合 = 815 之前 take_snapshot 写的 = snapshot_from 的产出（没重启的旧进程还在写它）
+        assert set(AlphaBotService.snapshot_from({}, "2026-10-09T15:50:35-04:00")) == g.ALPHABOT_SNAPSHOT_KEYS_PRE_815
 
 
 def _make_data_root_with_alphabot(path: Path) -> tuple[Path, str]:
