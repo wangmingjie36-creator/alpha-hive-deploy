@@ -3,7 +3,8 @@
 事故：2026-11-23 NVDA 跨式结算出账后跨式账本为空，账上只剩 SPY 覆盖空 94 股（β·$Delta −52% NAV）。带规则「拉回带边」
 只买回 68 股、留下 −26 股（≈ −14.5% NAV，刚好进带）——这笔空头不对冲任何东西，只要不出带就会一直挂着。
 规则：除覆盖自己的 SPY 行外没有任何带敞口的行（没有股票行 / 逐票对冲行；期权行没有或全是到期锁定的）⇒ 不论带内带外，
-target 0、整笔平掉。数据不全（unknown）照旧不下单；跨式持仓文件不存在不当作空仓。全部离线：价格 / β 注入。"""
+target 0、整笔平掉。数据不全（unknown）照旧不下单。全平前要跨式账本的旁证：持仓文件存在、跨式账本有当天净值行、
+那一行记的持仓笔数与文件相等——对不上 ⇒ 不成交、hedge_undecided（⇒ P2）、gaps 点名。全部离线：价格 / β 注入。"""
 
 import json
 
@@ -42,15 +43,18 @@ def _jsonl(path, records):
     path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
 
 
-def _book(shares=-26.0, cash=23_435.43, straddle_positions_file=True):
-    """11-23 收盘后那本账的形状：跨式账本空、SPY 覆盖空 `shares` 股。"""
+def _book(shares=-26.0, cash=23_435.43, straddle_positions_file=True, book_positions=0, straddles=()):
+    """11-23 收盘后那本账的形状：跨式账本空、SPY 覆盖空 `shares` 股。`book_positions` = 跨式账本当天净值行记的笔数。"""
     _jsonl(pg.POSITIONS_FILE, [{"ticker": "SPY", "shares": shares, "avg_price": 755.1183,
                                 "entry_date": "2026-09-04", "last_price": 689.81, "last_mark_date": "2026-11-20"}])
     pg.META_FILE.write_text(json.dumps({"cash": cash, "starting_date": "2026-09-04"}), encoding="utf-8")
     _jsonl(pp.EQUITY_FILE, [{"date": AS_OF, "nav": 49_014.79}])
-    _jsonl(opl.EQUITY_FILE, [{"date": AS_OF, "nav": 76_159.0}])
+    row = {"date": AS_OF, "nav": 76_159.0}
+    if book_positions is not None:
+        row["positions"] = book_positions
+    _jsonl(opl.EQUITY_FILE, [row])
     if straddle_positions_file:
-        _jsonl(opl.POSITIONS_FILE, [])
+        _jsonl(opl.POSITIONS_FILE, list(straddles))
 
 
 def _run():
@@ -118,6 +122,18 @@ class TestRecommendation:
                                       hedge_shares=-26)
         assert rec["action"] == "hold" and "SPY price unavailable" in rec["reason"]
 
+    def test_fraction_rounding_to_zero_is_not_a_holding(self):
+        """|held| < 0.5 四舍五入成 0 股：不出「卖 0 股」的建议，走原规则。"""
+        rec = pg.hedge_recommendation(_agg([_hedge_row(-0.4)]), SPY, 130_000.0, nothing_to_hedge=True,
+                                      hedge_shares=-0.4)
+        assert rec["action"] == "hold" and rec["spy_shares"] == 0 and not rec.get("flatten")
+
+    def test_unconfirmed_book_holds_and_is_undecided(self):
+        rec = pg.hedge_recommendation(_agg([_hedge_row(-26)]), SPY, 130_000.0, nothing_to_hedge=True,
+                                      hedge_shares=-26, flatten_unconfirmed="x 对不上")
+        assert rec["action"] == "hold" and rec["flatten_blocked"] == "x 对不上" and not rec.get("flatten")
+        assert pg._hedge_undecided(rec) and "x 对不上" in pg._hedge_undecided(rec)
+
     def test_already_flat_is_empty(self):
         rec = pg.hedge_recommendation(_agg([]), SPY, 130_000.0, nothing_to_hedge=True, hedge_shares=0.0)
         assert rec["action"] == "hold" and rec["reason"] == "no positions"
@@ -141,13 +157,47 @@ class TestEndToEnd:
         assert {p.name: p.read_bytes() for p in pg.STATE_DIR.iterdir()} == before
         assert r2["recommendation"] == r["recommendation"] and len(pg._load_jsonl(pg.TRADES_FILE)) == 1
 
-    def test_missing_straddle_positions_file_is_not_treated_as_flat(self, caplog):
-        """持仓文件没了读出来也是空表——那是「文件没了」，不是空仓：照旧带规则（这里在带内 ⇒ hold），ERROR 点名。"""
-        _book(straddle_positions_file=False)
+    @pytest.mark.parametrize("kw,needle", [
+        ({"straddle_positions_file": False}, "跨式持仓文件不存在"),
+        ({"book_positions": 2}, "对不上"),                         # 文件 0 笔、账本记 2 笔：文件被清空的形状
+        ({"book_positions": None}, "不是整数"),
+    ])
+    def test_unconfirmed_straddle_book_blocks_and_alerts(self, kw, needle, caplog):
+        """持仓文件被删 / 被清空读出来与真空仓一样 ⇒ 不全平、不成交；对冲决定做不出来（P2 的入口）、gaps 点名、ERROR。"""
+        _book(**kw)
         r = _run()
-        assert r["recommendation"]["action"] == "hold" and not r["recommendation"].get("flatten")
-        assert r["executed"] is False
-        assert any("不当作空仓" in m for m in caplog.messages)
+        rec, chk = r["recommendation"], r["price_check"]
+        assert rec["action"] == "hold" and not rec.get("flatten") and needle in rec["flatten_blocked"]
+        assert r["executed"] is False and pg._load_jsonl(pg.TRADES_FILE) == []
+        assert chk["hedge_undecided"] and needle in chk["flatten_blocked"]
+        assert any(needle in g for g in chk["gaps"])
+        assert any("该全平 SPY 覆盖" in m for m in caplog.messages)
+
+    def test_no_equity_row_for_today_blocks(self):
+        _book()
+        _jsonl(opl.EQUITY_FILE, [{"date": "2026-11-20", "nav": 84_677.5, "positions": 0}])
+        r = _run()
+        assert "没有 2026-11-23 的净值行" in r["recommendation"]["flatten_blocked"]
+
+    def test_no_overlay_no_check_no_error(self, caplog):
+        """覆盖没仓：不查旁证、不打 ERROR（哪怕跨式持仓文件不在）。"""
+        _book(shares=0.0, straddle_positions_file=False)
+        r = _run()
+        assert r["recommendation"]["action"] == "hold" and not r["recommendation"].get("flatten_blocked")
+        assert not [m for m in caplog.records if m.levelname == "ERROR"]
+
+    def test_locked_expiry_legs_end_to_end(self):
+        """11-20 的形状：跨式腿当天到期、收盘后锁定 ⇒ 经 option_exposures 真实路径判「无可对冲」⇒ 整笔平掉。"""
+        leg = {"ticker": "XYZ", "side": "short", "expiry": "2026-11-20", "strike": 222.5, "contracts": 3,
+               "call_symbol": "XYZ261120C00222500", "put_symbol": "XYZ261120P00222500"}
+        _book(shares=-94.0, cash=72_551.15, book_positions=1, straddles=[leg])
+        _jsonl(pp.EQUITY_FILE, [{"date": "2026-11-20", "nav": 49_764.94}])
+        _jsonl(opl.EQUITY_FILE, [{"date": "2026-11-20", "nav": 84_677.5, "positions": 1}])
+        r = pg.run_for_date("2026-11-20", closes_fn=lambda tk, d: {"SPY": 689.81, "XYZ": 125.53}.get(tk),
+                            quotes_fn=lambda tk, syms: {}, beta_fn=lambda tk, d: (1.6, "ols60"))
+        assert [x.get("expiry_intrinsic") for x in r["rows"] if x["kind"] == "option"] == [True, True]
+        assert r["recommendation"]["flatten"] is True and r["executed_trade"]["shares"] == 94
+        assert pg._load_jsonl(pg.POSITIONS_FILE) == []
 
     def test_live_straddle_keeps_band_rule(self):
         """跨式还在 ⇒ 不全平（行为与修改前相同）。"""
