@@ -116,6 +116,8 @@ SITE_ARTIFACTS: dict = {
     'alpha_hive_daily_report.py::AlphaHiveDailyReporter.run_swarm_scan._analyze_and_save': ('.checkpoint_<session>_<date>.json',),
     'alpha_hive_daily_report.py::AlphaHiveDailyReporter.save_report': ('alpha-hive-daily-*.json',),
     'alphabot/chat.py::ChatEngine._record': ('alphabot_state/chat/spend.jsonl',),
+    # v0.45.808 对话落盘（一场一个文件、整份覆盖写）；v0.45.812 补登记
+    'alphabot/chat.py::ChatEngine._save_conv': ('alphabot_state/chat/conversations/<id>.json',),
     'alphabot/launcher.py::_open_server_log': ('Alpha Bot server.log',),
     'alphabot/launcher.py::_present': ('Alpha Bot window.pid',),
     'alphabot/launcher.py::announce_app_shell': ('Alpha Bot shell_drift_seen.json',),
@@ -275,6 +277,8 @@ ARTIFACTS: dict = {
         '日报 MD 被仪表板嵌入、部署到 gh-pages 后 Telegram 推送拉取；X 线程 txt 只给人看；index/rss 经部署上网站'),
     'alphabot_state/chat/spend.jsonl': (READ, [('alphabot/chat.py::ChatEngine._spend_path', 'spend.jsonl')],
         '对话花费流水（v0.45.614，每次 API 调用一行）；spent_today() 经 _spend_path 读回，做每日上限预检与抽屉显示'),
+    'alphabot_state/chat/conversations/<id>.json': (READ, [('alphabot/chat.py::ChatEngine._conv_dir', 'conversations'), ('alphabot/chat.py::ChatEngine._read_conv', '.json'), ('alphabot/chat.py::ChatEngine.list_conversations', '*.json')],
+        '对话记录（v0.45.808）；点开历史对话接着聊经 _read_conv 读回、「历史」列表经 list_conversations 逐个读摘要；只由人归档，无自动清理'),
     'alphabot_state/intraday/<date>/*.jsonl': (READ, [('alphabot/service.py::AlphaBotService.intraday', '.jsonl'), ('alphabot/service.py::AlphaBotService.intraday_dates', 'intraday')],
         '盘中快照追加；server.py /intraday 接口经 intraday()/intraday_dates() 读回给页面'),
     'alphabot_state/settings.json': (READ, [('alphabot/service.py::AlphaBotService._settings_path', 'settings.json')],
