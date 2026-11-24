@@ -114,7 +114,8 @@ class TestHonestStates:
 
     def test_every_reason_is_labelled(self):
         """live_row 写出的每个原因码都在 LIVE_REASONS 里（页面靠它翻成人话，漏登记就显示原码）。"""
-        import ast, inspect
+        import ast
+        import inspect
         tree = ast.parse(inspect.getsource(HG.live_row))
         used = {
             v.value for n in ast.walk(tree) if isinstance(n, ast.Dict)
