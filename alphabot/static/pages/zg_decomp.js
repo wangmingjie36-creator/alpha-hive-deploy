@@ -44,7 +44,11 @@ export function zgDecompBody(r, view) {
   const factors = rules.factors || Object.keys(v.forward);
   const mt = v.matching || {};
   const so = v.strike_oi || [];
+  const SRC = { cboe: "CBOE", yfinance: "Yahoo 备用链" };
   return [
+    r.source_changed ? h("p", { class: "callout warn" },
+      `两份存档的取数源不同（${r.prev_date} ${SRC[r.source_prev] || r.source_prev} / ${r.date} ${SRC[r.source_cur] || r.source_cur}）：`,
+      "两家的 IV 与 OI 口径不一样，下面拆出来的 IV / OI 变化可能就是换源本身，不能当成市场变了。") : null,
     h("p", { class: `callout ${v.highlight ? "warn" : ""}` },
       h("b", {}, vlabels[v.verdict?.verdict] || v.verdict?.verdict, "："), v.headline),
     h("p", { class: "small muted" },

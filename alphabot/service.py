@@ -2357,9 +2357,11 @@ class AlphaBotService:
             key = (t, prev, cur) + tuple(p.stat().st_mtime_ns for p in paths)
         except OSError:
             key = None
+        # 缓存只存「由两份文件决定」的那部分；「是否收盘」「有哪些存档日」每次现判（二次检查：整份缓存会让
+        # 盘中算过的结果收盘后仍写「盘中还会被覆盖」）
         hit = self._zgd_cache.get((t, cur))
         if key is not None and hit is not None and hit[0] == key:
-            return hit[1]
+            return self._zgd_finish(out, hit[1], cur)
         chains = {}
         for d in (prev, cur):
             got = self.archived_chain(t, d)
@@ -2377,16 +2379,23 @@ class AlphaBotService:
             _log.warning("[%s] Zero Gamma 拆解算不出：%s: %s", t, type(exc).__name__, exc)
             out["reason"] = f"exception:{type(exc).__name__}: {exc}"
             return clean_json(out)
-        cur_raw = chains[cur]
-        today = now_et().date().isoformat()
-        out.update(res)
-        out.update({"cur_as_of": cur_raw.get("payload_last_trade_time"),
-                    "prev_as_of": chains[prev].get("payload_last_trade_time"),
-                    "cur_final": cur < today or not market_session().get("live")})
-        out = clean_json(out)
+        src_prev, src_cur = _chain_source(chains[prev]), _chain_source(chains[cur])
+        part = clean_json({**res,
+                           "cur_as_of": chains[cur].get("payload_last_trade_time"),
+                           "prev_as_of": chains[prev].get("payload_last_trade_time"),
+                           # 两天取数源不同（CBOE / yfinance 备用链，v0.45.817 起收盘后陈旧的票会换源）⇒ IV / OI 口径不同，
+                           # 拆出来的 IV / OI 变化可能就是换源本身：标出来，页面写警告（二次检查补）
+                           "source_prev": src_prev, "source_cur": src_cur,
+                           "source_changed": src_prev != src_cur})
         if key is not None:
-            self._zgd_cache[(t, cur)] = (key, out)
-        return out
+            self._zgd_cache[(t, cur)] = (key, part)
+        return self._zgd_finish(out, part, cur)
+
+    @staticmethod
+    def _zgd_finish(out: dict, part: dict, cur: str) -> dict:
+        res = {**out, **part}
+        res["cur_final"] = cur < now_et().date().isoformat() or not market_session().get("live")
+        return clean_json(res)
 
     def _attach_activity(self, t: str, snap: dict, raw: Optional[dict], *, date_et: str,
                          last_ts: Optional[str]) -> Optional[dict]:

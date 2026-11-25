@@ -244,6 +244,35 @@ class TestService:
         svc.zg_decompose("NVDA")
         assert calls["n"] == 2
 
+    def test_cached_result_still_rejudges_close_and_archive_list(self, tmp_path, monkeypatch):
+        """二次检查补：缓存只存由两份文件决定的部分。盘中算过、收盘后再取 ⇒ cur_final 要变 True；
+        之后新多出一份更早的存档 ⇒ archive_dates 要跟着变（命中缓存也一样）。"""
+        svc = _svc(tmp_path)
+        today = SV.now_et().date().isoformat()
+        _put(svc, "2026-11-24", _chain())
+        _put(svc, today, _chain())
+        monkeypatch.setattr(SV, "market_session", lambda now=None: {"live": True})
+        assert svc.zg_decompose("NVDA")["cur_final"] is False
+        monkeypatch.setattr(SV, "market_session", lambda now=None: {"live": False})
+        assert svc.zg_decompose("NVDA")["cur_final"] is True
+        _put(svc, "2026-11-20", _chain())
+        assert "2026-11-20" in svc.zg_decompose("NVDA")["archive_dates"]
+
+    def test_source_change_is_flagged(self, tmp_path):
+        """二次检查补：昨天 CBOE、今天 yfinance 备用链（817 起收盘后陈旧的票会换源）⇒ 标 source_changed。"""
+        svc = _svc(tmp_path)
+        _put(svc, "2026-11-24", _chain())
+        yf = _chain()
+        yf["data_source"] = "yfinance"
+        _put(svc, "2026-11-25", yf)
+        r = svc.zg_decompose("NVDA")
+        assert (r["source_prev"], r["source_cur"], r["source_changed"]) == ("cboe", "yfinance", True)
+        _put(svc, "2026-11-25", _chain())
+        import os
+        p = svc._chain_archive_path("NVDA", "2026-11-25")
+        os.utime(p, ns=(p.stat().st_atime_ns, p.stat().st_mtime_ns + 10**9))
+        assert svc.zg_decompose("NVDA")["source_changed"] is False
+
     def test_bad_date_rejected(self, tmp_path):
         with pytest.raises(SV.BadRequest):
             _svc(tmp_path).zg_decompose("NVDA", "../x")
