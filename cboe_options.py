@@ -1492,6 +1492,77 @@ def fetch_cboe_full_chain_oi(
     }
 
 
+# ── v0.45.819：不按行权价过滤的近端 P/C（只展示，不进评分）──────────────────────
+# 日报原有两个 P/C 都随现价划行权价窗口：评分用的 `put_call_ratio`（主链 4 个到期日、0.3～1.7×、
+# 按 DTE 加权）与全链 P/C（前 24 个到期日、0.6～1.45×）。窗口跟着现价走，暴跌暴涨时 OI 一张不动
+# 读数也会跳（v0.45.798 实测 NVDA 1.21 → 1.70）。这里给一个不划窗口的读数：
+#   · 到期日：距**这份数据所属交易日**（payload 的成交日期）1～45 个日历日的**全部**到期日；
+#     当天到期的不算——扫描在收盘后跑，那批合约已经没了（11-20 NVDA 当天到期的 put 约 74.5 万张）。
+#   · 行权价：不过滤；OI 直接相加，不加权。
+# 与卦象 dashboard（market-hexagram）口径的唯一差别是不含当天到期的合约。
+PC_NEAR_WINDOW_DAYS = 45
+
+
+def pc_near_unfiltered(options: List[dict], base: date,
+                       window_days: int = PC_NEAR_WINDOW_DAYS) -> Optional[Dict]:
+    """纯函数：CBOE `options` 数组 → 不划行权价窗口的近端 P/C。算不出返回 None。
+
+    算不出 = 窗口内没有到期日，或窗口内 call OI 为 0（比值无定义，不是「中立」，同 v0.45.516）。
+    """
+    put_oi = call_oi = 0
+    exps = set()
+    for o in options or []:
+        parsed = _parse_occ(o.get("option", ""))
+        if not parsed:
+            continue
+        expiry, cp, _strike = parsed
+        try:
+            dte = (date.fromisoformat(expiry) - base).days
+        except ValueError:
+            continue
+        if not (1 <= dte <= window_days):
+            continue
+        exps.add(expiry)
+        try:
+            oi = int(o.get("open_interest") or 0)
+        except (TypeError, ValueError):
+            continue
+        if oi <= 0:
+            continue
+        if cp == "C":
+            call_oi += oi
+        else:
+            put_oi += oi
+    if not exps or call_oi <= 0:
+        return None
+    return {
+        "ratio": round(put_oi / call_oi, 3),
+        "put_oi": put_oi,
+        "call_oi": call_oi,
+        "expiries": len(exps),
+        "window_days": window_days,
+        "base_date": base.isoformat(),
+        "source": "cboe",
+    }
+
+
+def fetch_cboe_pc_near_unfiltered(ticker: str, *, timeout: int = 15,
+                                  window_days: int = PC_NEAR_WINDOW_DAYS) -> Optional[Dict]:
+    """不划行权价窗口的近端 P/C（见 `pc_near_unfiltered`）。失败 / 陈旧 / 算不出 ⇒ None。
+
+    复用 `_fetch_cboe_payload` 的进程缓存：主链 / 全链已拉过时零额外网络开销。
+    日期基准取 payload 自己的成交日期（这份 OI 属于哪一场），判不了才退 ET 今天。
+    """
+    if _SNAPSHOT_PROVIDER is not None:
+        return (_snapshot(ticker) or {}).get("pc_near_unfiltered")
+    data = _fetch_cboe_payload(ticker, timeout)
+    if not data:
+        return None
+    vintage = _payload_vintage_date(data)
+    base = date.fromisoformat(vintage) if vintage else datetime.now(_ET_TZ).date()
+    return pc_near_unfiltered(data.get("options") or [], base, window_days)
+
+
 def fetch_cboe_iv_term_structure(
     ticker: str,
     stock_price: float,

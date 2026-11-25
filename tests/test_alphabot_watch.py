@@ -67,9 +67,9 @@ class TestLease:
     def test_only_one_ticker_at_a_time_and_the_page_is_told(self, tmp_path):
         s, _, _ = _svc(tmp_path)
         s.watch("NVDA")
-        r = s.watch("JNJ")
-        assert s.watch_ticker() == "JNJ" and r["replaced"] == "NVDA"
-        assert s.watch("JNJ")["replaced"] is None
+        r = s.watch("XOM")
+        assert s.watch_ticker() == "XOM" and r["replaced"] == "NVDA"
+        assert s.watch("XOM")["replaced"] is None
 
     def test_yahoo_fallback_tickers_are_never_watched(self, tmp_path):
         # NVDL / BILI 盘中现算会改走 Yahoo 的期权链（一次十来个请求）：每分钟一拍会把 Yahoo 打到限流
@@ -118,13 +118,13 @@ class TestPoller:
     def test_a_watched_ticker_outside_the_focus_list_is_shot_too(self, tmp_path):
         s, _, shots = _svc(tmp_path)
         p = IntradayPoller(s, session_fn=LIVE)
-        s.watch("JNJ")
+        s.watch("XOM")
         p.tick(now_mono=0.0)
-        assert shots == ["NVDA", "TSLA", "JNJ"]
+        assert shots == ["NVDA", "TSLA", "XOM"]
         p.tick(now_mono=30.0)
-        assert shots.count("JNJ") == 1
+        assert shots.count("XOM") == 1
         p.tick(now_mono=61.0)
-        assert shots.count("JNJ") == 2
+        assert shots.count("XOM") == 2
 
     def test_no_shots_after_the_lease_runs_out(self, tmp_path):
         s, clock, shots = _svc(tmp_path)
@@ -165,9 +165,9 @@ class TestPoller:
         s.watch("NVDA")
         p.tick(now_mono=0.0)
         p.tick(now_mono=61.0)
-        s.watch("JNJ")
+        s.watch("XOM")
         p.tick(now_mono=66.0)
-        assert shots == ["NVDA", "TSLA", "NVDA", "JNJ"]
+        assert shots == ["NVDA", "TSLA", "NVDA", "XOM"]
 
 
 class TestRouteAndPage:

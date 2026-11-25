@@ -18,6 +18,7 @@
 与噪音成正比、与信息无关。这里的 β·$Delta 里装着股票纸面组合十几条持仓的方向观点（那是这本账
 存在的意义），只有当组合整体的市场暴露超过 ±band（默认 NAV 的 15%）时才动手，
 且只拉回到**带边**（`rebalance_to="edge"`，可切 "center"）——保留观点、砍掉尾巴。
+例外（v0.45.814）：除 SPY 覆盖自己外已没有任何敞口（跨式全部平仓或到期锁定）⇒ 覆盖整笔平掉，不留在带边。
 带的宽度是 v1 的主观常数，不是校准结果；等 hedge_state/ 攒够天数再看该不该改。
 
 为什么 v1 用 SPY 股票而不是指数认沽
@@ -1397,11 +1398,52 @@ def combined_nav(as_of: str, closes_fn: Optional[Callable[[str, str], Optional[f
     return d["nav"]
 
 
-def hedge_recommendation(agg: Dict, spy_price: Optional[float], nav: Optional[float]) -> Dict:
+def _nothing_to_hedge(rows: List[Dict]) -> bool:
+    """SPY 覆盖已经**没有东西可对冲**（v0.45.814）：除覆盖自己的 SPY 行外，没有一行还带着对标的的敞口——
+    没有股票行、没有逐票对冲行，期权行要么没有、要么全是到期锁定的（`expiry_intrinsic`：已按收盘内在价值锁定，
+    Greeks 0）。这时带里剩下的 β·$Delta 全是覆盖仓**自己**的；「拉回带边」会留一笔不对冲任何东西的裸 SPY 仓
+    （2026-11-23：NVDA 跨式结算出账后剩 −26 股，账上已无跨式）。纯函数。"""
+    for r in rows:
+        kind = r.get("kind")
+        if kind == "hedge":
+            continue
+        if kind == "option" and r.get("expiry_intrinsic"):
+            continue
+        return False
+    return True
+
+
+def _straddle_book_unconfirmed(as_of: str) -> Optional[str]:
+    """「跨式账本真的是这个样子」的旁证（v0.45.814 二次检查）：全平是不可逆的一笔成交，不能只凭「持仓文件读出来是这样」。
+    要求 ① 跨式持仓文件存在；② 跨式账本有 as_of 这一天的净值行（每日扫描里它先于本模块跑）；③ 那一行记的
+    `positions` 与持仓文件笔数相等。任一不成立 ⇒ 返回原因（调用方不全平、记为对冲决定做不出来 ⇒ P2）；都成立 ⇒ None。
+    防的是：持仓文件被删 / 被误清空 / 截断——读出来都是「空仓」，与真空仓逐字节相同。"""
+    import options_paper_leg as opl
+    if not Path(opl.POSITIONS_FILE).exists():
+        return f"跨式持仓文件不存在（{opl.POSITIONS_FILE}）"
+    n_file = len(_load_jsonl(Path(opl.POSITIONS_FILE)))
+    row = next((e for e in reversed(_load_jsonl(Path(opl.EQUITY_FILE))) if e.get("date") == as_of), None)
+    if row is None:
+        return f"跨式账本没有 {as_of} 的净值行，核不了持仓笔数"
+    n_book = row.get("positions")
+    if isinstance(n_book, bool) or not isinstance(n_book, int):
+        return f"跨式账本 {as_of} 净值行的 positions 不是整数（{n_book!r}）"
+    if n_book != n_file:
+        return f"跨式持仓文件 {n_file} 笔，与跨式账本 {as_of} 净值行记的 {n_book} 笔对不上"
+    return None
+
+
+def hedge_recommendation(agg: Dict, spy_price: Optional[float], nav: Optional[float], *,
+                         nothing_to_hedge: bool = False, hedge_shares: float = 0.0,
+                         flatten_unconfirmed: Optional[str] = None) -> Dict:
     """带外 → 用 SPY 股票拉回（edge：最近带边；center：带中心）。
     spy_shares 负 = 卖出 SPY（组合太多头），正 = 买入。edge 模式股数向外取整（ceil），
     否则四舍五入会留半股在带外、第二天再来一笔 1 股的小交易。
-    inside / unknown / empty 一律 hold，reason 说清楚缺什么——**不在部分数据上对冲**。"""
+    inside / unknown / empty 一律 hold，reason 说清楚缺什么——**不在部分数据上对冲**。
+    v0.45.814（用户 2026-11-24 定「空仓就全平」）：`nothing_to_hedge`（见 `_nothing_to_hedge`）且覆盖仓不为 0 ⇒
+    **不论带内带外**把 SPY 覆盖全平（`flatten=True`，target 0）。unknown 仍 hold：数据不全时不下单这条不破例。
+    `flatten_unconfirmed`（`_straddle_book_unconfirmed` 的原因）⇒ 不全平也不按带规则动：hold、`flatten_blocked` 记原因、
+    `target_usd` None ⇒ `_hedge_undecided` 算「做不出来」⇒ 告警 P2（账本对不上时不拿它下单）。"""
     status = agg.get("band_status")
     nav = _pos(nav)
     base = {"action": "hold", "spy_shares": 0, "excess_usd": None, "target_usd": None,
@@ -1426,6 +1468,21 @@ def hedge_recommendation(agg: Dict, spy_price: Optional[float], nav: Optional[fl
         return base
     if status == "empty":
         base["reason"] = "no positions"
+        return base
+    spy_shares = -int(round(_num(hedge_shares) or 0.0))     # 平掉要成交的股数；四舍五入成 0 ⇒ 不算持有、走原规则
+    if nothing_to_hedge and spy_shares != 0:
+        if flatten_unconfirmed:
+            base.update({"flatten_blocked": flatten_unconfirmed,
+                         "reason": f"nothing left to hedge but straddle book unconfirmed ({flatten_unconfirmed}) — no trade"})
+            return base
+        if base["spy_price"] is None:
+            base["reason"] = "nothing left to hedge but SPY price unavailable"
+            return base
+        base.update({"action": "buy_spy" if spy_shares > 0 else "sell_spy", "spy_shares": spy_shares,
+                     "excess_usd": base["beta_dd_usd"], "target_usd": 0.0, "target_pct": 0.0, "flatten": True,
+                     "reason": (f"nothing left to hedge (straddles closed or locked at expiry; excluded tickers and "
+                                f"unhedged books not counted) → close SPY overlay: {spy_shares:+d} sh @ "
+                                f"${base['spy_price']:.2f}")})
         return base
     if status == "inside":
         base["reason"] = (f"β·Δ {base['beta_dd_pct']:+.2f}% NAV inside band "
@@ -1608,7 +1665,10 @@ def _hedge_rows_before_today(as_of: str, closes_fn, spy_price: Optional[float],
             else:
                 adj.append(p)
         if not found:
-            adj.append({"ticker": tk, "shares": -traded, "avg_price": _num(today.get("price"))})
+            # 今天那笔把仓位平到 0（v0.45.814 空仓全平）：均价取成交记录里的交易前均价，旧记录没有才退回成交价
+            prev_avg = _num(today.get("avg_price_before"))
+            adj.append({"ticker": tk, "shares": -traded,
+                        "avg_price": prev_avg if prev_avg is not None else _num(today.get("price"))})
         positions = adj
     return hedge_exposures(as_of, closes_fn, positions=positions, spy_price=spy_price,
                            spy_mark=spy_mark), today
@@ -1637,6 +1697,8 @@ def _hedge_undecided(rec: Optional[Dict]) -> Optional[str]:
     status = rec.get("band_status")
     # 带外却 hold：只有「缺 NAV / SPY 价算不出目标」（target_usd 为 None）才算做不出来；center 模式股数四舍五入成 0
     # 是算出来了、只是不用动（v0.45.442 二次检查：原条件把它也报成「数据不全」）
+    if rec.get("flatten_blocked"):            # v0.45.814：该全平、但跨式账本对不上 ⇒ 不论带位，都是做不出来
+        return str(rec.get("reason") or rec["flatten_blocked"])
     if status == "unknown" or (status in ("above", "below") and rec.get("action") == "hold"
                                and rec.get("target_usd") is None):
         return str(rec.get("reason") or status)
@@ -1677,6 +1739,7 @@ def _price_check(as_of: str, rows: List[Dict], spy_mark: Dict, rec: Optional[Dic
             "nav_missing": list(nav_missing or []),
             "nav_fallback": dict(nav_fallback) if nav_fallback else None,     # v0.45.704：股票账净值读不了、用审计旧值顶上
             "hedge_undecided": _hedge_undecided(rec),
+            "flatten_blocked": (rec or {}).get("flatten_blocked"),      # v0.45.814：该全平但跨式账本对不上
             "spy": {k: spy_mark.get(k) for k in ("price", "seen_price", "stale", "source", "session",
                                                    "at_close", "live")},
             "execution_blocked": None}
@@ -1706,6 +1769,8 @@ def _data_gaps(chk: Dict) -> List[str]:
         out.append(f"缺报价 {chk['n_quote_missing']} 张")
     if chk.get("n_beta_missing"):
         out.append(f"缺 β {chk['n_beta_missing']} 行（" + ",".join(chk.get("beta_missing") or []) + "）")
+    if chk.get("flatten_blocked"):
+        out.append(f"已无可对冲敞口、该全平 SPY 覆盖，但跨式账本对不上：{chk['flatten_blocked']}")
     if chk.get("nav_missing"):
         out.append("NAV 缺 " + ",".join(chk["nav_missing"]))
         fb = chk.get("nav_fallback")
@@ -1812,7 +1877,16 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     # NAV 不分「交易前/后」：成交价=收盘价，−shares×px 的现金腿与 +shares×px 的市值腿
     # 恰好抵消，覆盖净值在交易瞬间不变——所以同日重跑用当前状态算 NAV 也与第一次一致。
     agg = aggregate(rows, nav_d["nav"])
-    rec = hedge_recommendation(agg, spy_price, nav_d["nav"])
+    # v0.45.814 空仓全平：只在覆盖真有仓时才看；全平前要跨式账本的旁证（`_straddle_book_unconfirmed`）——持仓文件
+    # 被删 / 被清空读出来与真空仓一样。对不上 ⇒ 不成交、hedge_undecided ⇒ P2（不只是一行日志）
+    held = sum(_num(r.get("qty")) or 0.0 for r in hedge_rows)
+    nothing = _nothing_to_hedge(rows) and int(round(held)) != 0
+    unconfirmed = _straddle_book_unconfirmed(as_of) if nothing else None
+    if unconfirmed:
+        _log.error("[PortfolioGreeks] %s：已无可对冲敞口、该全平 SPY 覆盖（%+.0f 股），但%s——今日不成交", as_of, held,
+                   unconfirmed)
+    rec = hedge_recommendation(agg, spy_price, nav_d["nav"], nothing_to_hedge=nothing, hedge_shares=held,
+                               flatten_unconfirmed=unconfirmed)
     stress = stress_table(rows, spy_price)
     tail = _tail_section(as_of, rows, spy_price, nav_d["nav"])
     chk = _price_check(as_of, rows, spy_mark, rec, nav_d.get("missing"), nav_d.get("stock_book_fallback"))
@@ -1898,6 +1972,8 @@ def _execute_trade(as_of: str, rec: Dict, agg: Dict, nav: Optional[float],
              "excess_usd": rec.get("excess_usd"), "target_usd": rec.get("target_usd"),
              "beta_dd_usd_before": rec.get("beta_dd_usd"), "beta_dd_pct_before": rec.get("beta_dd_pct"),
              "nav": nav, "shares_after": new, "reason": rec.get("reason"),
+             # v0.45.814：交易前均价。全平后持仓里没有这一行了，同日重跑重建「交易前」视角要靠它（否则用成交价顶，审计不幂等）
+             "avg_price_before": (_num((cur or {}).get("avg_price")) if old else None),
              "price_session": (spy_mark or {}).get("session"), "price_source": (spy_mark or {}).get("source"),
              "price_at_close": bool((spy_mark or {}).get("at_close"))}
     _append_jsonl(TRADES_FILE, trade)
@@ -2489,7 +2565,7 @@ def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
                      + f"；(0,0) 格合计 {_fmt_usd(stress.get('pnl_at_zero'))}（不是 P&L，是模型与市场的差）")
     L += ["",
           "> CBOE Greeks 单位（NVDA 实盘对 BS 校核）：vega 每 vol 点、theta 每日历日、delta/gamma 每股。",
-          f"> 对冲规则：只在 β·$Delta 出 ±{CONFIG['beta_delta_band_pct']:.0f}% NAV 带时用 SPY 股票拉回{'带边' if CONFIG['rebalance_to'] == 'edge' else '带中心'}；"
+          f"> 对冲规则：只在 β·$Delta 出 ±{CONFIG['beta_delta_band_pct']:.0f}% NAV 带时用 SPY 股票拉回{'带边' if CONFIG['rebalance_to'] == 'edge' else '带中心'}，已无跨式可对冲时整笔平掉；"
           "vega/gamma 只告警不对冲；缺 β/缺价一律不对冲。",
           "> **观察项：不进评分、不进股票纸面组合、不构成任何建议。** SPY 覆盖是独立纸面账本，起始现金 0。", ""]
     return "\n".join(L)

@@ -68,6 +68,7 @@ conftest 的 session 总闸与 `tests/test_root_data_guard.py` 共用这一份
 from __future__ import annotations
 
 import datetime as _dt
+import gzip
 import hashlib
 import json
 import os
@@ -284,10 +285,15 @@ def format_diff(d: dict[str, list[str]], limit: int = 25) -> str:
 #: （`alphabot_state/intraday/<美东日期>/<标的>.jsonl`，只追加、一次写一整行）。
 _ALPHABOT_DAY_RE = re.compile(r"^alphabot_state/intraday/(\d{4}-\d{2}-\d{2})$")
 _ALPHABOT_FILE_RE = re.compile(r"^alphabot_state/intraday/(\d{4}-\d{2}-\d{2})/[^/]+\.jsonl$")
+#: v0.45.815 当日原始链存档：每张落盘的快照把这一拍用的链整份覆盖写成 `<标的>.chain.json.gz`（不是追加）。
+_ALPHABOT_ARCHIVE_RE = re.compile(r"^alphabot_state/intraday/(\d{4}-\d{2}-\d{2})/([^/]+)\.chain\.json\.gz$")
 #: 一张快照的键 = `AlphaBotService.snapshot_from` 的产出，一个不多一个不少
 #: （`tests/test_root_data_guard.py::TestAlphabotAppendClassifier::test_keys_match_the_writer` 守它不漂移）。
 ALPHABOT_SNAPSHOT_KEYS = frozenset({"ts", "payload_last_trade_time", "underlying_price", "underlying_price_source",
-                                    "session_live", "iv30", "views", "route"})
+                                    "session_live", "iv30", "views", "route", "chain_archive"})
+#: 0.45.815 之前的 Alpha Bot 写的快照没有 `chain_archive`。生产克隆快进后 Alpha Bot 要重启才换新代码，
+#: 没重启的进程会一直写旧键集合——也是真的盘中采样，照样认。
+ALPHABOT_SNAPSHOT_KEYS_PRE_815 = ALPHABOT_SNAPSHOT_KEYS - {"chain_archive"}
 #: 合成数据（`alphabot/synthetic.py`）快照的来源标记。v0.45.455：Alpha Bot 的测试都跑演示服务，其中
 #: `IntradayPoller.tick()` 不传 `now`、走真时钟 ⇒ 这类测试一旦写穿到真实数据根，写出的行键集合对、`ts` 也在
 #: 本轮窗口内，453 的判据会把它报成「已核实，不是测试写的」。真采样的来源是 CBOE 现算的 `px_src`（取值动态，
@@ -374,7 +380,7 @@ def _why_not_alphabot_append(root: str, rel: str, before_sig: str | None, baseli
             rec = json.loads(line)
         except (ValueError, RecursionError):      # 嵌套极深的行抛 RecursionError：照样归「其余」，别让报错变成原始栈
             return "新增行不是 JSON", 0
-        if not isinstance(rec, dict) or set(rec) != ALPHABOT_SNAPSHOT_KEYS:
+        if not isinstance(rec, dict) or set(rec) not in (ALPHABOT_SNAPSHOT_KEYS, ALPHABOT_SNAPSHOT_KEYS_PRE_815):
             return "新增行不是 Alpha Bot 快照（键对不上）", 0
         try:
             ts = _dt.datetime.fromisoformat(rec["ts"])
@@ -391,13 +397,37 @@ def _why_not_alphabot_append(root: str, rel: str, before_sig: str | None, baseli
     return None, len(lines)
 
 
+def _why_not_alphabot_archive(root: str, rel: str, explained: list[str]) -> str | None:
+    """`rel`（当日原始链存档）的新建 / 改写能否归因于 Alpha Bot：返回不能的原因，能则 None。
+
+    存档只在一张快照真落盘时随之覆盖写 ⇒ 要求：同一目录、同一标的的 `.jsonl` 本轮已被归因为 Alpha Bot 追加
+    （那一步核实了时间窗、日期、非合成数据）；存档本身是 gzip 的 JSON 对象、带 `contracts` 列表、来源不是 demo。"""
+    m = _ALPHABOT_ARCHIVE_RE.match(rel)
+    if not m:
+        return "不是 Alpha Bot 原始链存档的路径"
+    sibling = f"alphabot_state/intraday/{m.group(1)}/{m.group(2)}.jsonl"
+    if sibling not in explained:
+        return f"同标的的盘中快照 {sibling} 本轮没有被归因为 Alpha Bot 追加（存档只随快照落盘写）"
+    try:
+        with gzip.open(os.path.join(root, rel), "rb") as f:
+            rec = json.loads(f.read().decode("utf-8"))
+    except (OSError, EOFError, ValueError, RecursionError) as e:
+        return f"不是可读的 gzip JSON（{type(e).__name__}）"
+    if not isinstance(rec, dict) or not isinstance(rec.get("contracts"), list):
+        return "内容不是原始链（没有 contracts 列表）"
+    if rec.get("underlying_price_source") == ALPHABOT_DEMO_SOURCE:
+        return "存档来自合成数据（来源 demo）——那是测试 / 演示模式写的，不是盘中采样"
+    return None
+
+
 def explain_alphabot_appends(root: str, changes: dict[str, list[str]], before: dict[str, str],
                              baseline: dict[str, tuple[int, str]], started: _dt.datetime | None,
                              ended: _dt.datetime) -> dict:
     """把 `diff()` 的结果分成「已核实是 Alpha Bot 盘中追加」与「其余」。**只决定报错措辞，不决定红绿。**
 
     一个文件归因于 Alpha Bot，必须同时满足（任何一条不满足都归「其余」，宁可报成测试写的）：
-      1. 路径是 `alphabot_state/intraday/<日期>/<标的>.jsonl`；
+      1. 路径是 `alphabot_state/intraday/<日期>/<标的>.jsonl`（当日原始链存档 `<标的>.chain.json.gz` 另判：
+         同标的的 `.jsonl` 本轮已归因 + 内容是非合成的原始链，见 `_why_not_alphabot_archive`）；
       2. 原有内容逐字节未变：会话开始时记下的那个大小之内，sha256 一致（新文件则原有为空）；
       3. 新增部分是完整的行，每行都是一张快照：键集合恰为 `ALPHABOT_SNAPSHOT_KEYS`，`ts` 带时区、
          落在 [会话开始 − 300 s, 会话结束 + 60 s]，且 `ts` 的日期就是目录日期。
@@ -413,10 +443,14 @@ def explain_alphabot_appends(root: str, changes: dict[str, list[str]], before: d
     lo = started - _dt.timedelta(seconds=ALPHABOT_TS_SLACK_BEFORE_S)
     hi = ended + _dt.timedelta(seconds=ALPHABOT_TS_SLACK_AFTER_S)
     day_dirs = []
+    archives = []
     for kind in ("added", "changed"):
         for rel in changes.get(kind, []):
             if kind == "added" and _ALPHABOT_DAY_RE.match(rel):
                 day_dirs.append(rel)
+                continue
+            if _ALPHABOT_ARCHIVE_RE.match(rel):              # 要等同标的的 .jsonl 先判完
+                archives.append((kind, rel))
                 continue
             reason, n = _why_not_alphabot_append(root, rel, before.get(rel), baseline, lo, hi)
             if reason is None:
@@ -426,6 +460,13 @@ def explain_alphabot_appends(root: str, changes: dict[str, list[str]], before: d
                 unexplained.setdefault(kind, []).append(rel)
                 if rel.startswith("alphabot_state/"):
                     why[rel] = reason
+    for kind, rel in archives:
+        reason = _why_not_alphabot_archive(root, rel, explained)
+        if reason is None:
+            explained.append(rel)
+        else:
+            unexplained.setdefault(kind, []).append(rel)
+            why[rel] = reason
     for rel in day_dirs:
         if any(e.startswith(rel + "/") for e in explained):
             explained.append(rel)

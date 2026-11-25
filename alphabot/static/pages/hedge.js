@@ -166,7 +166,7 @@ export async function renderHedge(root, alive) {
   const rules = d.rules || {};
   const head = h("div", { class: "page-head" }, h("div", {},
     h("h1", {}, "对冲账本", h("span", { class: "sub" }, d.source === "demo" ? "演示数据" : (d.as_of ? `账本 ${d.as_of}` : ""))),
-    h("p", { class: "lede" }, `组合 Greeks 的纸面 ${rules.hedge_instrument || "SPY"} 覆盖（模拟成交，不连券商）：每个扫描日收盘后，${rules.hedge_stock_book ? "把股票纸面组合和跨式腿合起来" : "只拿财报跨式腿（不看股票纸面组合）"}算 β·Delta 占合并 NAV 的百分比，出 ±${num(rules.beta_delta_band_pct, 0)}% 带就用 ${rules.hedge_instrument || "SPY"} 股票拉回带边，带内不动。 `, helpLink("hedge"))));
+    h("p", { class: "lede" }, `组合 Greeks 的纸面 ${rules.hedge_instrument || "SPY"} 覆盖（模拟成交，不连券商）：每个扫描日收盘后，${rules.hedge_stock_book ? "把股票纸面组合和跨式腿合起来" : "只拿财报跨式腿（不看股票纸面组合）"}算 β·Delta 占合并 NAV 的百分比，出 ±${num(rules.beta_delta_band_pct, 0)}% 带就用 ${rules.hedge_instrument || "SPY"} 股票拉回带边，带内不动；已没有跨式可对冲时整笔平掉。 `, helpLink("hedge"))));
   if (!d.data_available) {
     fill(root, head, panel(null, {}, h("div", { class: "empty" }, `没找到对冲账本目录：${d.state_dir?.path || "—"}`),
       Object.entries(d.errors || {}).map(([k, v]) => h("p", { class: "small muted" }, `${k}：${v}`)),
@@ -211,7 +211,11 @@ export async function renderHedge(root, alive) {
     kpi(`持有 ${a.ticker || rules.hedge_instrument || "SPY"}`, shares(a.shares), "", a.entry_date ? `自 ${a.entry_date}` : null),
     kpi("均价", money(a.avg_price)),
     kpi("标记价", money(a.mark), a.mark_stale ? "down" : "", a.mark_date ? `标记于 ${a.mark_date}` : null),
-    kpi("市值", money(a.market_value, 0)), kpi("现金", money(a.cash, 0)),
+    kpi("市值", money(a.market_value, 0)),
+    // 可用现金（用户 11-24 要求标出）：起始现金 0，这里的现金全是这层对冲攒下的；空 SPY 时里面含卖空所得、平仓要还，不能全算「可用」
+    kpi("可用现金", money(a.cash, 0), "", !isNum(a.shares) || !isNum(a.cash) ? null
+      : a.shares < 0 ? `含卖空 SPY 所得，平仓要还；真正可用 ≈ 净值 ${money(a.nav, 0)}`
+      : a.shares > 0 ? "买 SPY 已花掉的不在里面" : "空仓，全部可用"),
     kpi("累计盈亏（= 净值）", sMoney(a.nav), tone(a.nav)),
     kpi("浮动（收盘）", sMoney(a.unrealized_usd), tone(a.unrealized_usd)), kpi("已实现", sMoney(a.realized_usd), tone(a.realized_usd)));
 
@@ -243,7 +247,7 @@ export async function renderHedge(root, alive) {
 
   fill(root, head,
     warns.map((w) => h("p", { class: "callout warn" }, w)),
-    panel("账户", { sub: `起始现金 0，所以净值就是开账（${a.starting_date || "—"}）以来的累计盈亏 · 账目核对 ${a.identity_ok === true ? `✓（与 ${a.identity_checked_against} 净值行一致）` : a.identity_ok === false ? "✗" : `—（${a.identity_reason || "核对不了"}）`}` }, kpis),
+    panel("账户", { sub: `起始现金 0，所以净值就是开账（${a.starting_date || "—"}）以来的累计盈亏 · 可用现金 ${money(a.cash, 0)} · 账目核对 ${a.identity_ok === true ? `✓（与 ${a.identity_checked_against} 净值行一致）` : a.identity_ok === false ? "✗" : `—（${a.identity_reason || "核对不了"}）`}` }, kpis),
     h("div", { style: { height: "16px" } }),
     liveHost,
     h("div", { style: { height: "16px" } }),

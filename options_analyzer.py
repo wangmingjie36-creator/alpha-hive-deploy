@@ -2966,6 +2966,17 @@ class OptionsAgent:
         except Exception as _e_fc:
             _log.debug("全链OI采集失败 %s: %s", ticker, _e_fc)
 
+        # v0.45.819：不按行权价过滤的近端 P/C（≤45 天全部到期日、OI 直接相加）。**只展示，不进评分**——
+        # 评分仍只读 `put_call_ratio`（守卫 tests/test_pc_near_unfiltered.py::TestDisplayOnly）。
+        # 只在主链来自 CBOE 时算：那份 payload 已在进程缓存里，零额外请求；yfinance 链 / 样本链 ⇒ None。
+        pc_near_unfiltered = None
+        if options_chain.get("_source") == "cboe":
+            try:
+                from cboe_options import fetch_cboe_pc_near_unfiltered
+                pc_near_unfiltered = fetch_cboe_pc_near_unfiltered(ticker)
+            except Exception as _e_pcn:  # noqa: BLE001 - 展示量，失败只记 None
+                _log.warning("[%s] 不过滤近端 P/C 计算失败，记 None：%s", ticker, _e_pcn)
+
         # P1-⑤ Call 流分类（directional vs hedge vs mixed）
         call_flow_classification: Dict = {}
         try:
@@ -3112,6 +3123,8 @@ class OptionsAgent:
             "gamma_calendar": gamma_calendar,
             # v0.25.3: 全链 OI 结构（所有到期日汇总）
             "full_chain_oi": full_chain_oi,
+            # v0.45.819：不按行权价过滤的近端 P/C（只展示）；旧快照没有这个键
+            "pc_near_unfiltered": pc_near_unfiltered,
             # v0.45.99: 四合约报价集（~30 DTE ATM/25Δ 的 bid/ask），只记账不进评分。
             # 旧快照没有这个键 —— 消费者必须 `.get("quote_set")`。
             "quote_set": quote_set,

@@ -102,6 +102,7 @@ WRITERS: dict = {
     "entry_price_backfill.py::main": (HUMAN, "回填判决 --out 导出"),
     "ibkr_sync.py::export_daily_actions": (HUMAN, "给人手动下单的订单清单"),
     "ibkr_sync.py::reconcile": (HUMAN, "模拟 vs 真实成交对账报告"),
+    "alphabot/service.py::_atomic_write_gzip_json": (HUMAN, "Alpha Bot 当日原始期权链存档 <T>.chain.json.gz（v0.45.815；原子覆盖写；gzip 是二进制、ledger_io 只写文本，压缩后约 1/7；无代码读回参与计算，日间拆解时人工经 archived_chain 读）"),
     "ml_model_guard.py::snapshot_model_file": (HUMAN, "模型留档 manifest.jsonl（无代码读者；v0.45.448 登记的「守卫读回」不对）"),
     "portfolio_backtest.py::main": (HUMAN, "组合回测 --save 导出"),
     "sell_strike_report.py::write_local_report": (HUMAN, "卖权本地 Markdown 报告"),

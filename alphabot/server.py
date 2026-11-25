@@ -176,6 +176,10 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         return svc.intraday_dates(request.path_params["ticker"])
 
     @api
+    def zg_decompose(request):
+        return svc.zg_decompose(request.path_params["ticker"], _q(request, "date"))
+
+    @api
     def straddle(request):
         return svc.straddle()
 
@@ -354,6 +358,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/intraday/{ticker}", intraday),
         Route("/api/intraday-heat/{ticker}", intraday_heat),
         Route("/api/intraday-dates/{ticker}", intraday_dates),
+        Route("/api/zg-decompose/{ticker}", zg_decompose),
         Route("/api/intraday/{ticker}/snap", snap_now, methods=["POST"]),
         Route("/api/watch/{ticker}", watch, methods=["POST"]),
         Route("/api/straddle", straddle),

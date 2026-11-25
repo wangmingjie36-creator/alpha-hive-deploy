@@ -28,4 +28,9 @@
 
 ## 队列
 
-（暂无）
+### 收盘后读到 CBOE 盘中陈旧文件的票，期权链改用 Yahoo（登记日 2026-11-24，登记者 session 07f3aaaf / main；用户当日定「登记冻结队列，解冻后合入」）
+- 改什么、动哪些文件：`cboe_stale_intraday`（`cboe_options.official_price` 判出、`data_pipeline` 已拒收其标的价改取 yfinance）的票，其期权链派生量（P/C、`total_oi`、Max Pain、`options_score`、IV 期限结构、`quote_set`）目前仍读同一份陈旧 CBOE 文件。方案：这类票改取 Yahoo 链，OracleBee 与 BearBee 的 `options_bear` 随之变。预计动 `cboe_options.py`、`options_analyzer.py`、`data_pipeline.py`；**只限日报主流程，卖权账本 / 溢价页 / Alpha Bot 账本路径仍只认 CBOE**（预注册数据源，见 auto-memory `alpha-hive-alphabot-yf-fallback.md`）。
+- 为什么不能证明作废 0 条：改的是 Oracle 的输入，11-20 起陈旧票每个扫描日 9~16 只（共 30 只），输出的 `options_score` ⇒ `final_score` 与 `agent.OracleBeeEcho.*` / `bear.options_bear` 信号都会变。旧 CBOE 链并非「错」（与同一份文件里的价格是同一时刻），只是不是收盘口径，所以不满足「真 bug 例外」的「当前数据是错的」。
+- 预期影响：`signal_archive.COHORT_SIGNAL_SCOPE` 需新增一代，范围同 v0.45.765（`agent.OracleBeeEcho.*` + `bear.options_bear`）；这些探索信号的分信号世代起点后移到合入首跑日。
+- 开工前必须先核实的风险（均**待验证**）：① Yahoo 链在扫描里受 429 限流（11-03 走代理仍在 281 次后被掐），16 只票约多 25 秒/只 ≈ 7 分钟；② Yahoo OI / IV 口径与 CBOE 不同，同一只票序列前后不可比，需要用 `oi_staleness.assess_frames` 的 Alpha Bot 同款护栏；③ 另一条路是「次日补取 CBOE」（不换源），先看今晚 20:05 ET 后源站是否补刷再比较。
+- 分支 / 草稿位置：无，未写代码。证据与成因见 auto-memory `alpha-hive-cboe-stale-intraday.md`。
