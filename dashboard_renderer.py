@@ -619,6 +619,34 @@ def _pred_list_html(preds, is_best=True):
     return h
 
 
+def _pc_near_unfiltered(oracle: dict):
+    """OracleBee 详情里的 `pc_near_unfiltered`（v0.45.819）→ 校验过的 dict 或 None。
+
+    只认 ratio 是有限非负数的值；坏值记 None，不显示一个假数。
+    """
+    d = (oracle or {}).get("pc_near_unfiltered")
+    if not isinstance(d, dict):
+        return None
+    r = d.get("ratio")
+    if isinstance(r, bool) or not isinstance(r, (int, float)) or not math.isfinite(r) or r < 0:
+        return None
+    return d
+
+
+def _pc_near_unfiltered_html(d) -> str:
+    """全链 OI 卡片「全链 P/C」下面那一行：不过滤口径的读数 + 到期日个数；没有 ⇒ 空串。"""
+    if not d:
+        return ""
+    n = d.get("expiries")
+    w = d.get("window_days")
+    scope = f"≤{w}天" if w else "近端"
+    if isinstance(n, int) and not isinstance(n, bool):
+        scope += f" · {n} 个到期日"
+    return ('<div style="font-size:.62em;color:var(--ts);margin-top:1px" '
+            'title="不按行权价过滤、OI 直接相加；不含当天到期。只展示，不进评分">'
+            f'不过滤行权价 {d["ratio"]:.2f}（{_html.escape(scope)}）</div>')
+
+
 def _detail(ticker: str, swarm_detail: dict) -> dict:
     """提取单个 ticker 的详细指标（含 GEX / 期权流向 / 维度数据质量）"""
     sd = swarm_detail.get(ticker, {})
@@ -846,6 +874,8 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
         "momentum_5d": round(float(_momentum_raw), 2) if _momentum_raw is not None else None,
         # v0.26.0 全链 OI 字段
         "full_pc": full_pc,
+        # v0.45.819：不按行权价过滤的近端 P/C（≤45 天全部到期日，只展示）；旧记录没有 ⇒ None
+        "pc_near_unfiltered": _pc_near_unfiltered(oracle),
         "max_pain": max_pain,        # 全链 Max Pain（含远期 LEAPS）
         "max_pain_pct": max_pain_pct,
         "total_call_oi": total_call_oi,
@@ -2140,6 +2170,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                     <span style="font-size:.55em;font-weight:400;color:var(--ts)">({_pc_label})</span>
                   </div>
                   <div style="font-size:.62em;color:var(--ts);margin-top:1px">近端 {_near_pc}</div>
+                  {_pc_near_unfiltered_html(_detd.get("pc_near_unfiltered"))}
                 </div>
                 <div style="background:var(--surface);border-radius:4px;padding:6px 8px">
                   <div style="font-size:.7em;color:var(--ts)">近端磁吸目标价</div>
