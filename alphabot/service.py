@@ -85,7 +85,13 @@ CHAIN_ARCHIVE_SUFFIX = ".chain.json.gz"
 #: 所以备用源对**每一张**链先过 `oi_staleness`、OI 陈旧 / 判不了就拒收（见 `yf_chain` docstring）。要加票改这里；
 #: **只对 Alpha Bot 的页面生效**——卖权账本 / 溢价页 / 日报仍只认 CBOE（BILI 在账本里仍会记不可得，这是预注册的数据源，不换）。
 #: CBOE 一恢复就自动改回 CBOE。
-YF_FALLBACK_TICKERS = frozenset({"NVDL", "BILI"})
+#: 2026-11-24（用户定「Alpha Bot 陈旧的卖权也改成对的」）：CBOE 自 11-20 起收盘后只刷新一部分票，其余的文件停在当日
+#: 盘中（11-23 有 16 只，美东 10:09–11:53 之后再没更新，11-24 收盘后仍是原样）⇒ 次日现算页一律 `stale_vintage`。
+#: 这批票 + VKTX（文件停在 11-20）加进名单：CBOE 一恢复正常自动改回，备用源每张链仍先过 `oi_staleness`。
+#: 取证与成因见 auto-memory `alpha-hive-cboe-stale-intraday.md`；名单是「近期出现过」的票，下一批陈旧的票要再加。
+_CBOE_STALE_2026_11 = ("ABBV", "BRK-B", "COST", "CRCL", "CRM", "CVX", "DE", "ENPH", "JNJ", "NEE", "QCOM", "SNOW",
+                       "T", "TMO", "TMUS", "VZ", "VKTX")
+YF_FALLBACK_TICKERS = frozenset({"NVDL", "BILI", *_CBOE_STALE_2026_11})
 #: 「β 窗口对照」里 250 日 β 的进程内缓存时长（秒）：β 一天内几乎不变，取一次要十几个限流请求；「重新拉取」跳过缓存
 BETA_TTL_SEC = 6 * 3600.0
 #: 这些失败原因是「这只标的本身判不了」（历史不足 / 基准无波动），重取没用：不再重取

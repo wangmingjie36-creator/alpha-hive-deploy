@@ -326,7 +326,22 @@ class TestServiceFallback:
         import inspect
         src = inspect.getsource(R.LG._default_fetch)
         assert "yf_chain" not in src and "fetch_cboe_raw_contracts" in src
-        assert SV.YF_FALLBACK_TICKERS == frozenset({"NVDL", "BILI"})
+        # 名单（v0.45.816 起含 11-20~23 CBOE 收盘后没刷新的票）只对 Alpha Bot 页面生效；账本取数仍只认 CBOE
+        assert {"NVDL", "BILI"} <= SV.YF_FALLBACK_TICKERS
+
+    def test_the_2026_11_cboe_stale_batch_falls_back_too(self, svc, seen, monkeypatch):
+        """11-20 起 CBOE 收盘后只刷一部分票，其余停在盘中（11-23 有 16 只）⇒ 次日现算页 stale_vintage。
+        名单里的票走 Yahoo；名单外的票（NVDA）即使 stale_vintage 也不走。"""
+        from config import WATCHLIST
+        assert set(SV._CBOE_STALE_2026_11) <= set(WATCHLIST), "名单里的票须是监控名单里的"
+        assert len(SV._CBOE_STALE_2026_11) == 17
+        self._cboe(monkeypatch, seen, (None, "stale_vintage"))
+        for t in ("TMUS", "VKTX", "BRK-B"):
+            raw, why = svc._chain_fetch(invalidate=False)(t, as_of=None)
+            assert why is None and raw["data_source"] == "yfinance"
+        assert seen["yf"] == ["TMUS", "VKTX", "BRK-B"]
+        raw, why = svc._chain_fetch(invalidate=False)("NVDA", as_of=None)
+        assert raw is None and why == "stale_vintage" and "NVDA" not in seen["yf"]
 
     def test_bili_falls_back_on_the_live_pages(self, svc, seen, monkeypatch):
         """BILI 的 CBOE 文件盘中不更新（v0.45.662）⇒ 现算页走 Yahoo，并计数。"""
