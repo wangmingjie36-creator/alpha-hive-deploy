@@ -22,7 +22,7 @@ import re
 import tempfile
 import threading
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -50,6 +50,7 @@ from alphabot import thesis_auto as TA
 from alphabot import wheel as WH
 from alphabot import wheel_prices as WP
 from alphabot import wheel_screen as WS
+from alphabot import zg_decompose as ZD
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("alphabot")
@@ -437,6 +438,7 @@ class AlphaBotService:
         self._am_excluded: Dict[str, int] = {}      # 指数票最近一次现算丢掉的上午结算合约数（`_live_fetch` 写）
         # 盘中成交活跃度：各票上一张**落盘**快照的逐合约成交量（只在内存里；重启后第一拍没有可比的，见 intraday_activity）
         self._act_prev: Dict[str, dict] = {}
+        self._zgd_cache: Dict[tuple, tuple] = {}         # (票, 日) → (两份存档的修改时刻键, 结果)
         # 成交榜（v0.45.776）：最近几次现算实际用到的原始链 `{标的: (取到的时刻, raw)}`——成交榜读它，不另取链
         # （另取会多打一次 CBOE；走 Yahoo 备用源的票还会多挨限流）。一份整链约 1–2 MB ⇒ 只留最近 `RAW_KEEP` 只
         self._raw_last: Dict[str, tuple] = {}
@@ -450,7 +452,7 @@ class AlphaBotService:
                       "premium_computed": 0, "premium_cache_hits": 0, "premium_failures": 0,
                       "howto_failures": 0, "yf_fallback_used": 0, "yf_fallback_failed": 0,
                       "beta_sens_computed": 0, "beta_sens_failures": 0, "yf_rate_limited": 0,
-                      "activity_failures": 0, "ohlc_failures": 0, "chain_archive_failures": 0,
+                      "activity_failures": 0, "ohlc_failures": 0, "chain_archive_failures": 0, "zg_decompose_failures": 0,
                       "minute_fetches": 0, "minute_cache_hits": 0, "minute_failures": 0,
                       "thesis_fetches": 0, "thesis_cache_hits": 0, "thesis_failures": 0,
                       "sector_quote_fetches": 0, "sector_cache_hits": 0, "sector_failures": 0,
@@ -648,6 +650,7 @@ class AlphaBotService:
             "deep": DR.public_rules(),
             "volume_board": VB.public_rules() | {"raw_keep": RAW_KEEP},
             "money_flow": MF.public_rules(),
+            "zg_decompose": ZD.public_rules(),
             # 帮助页「程序类」里给人抄的命令：进本代码目录、用运行本服务的解释器（从 .app 打开时就是 .app 记下的那个），
             # 不写死缺省、不假设人站在代码目录里（v0.45.611）
             "app": {"launcher": MA.here_command("-m alphabot.launcher"),
@@ -2314,6 +2317,75 @@ class AlphaBotService:
             out["error"] = f"顶层不是对象：{type(raw).__name__}"
             return out
         out.update(available=True, raw=raw)
+        return out
+
+    def chain_archive_dates(self, ticker) -> List[str]:
+        """有当日原始链存档的美东日（新→旧）。"""
+        t = norm_ticker(ticker)
+        root = self.state_dir() / "intraday"
+        if not root.is_dir():
+            return []
+        return sorted((p.name for p in root.iterdir() if p.is_dir() and _DATE_RE.match(p.name)
+                       and (p / f"{t}{CHAIN_ARCHIVE_SUFFIX}").is_file()), reverse=True)
+
+    def zg_decompose(self, ticker, date_et: Optional[str] = None) -> dict:
+        """Zero Gamma 日间拆解（v0.45.816，纯函数 `alphabot/zg_decompose.py`）：某个存档日 vs 它之前最近的一份存档。
+        缺存档 / 存档读坏 / 算不出各报各的原因（`reason`），不当成「没动」。只在本机算，结果按两份文件的修改时刻缓存在内存。"""
+        t = norm_ticker(ticker)
+        dates = self.chain_archive_dates(t)
+        cur = norm_date(date_et) if date_et else (dates[0] if dates else None)
+        out = {"ticker": t, "date": cur, "prev_date": None, "available": False, "reason": None,
+               "archive_dates": dates[:30], "rules": ZD.public_rules()}
+        if cur is None or cur not in dates:
+            out["reason"] = "no_current_archive"
+            return clean_json(out)
+        older = [d for d in dates if d < cur]
+        if not older:
+            out["reason"] = "no_previous_archive"
+            return clean_json(out)
+        prev = older[0]
+        out["prev_date"] = prev
+        try:
+            out["trading_days_apart"] = sum(
+                1 for i in range(1, (datetime.fromisoformat(cur) - datetime.fromisoformat(prev)).days + 1)
+                if _is_trading_iso((datetime.fromisoformat(prev) + timedelta(days=i)).date().isoformat()))
+        except Exception as exc:  # noqa: BLE001 - 日历坏了：照算，但隔几天如实写「判不了」
+            out["trading_days_apart"] = None
+            _log.warning("[%s] Zero Gamma 拆解：交易日历判不了：%s: %s", t, type(exc).__name__, exc)
+        paths = [self._chain_archive_path(t, d) for d in (prev, cur)]
+        try:
+            key = (t, prev, cur) + tuple(p.stat().st_mtime_ns for p in paths)
+        except OSError:
+            key = None
+        hit = self._zgd_cache.get((t, cur))
+        if key is not None and hit is not None and hit[0] == key:
+            return hit[1]
+        chains = {}
+        for d in (prev, cur):
+            got = self.archived_chain(t, d)
+            if not got["available"]:
+                out["reason"] = f"archive_{got['reason']}"
+                out["bad_date"] = d
+                out["error"] = got.get("error")
+                return clean_json(out)
+            chains[d] = got["raw"]
+        try:
+            res = ZD.build(chains[prev], chains[cur], view_fn=R.L.view_contracts,
+                           sweep_fn=R.L.zero_gamma_sweep, profile_fn=R.L.strike_profile)
+        except Exception as exc:  # noqa: BLE001 - 拆解坏了不许装成「没有变化」：报原因 + 计数 + 日志
+            self.stats["zg_decompose_failures"] += 1
+            _log.warning("[%s] Zero Gamma 拆解算不出：%s: %s", t, type(exc).__name__, exc)
+            out["reason"] = f"exception:{type(exc).__name__}: {exc}"
+            return clean_json(out)
+        cur_raw = chains[cur]
+        today = now_et().date().isoformat()
+        out.update(res)
+        out.update({"cur_as_of": cur_raw.get("payload_last_trade_time"),
+                    "prev_as_of": chains[prev].get("payload_last_trade_time"),
+                    "cur_final": cur < today or not market_session().get("live")})
+        out = clean_json(out)
+        if key is not None:
+            self._zgd_cache[(t, cur)] = (key, out)
         return out
 
     def _attach_activity(self, t: str, snap: dict, raw: Optional[dict], *, date_et: str,

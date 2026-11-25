@@ -8,6 +8,7 @@ import { premium } from "./premium.js";
 import { volume } from "./volume.js";
 import { flow } from "./flow.js";
 import { howtoPanel } from "./howto.js";
+import { zgDecompBody, zgDecompPanel } from "./zg_decomp.js";
 import { state, tickers, refreshMeta } from "../app.js";
 import { createRetryGate } from "../retry_gate.js";
 
@@ -98,6 +99,8 @@ export function sidebar(current, pattern) {
 // ─────────────────────────────── 水平
 function levels(body, d) {
   let view = pref("levelsView", "le_45dte");
+  // 日间拆解只算一次（两份存档不随视图切换而变）；失败照实显示，不吞成「没有这一栏」
+  const zgd = api(`/api/zg-decompose/${encodeURIComponent(d.ticker)}`).catch((e) => ({ available: false, reason: `exception:${e.message}` }));
   let mode = pref("levelsMode", "net");
   let basis = "oi";
   const S = d.underlying_price;
@@ -119,6 +122,7 @@ function levels(body, d) {
 
     const ladderEl = h("div", { class: "chart tall", role: "img", "aria-label": "按行权价的 GEX 梯子" });
     const curveEl = h("div", { class: "chart short", role: "img", "aria-label": "总 GEX 随假想现价变化的曲线" });
+    const zgEl = h("div", {}, h("div", { class: "empty" }, "拆解中…"));
     const controls = h("div", { class: "controls" },
       seg(VIEWS, view, (x) => { view = x; setPref("levelsView", x); draw(); }, "期限视图"),
       seg([["net", "净值"], ["split", "call / put"]], mode, (x) => { mode = x; setPref("levelsMode", x); draw(); }, "显示方式"),
@@ -138,7 +142,11 @@ function levels(body, d) {
         panel("水平", { sub: `${VIEWS.find((x) => x[0] === view)[1]} · ${v.n_contracts ?? "—"} 个合约（行权价 × call/put）` }, levelCards(d, v, S))),
       h("div", { style: { height: "20px" } }),
       panel("Gamma 曲线", { sub: "每个合约固定自身 IV，在现价 ±20% 的假想价格上重算总 GEX；过零点就是 Zero Gamma（路由读的正是 ≤45 天视图的这条线）" },
-        (v.curve?.total || []).length ? curveEl : h("div", { class: "empty" }, "没有可用于扫描的合约（需要 IV 与 OI）。")));
+        (v.curve?.total || []).length ? curveEl : h("div", { class: "empty" }, "没有可用于扫描的合约（需要 IV 与 OI）。")),
+      h("div", { style: { height: "20px" } }),
+      zgDecompPanel(zgEl));
+    const shownView = view;
+    zgd.then((r) => { if (shownView === view && zgEl.isConnected) fill(zgEl, ...zgDecompBody(r, view)); });
     if (rows.length) strikeBars(ladderEl, { rows, series, spot: S, levels: lv });
     if ((v.curve?.total || []).length) gammaCurve(curveEl, v.curve, S);
   }
