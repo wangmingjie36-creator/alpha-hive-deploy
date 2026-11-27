@@ -620,23 +620,37 @@ def _pred_list_html(preds, is_best=True):
 
 
 def _pc_near_unfiltered(oracle: dict):
-    """OracleBee 详情里的 `pc_near_unfiltered`（v0.45.819）→ 校验过的 dict 或 None。
+    """OracleBee 详情里的 `pc_near_unfiltered`（v0.45.819）→ 校验过的 dict / `{"why": 原因}` / None。
 
-    只认 ratio 是有限非负数的值；坏值记 None，不显示一个假数。
+    · None：旧记录（819 之前没有这个键）⇒ 不显示；
+    · `{"why": …}`：扫描知道这个读数但没有值（链来自 yfinance / CBOE 链上算不出 / 值坏了）⇒ 显示「—」和原因
+      （v0.45.820：此前一律不显示，11-25 生产 30 只里 18 只走 yfinance 链，页面上分不出「没算」和「出错」）；
+    · 否则：ratio 是有限非负数的那份 dict。坏值不显示成数。
     """
-    d = (oracle or {}).get("pc_near_unfiltered")
-    if not isinstance(d, dict):
+    oracle = oracle or {}
+    if "pc_near_unfiltered" not in oracle:
         return None
+    d = oracle.get("pc_near_unfiltered")
+    if d is None:
+        src = oracle.get("chain_source")
+        if src and src != "cboe":
+            return {"why": f"期权链来自 {src}，只在 CBOE 链上算"}
+        return {"why": "CBOE 链上算不出"}
+    if not isinstance(d, dict):
+        return {"why": "读数异常"}
     r = d.get("ratio")
     if isinstance(r, bool) or not isinstance(r, (int, float)) or not math.isfinite(r) or r < 0:
-        return None
+        return {"why": "读数异常"}
     return d
 
 
 def _pc_near_unfiltered_html(d) -> str:
-    """全链 OI 卡片「全链 P/C」下面那一行：不过滤口径的读数 + 到期日个数；没有 ⇒ 空串。"""
+    """全链 OI 卡片「全链 P/C」下面那一行：不过滤口径的读数 + 到期日个数；没有值写原因；旧记录 ⇒ 空串。"""
     if not d:
         return ""
+    if "why" in d:
+        return ('<div style="font-size:.62em;color:var(--ts);margin-top:1px">'
+                f'不过滤行权价 —（{_html.escape(str(d["why"]))}）</div>')
     n = d.get("expiries")
     w = d.get("window_days")
     scope = f"≤{w}天" if w else "近端"

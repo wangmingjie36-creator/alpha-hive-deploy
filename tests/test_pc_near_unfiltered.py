@@ -70,6 +70,14 @@ class TestPureFunction:
         ]
         r = CO.pc_near_unfiltered(opts, BASE)
         assert (r["put_oi"], r["call_oi"]) == (20, 100)
+        assert r["bad_oi"] == 1, "读不成数的 OI 要计数，不无声跳过（None 是「没有」，不计）"
+
+    def test_nan_and_inf_oi_are_counted_not_raised(self):
+        """inf 曾会抛 OverflowError、整只票记 None（v0.45.820）。"""
+        opts = [_opt("2026-11-28", "C", 180, 100), _opt("2026-11-28", "P", 180, 30),
+                _opt("2026-11-28", "P", 180, float("nan")), _opt("2026-11-28", "P", 180, float("inf"))]
+        r = CO.pc_near_unfiltered(opts, BASE)
+        assert (r["put_oi"], r["bad_oi"], r["ratio"]) == (30, 2, 0.3)
 
     def test_price_does_not_enter(self):
         """要治的正是「现价一动读数就跳」——函数签名里根本没有现价。"""
@@ -105,10 +113,16 @@ class TestFetch:
 # ═══════════════════════════════ 只展示 ═══════════════════════════════
 
 def _prod_py():
-    skip = {"tests", "experiments", "_archive", "_retired_pre_phase5"}
-    for p in ROOT.rglob("*.py"):
+    """git 跟踪的本仓 .py（`tests/_repo_files.own_python_files`，唯一实现）去掉测试与实验。
+
+    v0.45.820：原先裸 `ROOT.rglob`——开发检出里 iCloud 造的 `cboe_options 2.py` 一类副本、未跟踪的旧目录
+    都会被算成「读它的生产文件」，守卫在开发检出里无故变红、在 worktree / CI 里是绿的。
+    """
+    from tests._repo_files import own_python_files
+    files, _how = own_python_files(ROOT)
+    for p in files:
         rel = p.relative_to(ROOT)
-        if skip & set(rel.parts) or any(part.startswith(".") for part in rel.parts):
+        if {"tests", "experiments", "_archive"} & set(rel.parts):
             continue
         yield rel.as_posix(), p
 
@@ -138,12 +152,26 @@ class TestRender:
         html = DR._pc_near_unfiltered_html(d)
         assert "不过滤行权价 0.74" in html and "≤45天 · 11 个到期日" in html and "不进评分" in html
 
-    @pytest.mark.parametrize("bad", [None, {}, "0.7", {"ratio": None}, {"ratio": float("nan")},
-                                     {"ratio": float("inf")}, {"ratio": -1}, {"ratio": True}])
-    def test_missing_or_bad_value_renders_nothing(self, bad):
-        """旧记录没有这个键、或值坏了 ⇒ 不显示，不拿假数顶。"""
-        assert DR._pc_near_unfiltered({"pc_near_unfiltered": bad}) is None
+    def test_old_record_without_the_key_renders_nothing(self):
+        assert DR._pc_near_unfiltered({"put_call_ratio": 0.7}) is None
+        assert DR._pc_near_unfiltered(None) is None
         assert DR._pc_near_unfiltered_html(None) == ""
+
+    @pytest.mark.parametrize("bad", [{}, "0.7", {"ratio": None}, {"ratio": float("nan")},
+                                     {"ratio": float("inf")}, {"ratio": -1}, {"ratio": True}])
+    def test_bad_value_shows_a_dash_not_a_number(self, bad):
+        """值坏了 ⇒ 写「—（读数异常）」，不拿假数顶，也不悄悄消失。"""
+        d = DR._pc_near_unfiltered({"pc_near_unfiltered": bad, "chain_source": "cboe"})
+        assert d == {"why": "读数异常"}
+        html = DR._pc_near_unfiltered_html(d)
+        assert "不过滤行权价 —（读数异常）" in html and not re.search(r"\d\.\d\d", html)
+
+    def test_none_says_why(self):
+        """11-25 生产 30 只里 18 只走 yfinance 链 ⇒ 页面要写明「没算」，与「CBOE 上算不出」分开（v0.45.820）。"""
+        yf = DR._pc_near_unfiltered({"pc_near_unfiltered": None, "chain_source": "yfinance"})
+        assert "yfinance" in DR._pc_near_unfiltered_html(yf)
+        cb = DR._pc_near_unfiltered({"pc_near_unfiltered": None, "chain_source": "cboe"})
+        assert "CBOE 链上算不出" in DR._pc_near_unfiltered_html(cb)
 
     def test_card_template_calls_the_helper(self):
         src = (ROOT / "dashboard_renderer.py").read_text(encoding="utf-8")

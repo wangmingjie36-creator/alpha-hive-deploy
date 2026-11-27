@@ -1510,6 +1510,7 @@ def pc_near_unfiltered(options: List[dict], base: date,
     算不出 = 窗口内没有到期日，或窗口内 call OI 为 0（比值无定义，不是「中立」，同 v0.45.516）。
     """
     put_oi = call_oi = 0
+    bad_oi = 0          # v0.45.820：窗口内 OI 读不成数的合约数，写进结果（不再无声跳过）
     exps = set()
     for o in options or []:
         parsed = _parse_occ(o.get("option", ""))
@@ -1525,7 +1526,8 @@ def pc_near_unfiltered(options: List[dict], base: date,
         exps.add(expiry)
         try:
             oi = int(o.get("open_interest") or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):   # NaN → ValueError，inf → OverflowError
+            bad_oi += 1
             continue
         if oi <= 0:
             continue
@@ -1540,6 +1542,7 @@ def pc_near_unfiltered(options: List[dict], base: date,
         "put_oi": put_oi,
         "call_oi": call_oi,
         "expiries": len(exps),
+        "bad_oi": bad_oi,
         "window_days": window_days,
         "base_date": base.isoformat(),
         "source": "cboe",
