@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import logging
+from datetime import date, timedelta
 
 import pytest
 
@@ -84,10 +85,15 @@ class TestAttribution:
         cur = _chain()
         prev = _chain()
         S = prev["underlying_price"]
+        # 合成链按真实今天生成到期日：近月从链里取，「已到期近月」取它前一天——不写死日期（时间炸弹，v0.45.822）
+        near = min(c["expiry"] for c in prev["contracts"])
+        gone = (date.fromisoformat(near) - timedelta(days=1)).isoformat()
+        tag = lambda iso: iso[2:4] + iso[5:7] + iso[8:10]  # noqa: E731  symbol 里的 YYMMDD
         extra = []
         for c in prev["contracts"]:
-            if c["expiry"] == "2026-11-28":
-                e = dict(c, expiry="2026-11-26", dte=1, symbol=c["symbol"].replace("261128", "261126"))
+            if c["expiry"] == near:
+                assert tag(near) in c["symbol"], c["symbol"]
+                e = dict(c, expiry=gone, dte=1, symbol=c["symbol"].replace(tag(near), tag(gone)))
                 if e["cp"] == "P" and abs(e["strike"] / S - 1) <= 0.06:
                     e["oi"] = 50000.0
                 extra.append(e)
