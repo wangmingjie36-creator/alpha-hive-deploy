@@ -34,3 +34,13 @@
 - 预期影响：`signal_archive.COHORT_SIGNAL_SCOPE` 需新增一代，范围同 v0.45.765（`agent.OracleBeeEcho.*` + `bear.options_bear`）；这些探索信号的分信号世代起点后移到合入首跑日。
 - 开工前必须先核实的风险（均**待验证**）：① Yahoo 链在扫描里受 429 限流（11-03 走代理仍在 281 次后被掐），16 只票约多 25 秒/只 ≈ 7 分钟；② Yahoo OI / IV 口径与 CBOE 不同，同一只票序列前后不可比，需要用 `oi_staleness.assess_frames` 的 Alpha Bot 同款护栏；③ 另一条路是「次日补取 CBOE」（不换源），先看今晚 20:05 ET 后源站是否补刷再比较。
 - 分支 / 草稿位置：无，未写代码。证据与成因见 auto-memory `alpha-hive-cboe-stale-intraday.md`。
+
+## IC 重跑时须处理的已知口径混合（不是待合入的改动，不开世代）
+
+### `final_score` 跨 11-20 ~ 12 月初混了两种 iv_rank 口径（登记日 2026-11-27，登记者分支 claude/iv-rank-real-gate / v0.45.821；用户当日定「逐行闸，不重置」）
+- 发生了什么：v0.43.18 起自攒的真实 IV 历史（`iv_history.IV_RANK_MIN_DAYS` = 63 条）陆续攒满，`options_analyzer` 按票**自动**从 `hv_proxy`（当前 HV 在 HV 历史里的排名）切到 `real_iv_{N}d`（今日 IV 在自攒 IV 历史里的排名）。没有代码改动，是数据条件触发。生产库只读计数（`options.iv_rank_is_real` = 1 的票数）：11-20 1 只、11-23 4、11-24 11、11-25 22；剩下 8 只（TMUS / BILI / ENPH / NEE / NFLX / SNOW / TMO 差 1~2 条，VKTX 差 4 条）约 12 月初切完。
+- 为什么影响 `final_score`：iv_rank 经 `options_analyzer` 的 iv_signal（0~3 分档：<20 / <40 / ≤70 / ≤85 / 其余）进 OracleBee `options_score` ⇒ `final_score`；BearBee 也读它。同一只票切换前后档位口径不同；同一天不同票口径也可能不同。
+- 为什么不登日期边界：切换按票陆续发生，没有单一边界日；在冻结期登边界会把 IC 闸 2/25 → 0/25（到期日 ≈2027-05-05 顺延），且边界后几天仍混着 hv_proxy 行。用户 11-27 选不重置。
+- IC 重跑时怎么做：主结果照常用当前世代全部样本；**另跑一份敏感性分析**——按同一 (日期, 标的) 的 `options.iv_rank_is_real` 切开（0 / 1 / 缺），看 `final_score` IC 在两种口径下是否同号、量级是否相近。结论不一致时如实报告两种口径，不挑一个。
+- 已做的部分：`options.iv_rank` / `options.iv_percentile` 自身的探索性 IC 已由 `signal_archive.REAL_OBSERVATION_GATES` 逐行只用真实 IV 口径（v0.45.821）。
+- 各口径在 iv_signal 档位上实际差多少：**待验证**（真实口径生效那天 hv_proxy 值没算，不能逐行对照；要量化须用同一天的 HV 历史重算 hv_proxy，只读、不写回）。
