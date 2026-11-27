@@ -191,6 +191,15 @@ class TestRealObservationGates:
     VOL, INP = "buzz.comp.volatility_signal", "price.volatility_20d"
     MOM, MIN = "buzz.comp.momentum_signal", "price.momentum_5d"
     VR, VIN = "buzz.comp.volume_signal", "price.volume_ratio"
+    IVR, IVP, IVREAL = "options.iv_rank", "options.iv_percentile", "options.iv_rank_is_real"
+
+    # v0.45.821：iv_rank / iv_percentile 只留真实自攒 IV 口径（iv_rank_is_real = 1）；切换按票陆续发生，同一天两种口径并存
+    _IV_ROWS = [
+        ("2026-11-25", "A", {IVR: 95.7, IVP: 90.0, IVREAL: 1.0}),   # real_iv_65d
+        ("2026-11-25", "B", {IVR: 40.0, IVP: 38.0, IVREAL: 0.0}),   # 同一天还没攒够 63 条 ⇒ hv_proxy
+        ("2026-08-01", "C", {IVR: 62.9, IVP: 60.0}),                # 08-14 前旧代码：无 iv_rank_source ⇒ 输入没入档
+        ("2026-09-01", "D", {IVR: 0.0, IVP: 0.0, IVREAL: 1.0}),     # 真实 IV 口径下 rank 恰为 0 是值，不是哨兵
+    ]
 
     def _db(self, tmp_path, rows):
         """rows：(date, ticker, {信号: 值})；每个 (date, ticker) 都有已结算的 t7。"""
@@ -261,6 +270,31 @@ class TestRealObservationGates:
         assert self._kept(p, self.VR) == ["A", "E"]
         assert st[self.VR] == {"kept": 2, "missing_input": 1, "quarantined_input": 0, "sentinel": 2, "fallback": 0}, st
 
+    def test_iv_rank_keeps_only_real_iv_rows(self, tmp_path, capsys):
+        """hv_proxy（=0.0）与旧代码（输入没入档）都排除；真实 IV 口径里 rank 恰为 0 照留（闸判的是输入，不是通道值）。
+        输入信号 iv_rank_is_real 本身不受闸影响。报告里写的是「HV 代理口径」而不是「缺失哨兵」。"""
+        st = {}
+        p = sa.load_panel(self._db(tmp_path, self._IV_ROWS), "t7", min_width=1, with_ticker=True, gate_stats=st)
+        for sig in (self.IVR, self.IVP):
+            assert self._kept(p, sig) == ["A", "D"], (sig, p.get(sig))
+            assert st[sig] == {"kept": 2, "missing_input": 1, "quarantined_input": 0, "sentinel": 1, "fallback": 0}, st
+        assert self._kept(p, self.IVREAL) == ["A", "B", "D"]
+        sa._print_generations([], {"signals": {}, "undeclared_versions": [], "real_obs_gates": st})
+        out = capsys.readouterr().out
+        assert "真实观测闸：options.iv_rank 只用 options.iv_rank_is_real 确实取到的行" in out, out
+        assert "任何日期的HV 代理口径 iv_rank_is_real=0 1 行" in out, out
+
+    def test_iv_rank_gate_matches_the_source_labels(self):
+        """闸把 0.0 当 hv_proxy，前提是 `_iv_rank_is_real` 只把 hv_proxy 映射成 0.0、其余（real_iv_*）成 1.0。"""
+        f = sa.SIGNAL_EXTRACTORS[self.IVREAL]
+
+        def mk(s):
+            return {"agent_details": {"OracleBeeEcho": {"details": {"iv_rank_source": s}}}}
+        assert f(mk("hv_proxy")) == 0.0 and f(mk("real_iv_63d")) == 1.0 and f(mk(None)) is None
+        for sig in (self.IVR, self.IVP):
+            g = sa.REAL_OBSERVATION_GATES[sig]
+            assert (g["input"], g["sentinel"], g["sentinel_before"], g["fallback_value"]) == (self.IVREAL, 0.0, None, None), g
+
     def test_quarantined_input_is_excluded_even_if_row_kept(self, tmp_path, monkeypatch):
         """带 `keep_rows` 的隔离条目（10-14 BILI 动量）库里还在；通道是用那个坏输入算的 ⇒ 也排除。
         `load_panel` 本身不问隔离名单，所以闸要自己问——只看「输入在不在」会把它当真实观测放进来。"""
@@ -321,9 +355,9 @@ class TestRealObservationGates:
 
     def test_registry_matches_the_code(self):
         """登记的每个闸：两个信号都入档、字段齐；三条与 buzz_bee 的回落写法对得上。"""
-        assert set(sa.REAL_OBSERVATION_GATES) == {self.VOL, self.MOM, self.VR}
+        assert set(sa.REAL_OBSERVATION_GATES) == {self.VOL, self.MOM, self.VR, self.IVR, self.IVP}
         for sig, gate in sa.REAL_OBSERVATION_GATES.items():
-            assert set(gate) == {"input", "sentinel", "sentinel_before", "fallback_value"}, (sig, gate)
+            assert set(gate) - {"sentinel_label"} == {"input", "sentinel", "sentinel_before", "fallback_value"}, (sig, gate)
             assert sig in sa.SIGNAL_EXTRACTORS and gate["input"] in sa.SIGNAL_EXTRACTORS, (sig, gate)
             if gate["sentinel_before"]:
                 assert gate["sentinel"] is not None, sig

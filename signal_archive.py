@@ -2642,6 +2642,23 @@ REAL_OBSERVATION_GATES: Dict[str, Dict[str, Any]] = {
     # 从未落进归档（最大 10.0）。
     "buzz.comp.volume_signal": {"input": "price.volume_ratio", "sentinel": 1.0,
                                 "sentinel_before": None, "fallback_value": None},
+    # v0.45.821（用户 2026-11-27 定「逐行闸，不重置」）：iv_rank / iv_percentile 只用**真实自攒 IV 历史**口径的行。
+    # 同一个信号名下有两个量：`hv_proxy` = 当前 HV 在 HV 历史里的排名（已实现波动率，不是 IV）；`real_iv_{N}d` =
+    # 今日 IV 在自攒 IV 历史里的排名（iv_history.IV_RANK_MIN_DAYS = 63 条起才切）。切换是**按票陆续**发生的
+    # （生产库只读计数：11-20 1 只、11-23 4、11-24 11、11-25 22，余 8 只约 12 月初），没有单一边界日，所以不登日期边界
+    # ——那会在评分冻结期把 IC 闸 2/25 重置为 0/25，且边界后几天仍混着 hv_proxy 行。这里按行判：
+    #   · 输入 `options.iv_rank_is_real` 没入档（08-14 前的旧代码，无 iv_rank_source；那时的「IV 历史」是 HV × 常数、
+    #     还被 clamp 过，见 MEMORY alpha-hive-iv-rank）⇒ 排除，827 行 / 75 天；
+    #   · 输入 = 0.0（hv_proxy）⇒ 排除，任何日期，1754 行 / 62 天；
+    #   · 输入 = 1.0 ⇒ 保留，截至 11-25 38 行 / 4 天（都还没到 T+7，探索性 IC 表里暂时看不到这两个信号是预期的）。
+    # final_score 也跨这段混了两种口径（iv_rank 经 OracleBee iv_signal 进分），不在这里处理：记在
+    # experiments/scoring_freeze_queue.md，IC 重跑时按 iv_rank_is_real 做敏感性分析。
+    "options.iv_rank": {"input": "options.iv_rank_is_real", "sentinel": 0.0,
+                        "sentinel_before": None, "fallback_value": None,
+                        "sentinel_label": "HV 代理口径 iv_rank_is_real="},
+    "options.iv_percentile": {"input": "options.iv_rank_is_real", "sentinel": 0.0,
+                              "sentinel_before": None, "fallback_value": None,
+                              "sentinel_label": "HV 代理口径 iv_rank_is_real="},
 }
 
 
@@ -2983,7 +3000,7 @@ def _print_generations(rows: List[Dict], generations: Dict) -> None:
         extra = f"、输入被隔离 {c['quarantined_input']} 行" if c.get("quarantined_input") else ""
         if gate.get("sentinel") is not None:
             when = f"{gate['sentinel_before']} 前" if gate.get("sentinel_before") else "任何日期"
-            extra += f"、{when}的缺失哨兵 {gate['sentinel']:g} {c['sentinel']} 行"
+            extra += f"、{when}的{gate.get('sentinel_label', '缺失哨兵 ')}{gate['sentinel']:g} {c['sentinel']} 行"
         if gate.get("fallback_value") is not None:
             extra += f"、通道恰为回落值 {gate['fallback_value']:g} {c['fallback']} 行"
         print(f"    真实观测闸：{s} 只用 {gate.get('input')} 确实取到的行 —— 保留 {c['kept']}，"

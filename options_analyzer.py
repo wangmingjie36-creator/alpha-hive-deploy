@@ -2974,6 +2974,9 @@ class OptionsAgent:
             try:
                 from cboe_options import fetch_cboe_pc_near_unfiltered
                 pc_near_unfiltered = fetch_cboe_pc_near_unfiltered(ticker)
+                if pc_near_unfiltered is None:   # v0.45.820：CBOE 链上算不出也要留痕，日报那行写「CBOE 链上算不出」
+                    _log.warning("[%s] 不过滤近端 P/C：CBOE 链上算不出（≤45 天无到期日 / call OI 为 0 / payload 不可得），记 None",
+                                 ticker)
             except Exception as _e_pcn:  # noqa: BLE001 - 展示量，失败只记 None
                 _log.warning("[%s] 不过滤近端 P/C 计算失败，记 None：%s", ticker, _e_pcn)
 
